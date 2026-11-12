@@ -1,0 +1,28 @@
+[prefill]
+  prefill prompt    7725 (cached 0) ttft    3.73s prefill   2071.3 tok/s | out    1 decode    n/a tok/s
+  prefill prompt    7704 (cached 0) ttft    3.72s prefill   2070.8 tok/s | out    1 decode    n/a tok/s
+  prefill prompt    7720 (cached 0) ttft    3.73s prefill   2070.7 tok/s | out    1 decode    n/a tok/s
+[decode]
+  decode  prompt      64 (cached 0) ttft    0.24s prefill    264.8 tok/s | out  256 decode   64.6 tok/s
+  decode  prompt      64 (cached 0) ttft    0.24s prefill    265.3 tok/s | out  256 decode   58.0 tok/s
+  decode  prompt      64 (cached 0) ttft    0.24s prefill    266.7 tok/s | out  256 decode   61.9 tok/s
+[multi]
+  multi x1 rep0: aggregate 66.2 tok/s, mean per-stream 66.2, errors 0
+  multi x1 rep1: aggregate 57.0 tok/s, mean per-stream 57.0, errors 0
+  multi x1 rep2: aggregate 59.4 tok/s, mean per-stream 59.4, errors 0
+  multi x4 rep0: aggregate 117.2 tok/s, mean per-stream 31.5, errors 0
+  multi x4 rep1: aggregate 114.4 tok/s, mean per-stream 30.7, errors 0
+  multi x4 rep2: aggregate 115.7 tok/s, mean per-stream 30.8, errors 0
+
+summary (medians):
+  prefill.8000.ttft_s                  3.73
+  prefill.8000.tok_s                   2070.8
+  decode.tok_s                         61.88
+  decode.ttft_s                        0.24
+  decode.accepted_over_drafted         None
+  multi.1.aggregate_tok_s              59.37
+  multi.1.per_stream_tok_s             59.37
+  multi.4.aggregate_tok_s              115.66
+  multi.4.per_stream_tok_s             30.76
+  errors                               0
+wrote runs/matrix/fixk3.bench.json

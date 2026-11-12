@@ -1,0 +1,315 @@
+From 0000000000000000000000000000000000000103 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 09:12:14 -0800
+Subject: [PATCH] dsv41: TF_DS_DRAFT_DEPTH2=1 pins every head draft to 2 (a
+ benchmark switch)
+
+The round loop prices each draft from the load-time table and the rounds it
+measures (core/lanes/depth.zig's Rule), and T25 calibrates a stream's realised
+survival into that price. That makes a depth curve hard to read: the depth a
+round drafts is whatever the rule decides, not the depth under test.
+
+This adds a benchmark pin: with TF_DS_DRAFT_DEPTH2=1 every head draft a round
+asks for is 2, whatever the rule prices, in the first round after a prompt
+(openDepth) and in every later one (headDepth, budgets), and the round's window
+verifies 2 of them (windows.allocate) instead of trimming them by chance and
+cost. Copies, forced rows and a finished stream are unchanged; the checkpoint's
+own draft count and the stream's room clamp the pin. Greedy replies keep their
+bits (a pinned draft is verified by the same accept/reject path); a sampled
+stream's draws can differ.
+
+Off unless set. The next patches add the 3, 4 and 5 toggles; at most one may be
+on, and two at once refuse the start (error.BadDraftPin).
+---
+ zig/src/core/lanes/config.zig     | 12 ++++++++
+ zig/src/core/lanes/depth.zig      | 48 ++++++++++++++++++++++++++++++-
+ zig/src/core/lanes/engine.zig     |  1 +
+ zig/src/core/lanes/windows.zig    | 20 +++++++++++++
+ zig/src/families/dsv41/lanes.zig  | 30 +++++++++++++++++++
+ zig/src/families/dsv41/native.zig |  5 ++++
+ 6 files changed, 115 insertions(+), 1 deletion(-)
+
+diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
+index c948c9ae..4a0e3ef3 100644
+--- a/zig/src/core/lanes/config.zig
++++ b/zig/src/core/lanes/config.zig
+@@ -15,6 +15,7 @@ pub const Model = struct {
+     solo_head_overhead_ms: ?f64 = null, // fixed overhead for a lone head window; null keeps the live estimate
+     draft_cal: f64 = 0.0, // the weight of a round in each stream's realised-over-predicted draft survival (0: off)
+     cal_log: u32 = 0, // print every n-th calibrated verify of a stream to stderr (0: off)
++    draft_pin: ?u32 = null, // a benchmark pin of every head draft's depth (TF_DS_DRAFT_DEPTH2; null: the rule decides)
+     copy_proposals: bool = true, // suffix-lookup copy windows; false opts a backend out
+     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
+     first_copy_rows: u32 = 0, // a lone stream's first copy window (0: the exact width)
+@@ -42,6 +43,7 @@ pub const Config = struct {
+     solo_head_overhead_ms: ?f64 = null, // fixed overhead for a lone head window; null keeps the live estimate
+     draft_cal: f64 = 0.0, // Model.draft_cal
+     cal_log: u32 = 0, // Model.cal_log
++    draft_pin: ?u32 = null, // Model.draft_pin
+     copy_proposals: bool = true, // suffix-lookup copy windows; false opts a backend out
+     family_width: u32,
+     max_copy: u32,
+@@ -75,6 +77,7 @@ pub const Config = struct {
+ 
+     pub fn init(gpa: Allocator, m: Model, max_rows: u32, max_draft: u32) !Config {
+         if (!std.math.isFinite(m.draft_cal) or m.draft_cal < 0.0 or m.draft_cal > 1.0) return error.BadDraftCal;
++        if (m.draft_pin) |n| if (n < 1 or n > 32) return error.BadDraftPin;
+         if (max_rows < 1) return error.BadMaxRows;
+         if (m.solo_head_overhead_ms) |cost| {
+             if (!std.math.isFinite(cost) or cost < 0.0) return error.BadSoloHeadOverhead;
+@@ -131,6 +134,7 @@ pub const Config = struct {
+             .solo_head_overhead_ms = m.solo_head_overhead_ms,
+             .draft_cal = m.draft_cal,
+             .cal_log = m.cal_log,
++            .draft_pin = m.draft_pin,
+             .copy_proposals = m.copy_proposals,
+         };
+     }
+@@ -143,6 +147,14 @@ pub const Config = struct {
+     }
+ };
+ 
++test "a depth pin must be a positive depth" {
++    const a = std.testing.allocator;
++    try std.testing.expectError(error.BadDraftPin, Config.init(a, .{ .draft_pin = 0 }, 16, 15));
++    var c = try Config.init(a, .{ .draft_pin = 2 }, 16, 15);
++    defer c.deinit(a);
++    try std.testing.expectEqual(@as(?u32, 2), c.draft_pin);
++}
++
+ test "setup derives widths like Python" {
+     const gpa = std.testing.allocator;
+     var c = try Config.init(gpa, .{ .exact_width = 64, .first_copy_rows = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .drafts = 4, .hidden_rows = true, .batch_rows = 128, .max_streams = 64 }, 64, 63);
+diff --git a/zig/src/core/lanes/depth.zig b/zig/src/core/lanes/depth.zig
+index e3653cfe..1ce2dbdd 100644
+--- a/zig/src/core/lanes/depth.zig
++++ b/zig/src/core/lanes/depth.zig
+@@ -56,6 +56,7 @@ pub const Rule = struct {
+     plain_guard: bool,
+     node_probabilities: bool,
+     batch_rows: u32,
++    pin: ?u32 = null, // a benchmark pin of every head draft's depth (TF_DS_DRAFT_DEPTH2; null: the rule decides)
+     round_ms: Table = .{}, // a round's wall time by drafts, shared by every stream
+     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
+ 
+@@ -72,6 +73,13 @@ pub const Rule = struct {
+         return who.state.*.?.p;
+     }
+ 
++    /// A benchmark pin of a stream's head drafts (TF_DS_DRAFT_DEPTH2): the depth clamped by the family's most drafts
++    /// and the stream's room; null: the rule decides.
++    fn pinned(r: *const Rule, who: Who) ?i64 {
++        const n = r.pin orelse return null;
++        return @min(@as(i64, @intCast(n)), @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1)));
++    }
++
+     /// Draft j was tried when drafts 1 .. j - 1 were kept; its estimate moves toward whether it was kept.
+     pub fn observeDepth(r: *Rule, who: Who, proposed: i64, accepted: i64) !void {
+         const p = try r.rates(who);
+@@ -128,6 +136,7 @@ pub const Rule = struct {
+     pub fn depth(r: *Rule, who: Who) !i64 {
+         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
+         if (most <= 0) return 0;
++        if (r.pinned(who)) |d| return d;
+         const p = try r.rates(who);
+         if (r.family_costs.empty()) {
+             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
+@@ -169,6 +178,7 @@ pub const Rule = struct {
+     /// every later round (no round of the stream is measured yet, and the learned tables are empty after boot: the
+     /// first request after boot would otherwise draft shallower than the same request warm).
+     pub fn openDepth(r: *Rule, who: Who) !i64 {
++        if (r.pinned(who)) |d| return d;
+         if (r.node_probabilities) return @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
+         return r.depth(who);
+     }
+@@ -185,7 +195,7 @@ pub const Rule = struct {
+ 
+     /// Python `_head_depth`: the next round's head drafts for a stream (0 when forced, 1 with a copy ahead).
+     pub fn headDepth(r: *Rule, who: *const Who, budget: ?i64, probe: Probe) !i64 {
+-        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.node_probabilities)
++        const d: i64 = if (who.finished) 0 else if (r.pinned(who.*)) |p| p else if (budget) |b| b else if (r.node_probabilities)
+             @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1))
+         else
+             try r.depth(who.*);
+@@ -196,6 +206,10 @@ pub const Rule = struct {
+ 
+     /// Head drafts for the streams of a shared round, sized by allocation over their chain chances.
+     pub fn budgets(r: *Rule, whos: []Who, probe: Probe, out: []i64) !void {
++        if (r.pin != null) {
++            for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
++            return;
++        }
+         if (r.node_probabilities) {
+             for (whos, out) |*w, *o| {
+                 const inner = try r.headDepth(w, null, probe);
+@@ -303,3 +317,35 @@ test "the first drafts after a prompt take the head's depth with node probabilit
+         }
+     }
+ }
++
++test "a depth pin takes every head draft to the pinned depth" {
++    const gpa = std.testing.allocator;
++    var fc: Table = .{};
++    defer fc.deinit(gpa);
++    const served = [_]f64{ 25.72, 28.72, 31.72, 33.38, 34.29, 35.17 };
++    for (served, 1..) |ms, w| try fc.put(gpa, @intCast(w), ms);
++    const shared: Table = .{};
++    const prior = [_]f64{ 0.5, 0.4, 0.3, 0.2, 0.1 }; // unpinned, this prices depth 1
++    var rule: Rule = .{ .gpa = gpa, .prior = &prior, .most_drafts = 5, .family_costs = &fc, .shared_costs = &shared, .mtp_step_ms = 3.5, .plain_guard = false, .node_probabilities = true, .batch_rows = 16, .pin = 2 };
++    defer rule.deinit();
++    var st: ?State = null;
++    defer if (st) |*s| s.deinit(gpa);
++    const who: Who = .{ .state = &st, .draft_room = 160, .finished = false, .forced = false };
++    try std.testing.expectEqual(@as(i64, 2), try rule.openDepth(who));
++    try std.testing.expectEqual(@as(i64, 2), try rule.headDepth(&who, null, noCopy));
++    var whos = [_]Who{ who, who };
++    var out: [2]i64 = undefined;
++    try rule.budgets(&whos, noCopy, &out);
++    try std.testing.expectEqualSlices(i64, &.{ 2, 2 }, &out);
++    var finished = who;
++    finished.finished = true;
++    try std.testing.expectEqual(@as(i64, 0), try rule.headDepth(&finished, null, noCopy));
++    rule.pin = 9;
++    try std.testing.expectEqual(@as(i64, 5), try rule.openDepth(who)); // clamped by the family's most drafts
++}
++
++const noCopy: Probe = .{ .ptr = undefined, .copy = noCopyFn };
++
++fn noCopyFn(_: *anyopaque, _: *const Who) bool {
++    return false;
++}
+diff --git a/zig/src/core/lanes/engine.zig b/zig/src/core/lanes/engine.zig
+index 97e6e976..b695338f 100644
+--- a/zig/src/core/lanes/engine.zig
++++ b/zig/src/core/lanes/engine.zig
+@@ -63,6 +63,7 @@ pub const Engine = struct {
+                 .plain_guard = cfg.plain_guard,
+                 .node_probabilities = cfg.node_probabilities,
+                 .batch_rows = cfg.batch_rows,
++                .pin = cfg.draft_pin,
+             },
+         };
+     }
+diff --git a/zig/src/core/lanes/windows.zig b/zig/src/core/lanes/windows.zig
+index 0b1a9688..6e6464e9 100644
+--- a/zig/src/core/lanes/windows.zig
++++ b/zig/src/core/lanes/windows.zig
+@@ -178,6 +178,11 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
+     }
+     const overhead = soloHeadOverhead(e.cfg.solo_head_overhead_ms, e.rule.overheadMs(plans.len), e.alone, plans.len, if (plans.len > 0) plans[0].kind else .none);
+     const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, overhead, @max(plans.len, e.cfg.batch_rows));
++    if (e.rule.pin) |pin| {
++        for (plans, probs, counts) |p, chances, *c| {
++            if (pinnedHead(pin, p.kind, chances.len)) |n| c.* = n;
++        }
++    }
+     for (plans, probs, counts, raw) |*p, chances, c, rw| {
+         if (p.kind == .head) p.stream.granted = c;
+         if (e.cfg.draft_cal > 0.0) p.stream.predict(if (p.kind == .head) rw[0..c] else &.{});
+@@ -258,6 +263,21 @@ fn soloHeadOverhead(fixed: ?f64, observed: f64, alone: bool, streams: usize, kin
+     if (alone and streams == 1 and kind == .head) return fixed orelse observed;
+     return observed;
+ }
++
++/// The rows a head plan verifies under a benchmark pin (TF_DS_DRAFT_DEPTH2): the pinned number of its held drafts, never
++/// past them. Null: the allocation decides (every other kind keeps its own rows).
++fn pinnedHead(pin: u32, kind: Kind, chances: usize) ?u32 {
++    if (kind != .head) return null;
++    return @min(pin, @as(u32, @intCast(chances)));
++}
++
++test "a pin takes a head plan to the pinned rows and leaves the others to the allocation" {
++    try std.testing.expectEqual(@as(?u32, 2), pinnedHead(2, .head, 5));
++    try std.testing.expectEqual(@as(?u32, 5), pinnedHead(9, .head, 5)); // never past the drafts the backend holds
++    for ([_]Kind{ .copy, .forced, .fill, .none }) |kind| {
++        try std.testing.expectEqual(@as(?u32, null), pinnedHead(2, kind, 5));
++    }
++}
+ test "fixed cost excludes shared, copied, forced and unconfigured windows" {
+     try std.testing.expectEqual(@as(f64, 3.5), soloHeadOverhead(3.5, 8.0, true, 1, .head));
+     try std.testing.expectEqual(@as(f64, 8.0), soloHeadOverhead(null, 8.0, true, 1, .head));
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index b654e3be..c780bea3 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -396,6 +396,28 @@ pub fn parseCalWeight(text: []const u8) !f64 {
+     return v;
+ }
+ 
++/// A benchmark depth toggle: its environment name and the depth it pins (TF_DS_DRAFT_DEPTH2).
++pub const DepthPin = struct { name: [:0]const u8, depth: u32 };
++
++/// The benchmark depth pins, one a patch (0103-0106): at most one may be on.
++pub const depth_pins = [_]DepthPin{
++    .{ .name = "TF_DS_DRAFT_DEPTH2", .depth = 2 },
++};
++
++/// The pin from the toggles' values ("1" on; unset, empty or "0" off), refusing two at once.
++pub fn parseDepthPin(vals: []const ?[]const u8) !?u32 {
++    if (vals.len != depth_pins.len) return error.BadDraftPin;
++    var pin: ?u32 = null;
++    for (depth_pins, vals) |d, v| {
++        const s = v orelse continue;
++        const t = std.mem.trim(u8, s, " ");
++        if (t.len == 0 or std.mem.eql(u8, t, "0")) continue;
++        if (pin != null) return error.BadDraftPin;
++        pin = d.depth;
++    }
++    return pin;
++}
++
+ /// A stream's place in the pool and the drafts it holds; TF_DS_KV_SHARD: its planner stream, part and generation
+ /// (parts.zig's Live), and whether its first decode round ran (planDecode).
+ const Lane = struct {
+@@ -500,6 +522,7 @@ pub const Lanes = struct {
+     solo_overhead: bool = false, // TF_DS_SOLO_OVERHEAD=1: a lone drafted stream's head windows cost the fixed draft allowance
+     draft_cal: f64 = 0.0, // TF_DS_T25_DRAFT_CAL: the weight of a round in each stream's draft-survival calibration (0: off)
+     cal_log: u32 = 0, // TF_DS_T25_CAL_LOG: every n-th calibrated verify of a stream prints to stderr (0: off)
++    draft_pin: ?u32 = null, // TF_DS_DRAFT_DEPTH2: a benchmark pin of every head draft's depth (null: the rule decides)
+     no_copies: bool = false, // TF_DS_NO_COPIES=1: a drafted stream proposes no suffix-lookup copy windows
+     drawn: [ring]u32 = undefined,
+     next: u64 = 0,
+@@ -571,6 +594,7 @@ pub const Lanes = struct {
+             .solo_head_overhead_ms = if (drafting and self.solo_overhead) draft.draft_ms else null, // opt-in: the Python engine's fixed draft allowance
+             .draft_cal = self.draft_cal,
+             .cal_log = self.cal_log,
++            .draft_pin = self.draft_pin,
+             .copy_proposals = !(drafting and self.no_copies), // opt-in: the draft head proposes; the Python engine makes no copies either
+             .streams_exact = true,
+             .hidden_rows = true,
+@@ -2159,6 +2183,12 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+     }
+ }
+ 
++test "one depth toggle at a time pins the depth" {
++    try std.testing.expectEqual(@as(?u32, null), try parseDepthPin(&[_]?[]const u8{null}));
++    try std.testing.expectEqual(@as(?u32, null), try parseDepthPin(&[_]?[]const u8{"0"}));
++    try std.testing.expectEqual(@as(?u32, 2), try parseDepthPin(&[_]?[]const u8{"1"}));
++}
++
+ test "a calibration weight parses to a finite value in 0..1" {
+     try std.testing.expectEqual(@as(f64, 0.5), try parseCalWeight(" 0.5 "));
+     try std.testing.expectEqual(@as(f64, 1.0), try parseCalWeight("1"));
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 2242c523..32c4b25c 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -45,6 +45,8 @@
+ //!   TF_DS_T25_DRAFT_CAL                         a weight in (0, 1]: each stream's draft survival is scaled by its realised over
+ //!                                               predicted drafts (unset or 0: off; core/lanes/windows.zig)
+ //!   TF_DS_T25_CAL_LOG                           print every n-th calibrated verify of a stream to stderr (unset or 0: off)
++//!   TF_DS_DRAFT_DEPTH2=1                        a benchmark pin: every head draft is 2 deep, whatever the rule prices (unset or 0:
++//!                                               the rule; the checkpoint's draft count clamps it)
+ //!   TF_DS_NO_COPIES=1                           a drafted stream proposes no suffix-lookup copy windows
+ //!   TF_DS_POOL=P, TF_DS_WINDOW=W                (0008, pool.zig) the pool's positions, every stream's extents
+ //!                                               together (unset: the context), and the window a request may use
+@@ -278,6 +280,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     st.lanes.solo_overhead = if (getenv("TF_DS_SOLO_OVERHEAD")) |v| !std.mem.eql(u8, v, "0") else false;
+     st.lanes.draft_cal = if (getenv("TF_DS_T25_DRAFT_CAL")) |v| lanes_mod.parseCalWeight(v) catch return error.BadDraftCal else 0.0;
+     st.lanes.cal_log = if (getenv("TF_DS_T25_CAL_LOG")) |v| std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch return error.BadCalLog else 0;
++    var pins: [lanes_mod.depth_pins.len]?[]const u8 = undefined;
++    inline for (lanes_mod.depth_pins, 0..) |d, i| pins[i] = getenv(d.name);
++    st.lanes.draft_pin = lanes_mod.parseDepthPin(&pins) catch return error.BadDraftPin;
+     st.lanes.no_copies = if (getenv("TF_DS_NO_COPIES")) |v| !std.mem.eql(u8, v, "0") else false;
+     // a vision checkpoint's tower on this rank, from the kit's vision/ (torch's attention cubin, the routing bias)
+     st.vision = null;

@@ -1,0 +1,481 @@
+From 0b41148f8871e4d314a49544b400481cf9545459 Mon Sep 17 00:00:00 2001
+From: MiaAI-Lab <MiaAI-Lab@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 22:09:41 -0800
+Subject: [PATCH] dsv41: TF_DS_ENGRAM_METRICS times every read of Engram's
+ table rows and publishes tensorfold:engram_lookup_seconds on /metrics (on by
+ default)
+
+Engram's rows are read from the tables on the host before an Engram layer's projection: a decode round reads
+~70 random 4 KiB rows a stream, and a cold prompt reads 2 x 12 x 2,048 rows a chunk (~0.07 s by AIO where the
+pool's preads take ~0.5 s on one GB10). That I/O is where a slow disk or a table copy shows up, and /metrics had
+no sign of it: --profile's engram_read_ms is a per-round average printed at exit, and the per-request fields
+carry no split.
+
+The timing is on by default; TF_DS_ENGRAM_METRICS=0 turns it off, as TF_DS_LOAD_PREFETCH's 0 does (every other
+value and unset leave it on). Each read of the tables is timed (the pool's gather or the AIO batch's
+submit-and-wait) into an atomic histogram in the Engram host: a decode round's, a prompt chunk's read-ahead, and
+TF_DS_ENGRAM_LEAD's reader threads. The lane host copies it on its engine thread (as it does the cache and KV
+counters), Status.engram carries it, and /metrics renders tensorfold:engram_lookup_seconds (buckets 1 ms .. 10 s,
++Inf past 10 s) with _sum and _count. With TF_DS_ENGRAM_METRICS=0: no clock read, no metric, every path as before.
+
+The histogram covers this rank's reads (rank 0's, the one serving /metrics): the ranks split the hash columns,
+so each reads its own half. --profile's prefill split (pstamp synchronizes the stream) is now gated on its own
+flag so the timing alone does not slow a prompt pass.
+
+Also fixes 0051's decodeLaunches test calls for 0053's `places` argument: the dsv41 module's host tests did not
+compile after both patches, so this patch's tests could not run.
+
+Not served on a pair yet: host tests only (no pair had the metric on). The timing's own cost is two clock reads a
+table read, against an I/O of milliseconds.
+
+Tests: prompt.zig (the switch's values; the buckets and the sum, past every edge), metrics.zig (the histogram
+present with the stats, absent without), zig/tests/server/zig_test.sh (177 pass), zig build test (487/488, the
+one failure lane_host's prefill-interleave test, which fails the same way on the unpatched series and passes on a
+rerun).
+---
+ zig/src/core/engine_api.zig             | 23 +++++++++
+ zig/src/core/lane_host.zig              | 10 ++++
+ zig/src/families/dsv41/engram_lead.zig  |  3 ++
+ zig/src/families/dsv41/exl3_experts.zig |  8 +--
+ zig/src/families/dsv41/lanes.zig        | 10 ++++
+ zig/src/families/dsv41/lanes_main.zig   | 10 +++-
+ zig/src/families/dsv41/model.zig        |  5 ++
+ zig/src/families/dsv41/native.zig       |  5 +-
+ zig/src/families/dsv41/prompt.zig       | 66 ++++++++++++++++++++++++-
+ zig/src/families/dsv41/round.zig        |  1 +
+ zig/src/native/cuda.zig                 |  3 ++
+ zig/src/server/metrics.zig              | 30 +++++++++++
+ 12 files changed, 166 insertions(+), 8 deletions(-)
+
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index 0bd41ab9..a24dc71d 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -228,6 +228,27 @@ pub const Spill = struct {
+     }
+ };
+ 
++/// TF_DS_ENGRAM_METRICS (on; `0` turns it off): the latencies of the engine's reads of Engram's table rows (a decode round's, a prompt
++/// chunk's, a read-ahead's or TF_DS_ENGRAM_LEAD's), as a histogram for /metrics; read from HTTP threads as one copy
++/// (LaneHost publishes it on its engine thread). Null in Status unless the switch is on.
++pub const EngramStats = struct {
++    /// Reads per bucket (seconds), the last the ones past every edge.
++    counts: [bucket_edges.len + 1]u64 = @splat(0),
++    /// Seconds the reads summed to.
++    total: f64 = 0,
++    /// Reads counted.
++    n: u64 = 0,
++
++    pub const bucket_edges = [_]f64{ 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0 };
++    pub const help = "Seconds a read of Engram's table rows took, one observation per read (a decode round's, a prompt chunk's or a read-ahead's).";
++};
++
++/// Where an engine's Engram read timing comes from (read on the engine thread, as MemorySource is).
++pub const EngramSource = struct {
++    ctx: *anyopaque,
++    read: *const fn (ctx: *anyopaque, out: *EngramStats) void,
++};
++
+ /// The prompt cache's counters for /health and /metrics, read from HTTP threads as one copy (LaneHost publishes it on
+ /// its engine thread). Null in Status unless a tier or grouping is on. Totals unless in `gauges`.
+ pub const CacheStats = struct {
+@@ -353,6 +374,8 @@ pub const Status = struct {
+     generation_tokens: u64 = 0,
+     /// The prompt cache's counters, when its tier or grouping is on.
+     cache: ?CacheStats = null,
++    /// The Engram table reads' latency histogram (TF_DS_ENGRAM_METRICS; null: `0`).
++    engram: ?EngramStats = null,
+     /// KV ownership's counters and parts (a backend that shards its pool over the ranks: dsv41's TF_DS_KV_SHARD).
+     kv_parts: ?KvParts = null,
+     /// The rank pair's robustness counters and state (a backend with a broken-pair policy, or the prompt cache's
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index 233d62fa..b69dfc4d 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -91,6 +91,9 @@ pub const LaneHost = struct {
+     /// A backend's KV-ownership stats (its parts), read on the engine thread at each noteLive, published as `kv_tele`.
+     kv_parts: ?lanes.kv_parts.Source = null,
+     kv_tele: ?api.KvParts = null,
++    /// A backend's Engram table-read latencies (TF_DS_ENGRAM_METRICS; `0` turns them off), read and published as `engram_tele`.
++    engram: ?api.EngramSource = null,
++    engram_tele: ?api.EngramStats = null,
+     // -- a broken rank pair (the backend's policy, set before start; null: off, nothing below runs) ---------------
+     pair: ?PairPolicy = null,
+     pair_state: std.atomic.Value(u8) = .init(0), // 0 whole, 1 a cause being recorded, 2 broken (why/drain/since set)
+@@ -416,6 +419,7 @@ pub const LaneHost = struct {
+             .generation_tokens = h.live_generated,
+             .cache = h.tele,
+             .kv_parts = h.kv_tele,
++            .engram = h.engram_tele,
+             .pair = h.pairStatus(now),
+         };
+     }
+@@ -946,6 +950,11 @@ pub const LaneHost = struct {
+             parts = .{};
+             src.read(src.ctx, &parts.?);
+         }
++        var eng: ?api.EngramStats = null;
++        if (h.engram) |src| {
++            eng = .{};
++            src.read(src.ctx, &eng.?);
++        }
+         h.lock();
+         defer h.unlock();
+         h.live_tokens.clearRetainingCapacity();
+@@ -956,6 +965,7 @@ pub const LaneHost = struct {
+         };
+         if (tele) |t| h.tele = t;
+         if (parts) |p| h.kv_tele = p;
++        if (eng) |e| h.engram_tele = e;
+     }
+ 
+     /// The filling job's next piece, when its turn has come; its first tokens once its prompt pass ends.
+diff --git a/zig/src/families/dsv41/engram_lead.zig b/zig/src/families/dsv41/engram_lead.zig
+index eda26974..45f05cd0 100644
+--- a/zig/src/families/dsv41/engram_lead.zig
++++ b/zig/src/families/dsv41/engram_lead.zig
+@@ -98,7 +98,10 @@ fn read1(eh: *EngramHost, c: *const Config, seq: []const i32, start: usize, n: u
+     for (0..n) |r| {
+         for (0..k) |q| eh.ahead_flat[j][r * k + q] = hs[(r * eh.hasher.layers + j) * cols + eh.lo + q];
+     }
++    const timed = eh.metrics;
++    const t0 = if (timed) prompt.readStamp(eh) else 0;
+     try prompt.aioGather(ring, t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s]);
++    if (timed) eh.reads.observe(prompt.readStamp(eh) - t0);
+     engram.decodeRows(eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], eh.ahead_rows[j][0 .. m * t.row_w], m, t.row_w, t.row_s, 8);
+     eh.lead_ready[j] = true;
+ }
+diff --git a/zig/src/families/dsv41/exl3_experts.zig b/zig/src/families/dsv41/exl3_experts.zig
+index e6816d09..a6100908 100644
+--- a/zig/src/families/dsv41/exl3_experts.zig
++++ b/zig/src/families/dsv41/exl3_experts.zig
+@@ -473,19 +473,19 @@ test "a TP2 DeepSeek-V4.1 rank's decode scratch and windows" {
+ test "a decode window under the scratch's rows, up to the kernel's member list" {
+     const ex: weights.Experts = .{ .trellis = 0, .gate_ptr = 0, .up_ptr = 0, .down_ptr = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .count = 385, .dims = 5120, .width = 1152, .down_k = 1152, .down_n = 5120, .k2_gu = .{ 6, 10 }, .k2_d = .{ 6, 10 } };
+     var sc: DecodeScratch = .{ .rows = 100, .slots = 7, .xg = 0, .xu = 0, .xd = 0, .z = 0, .y = 0, .cnt_gu = 0, .cnt_d = 0, .epoch = 0, .ready = 0, .ready_cnt = 0, .ids = 0, .count = 0, .members = 0 };
+-    for ([_]usize{ 0, 100, 101, 128 }) |r| try std.testing.expectError(error.NotADecodeWindow, decodeLaunches(ex, sc, 0, 5120, 0, 0, 0, r, 10));
++    for ([_]usize{ 0, 100, 101, 128 }) |r| try std.testing.expectError(error.NotADecodeWindow, decodeLaunches(ex, sc, 0, 5120, 0, 0, 0, r, 10, null));
+     for ([_]usize{ 1, 63, 64, 99 }) |r| {
+-        const ls = try decodeLaunches(ex, sc, 0, 5120, 0, 0, 0, r, 10);
++        const ls = try decodeLaunches(ex, sc, 0, 5120, 0, 0, 0, r, 10, null);
+         // a place's member tiles: gate / up's z holds 2 * splits * tiles, down's tiles
+         try std.testing.expectEqual(@as(u32, @intCast(2 * 4 * ((r + 15) / 16))), ls[1].cfg.grid.z);
+         try std.testing.expectEqual(@as(u32, @intCast((r + 15) / 16)), ls[2].cfg.grid.z);
+     }
+     // 127 rows: eight member tiles, the most the scratch of 128 rows serves
+     sc.rows = 128;
+-    const wide = try decodeLaunches(ex, sc, 0, 5120, 0, 0, 0, 127, 10);
++    const wide = try decodeLaunches(ex, sc, 0, 5120, 0, 0, 0, 127, 10, null);
+     try std.testing.expectEqual(@as(u32, 64), wide[1].cfg.grid.z);
+     try std.testing.expectEqual(@as(u32, 8), wide[2].cfg.grid.z);
+-    try std.testing.expectError(error.NotADecodeWindow, decodeLaunches(ex, sc, 0, 5120, 0, 0, 0, 128, 10));
++    try std.testing.expectError(error.NotADecodeWindow, decodeLaunches(ex, sc, 0, 5120, 0, 0, 0, 128, 10, null));
+     // the kernel takes no more than 128 member rows whatever the scratch holds
+     sc.rows = 200;
+     try std.testing.expect(!isWindow(sc, 129));
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 9e2720e3..b654e3be 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -14,6 +14,7 @@
+ //! same kernels and collectives in the same order. The drafted reply is the serial one: every row is drawn with its
+ //! stream's key at its own position, whatever the round's composition.
+ const std = @import("std");
++const api = @import("engine_api");
+ const lanes = @import("lanes");
+ const model = @import("model.zig");
+ const round = @import("round.zig");
+@@ -806,6 +807,15 @@ pub const Lanes = struct {
+         self.kv_stats = out.*;
+     }
+ 
++    /// TF_DS_ENGRAM_METRICS: the Engram table reads' latency histogram for /metrics (native.Loaded.engram: the host
++    /// reads it on its engine thread, in noteLive).
++    pub fn engramStatsFn(ptr: *anyopaque, out: *api.EngramStats) void {
++        const self = of(ptr);
++        const eh = self.m.eh orelse return;
++        if (!eh.metrics) return;
++        out.* = eh.reads.snapshot();
++    }
++
+     /// How stale /health's parts' stats may be (kvPartsFn).
+     const kv_stats_ns: u64 = 250 * std.time.ns_per_ms;
+ 
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 5ea01c31..2fd11e06 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -224,7 +224,10 @@ pub fn main(init: std.process.Init) !u8 {
+     if (o.rank != 0) {
+         if (profile) {
+             m.prof = true;
+-            if (m.eh) |*eh| eh.io = io;
++            if (m.eh) |*eh| {
++                eh.io = io;
++                eh.profile = true;
++            }
+             if (phases) try m.usePhaseTimer();
+             try m.useClock(clock_marks);
+         }
+@@ -316,7 +319,10 @@ pub fn main(init: std.process.Init) !u8 {
+     if (profile) {
+         ln.prof = .{};
+         m.prof = true;
+-        if (m.eh) |*eh| eh.io = io;
++        if (m.eh) |*eh| {
++            eh.io = io;
++            eh.profile = true;
++        }
+         if (phases) try m.usePhaseTimer();
+         try m.useClock(clock_marks);
+     }
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index a9d847cf..3bc70251 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -464,6 +464,11 @@ pub const Model = struct {
+             m.tables = try engram_io.Tables.open(gpa, io, edir);
+             m.epool = try engram_io.Pool.init(gpa, io, 64);
+             m.eh = try prompt.EngramHost.init(a, c, engram.Hasher.init(c.*, map, mult), &m.tables.?, m.epool.?, sp.rank, sp.world, chunk_rows);
++            // TF_DS_ENGRAM_METRICS (on; 0 turns it off): every table read timed for /metrics (the clock; --profile's p_* split stays off)
++            if (prompt.metricsEnabled(if (std.c.getenv("TF_DS_ENGRAM_METRICS")) |v| std.mem.span(v) else null)) {
++                m.eh.?.io = io;
++                m.eh.?.metrics = true;
++            }
+             if (o.engram_aio) {
+                 // a round's reads, 2 x 12 x its rows at most: 1,024 slots for each 16 rows of the round-row setting
+                 m.aio = try engram_aio.Aio.init(gpa, io, 1024 * ((o.round_rows + 15) / 16));
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index c90da440..2242c523 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -141,6 +141,8 @@ pub const Loaded = struct {
+     replay: u32 = 0,
+     /// TF_DS_KV_SHARD: the parts' counters and rows for /health and /metrics (null: the switch off).
+     kv_parts: ?lanes.kv_parts.Source = null,
++    /// TF_DS_ENGRAM_METRICS: the Engram table reads' latency histogram for /metrics (null: `0`).
++    engram: ?api.EngramSource = null,
+     /// The broken-pair policy's hooks (TF_DS_PAIR_BROKEN, exit by default; null: degrade). `ctx` is `ctx`.
+     pair: ?Pair = null,
+     /// Whether the model's stream is free of a CUDA graph capture (the lane host's service fence), with `ctx`.
+@@ -292,9 +294,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+         tier = st.lanes.spill.?.tier();
+     }
+     const kv_parts: ?lanes.kv_parts.Source = if (st.m.kvs != null) .{ .ctx = &st.lanes, .read = L.kvPartsFn } else null;
++    const engram: ?api.EngramSource = if (st.m.eh != null and st.m.eh.?.metrics) .{ .ctx = &st.lanes, .read = L.engramStatsFn } else null;
+     const pair: ?Pair = if (pair_mode == .exit) .{ .watch = pairWatch, .abort = pairAbort } else null;
+     if (pair != null) std.log.info("dsv41: a broken rank pair ends this server with status {d} for a restart of both ranks (TF_DS_PAIR_BROKEN=degrade: requests fail one by one instead)", .{api.LaneHost.pair_exit_code});
+-    return .{ .backend = st.lanes.backend(), .facts = st.lanes.facts(), .rows = @intCast(st.m.eng.round_rows), .stream_bytes = 0, .ctx = st, .deinit = deinitFn, .snaps = snaps, .vision = if (st.vision) |v| v.hook() else null, .window = window, .tier = tier, .grid = model.chunk_rows, .replay = @intCast(st.m.cfg.window), .kv_parts = kv_parts, .pair = pair, .quiet = quietFn };
++    return .{ .backend = st.lanes.backend(), .facts = st.lanes.facts(), .rows = @intCast(st.m.eng.round_rows), .stream_bytes = 0, .ctx = st, .deinit = deinitFn, .snaps = snaps, .vision = if (st.vision) |v| v.hook() else null, .window = window, .tier = tier, .grid = model.chunk_rows, .replay = @intCast(st.m.cfg.window), .kv_parts = kv_parts, .engram = engram, .pair = pair, .quiet = quietFn };
+ }
+ 
+ // -- the broken-pair policy (robustness, docs/port/robustness.md) ------------------------------------------------
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index ba840641..aca43480 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -11,6 +11,7 @@
+ //! Not yet: ring mode (verify windows), a pool that leaves blocks out, a chunk starting inside a compressor group;
+ //! those return error.NotPortedYet.
+ const std = @import("std");
++const api = @import("engine_api");
+ const cuda = @import("cuda");
+ const Config = @import("config.zig").Config;
+ const weights = @import("weights.zig");
+@@ -1401,6 +1402,42 @@ fn routeSpans(e: *const Engine, ch: *Chunk, lay: weights.Layer, shared_id: usize
+     }
+ }
+ 
++/// TF_DS_ENGRAM_METRICS=0 turns the read timing off (on by default, as TF_DS_LOAD_PREFETCH is).
++pub fn metricsEnabled(v: ?[]const u8) bool {
++    return !std.mem.eql(u8, v orelse "1", "0");
++}
++
++/// TF_DS_ENGRAM_METRICS (on; `0` turns it off): every read of Engram's table rows timed into api.EngramStats'
++/// buckets, on atomics because the prompt's read-ahead and TF_DS_ENGRAM_LEAD's readers record off the engine thread.
++pub const ReadTiming = struct {
++    counts: [api.EngramStats.bucket_edges.len + 1]std.atomic.Value(u64) = @splat(std.atomic.Value(u64).init(0)),
++    ns: std.atomic.Value(u64) = .init(0),
++    n: std.atomic.Value(u64) = .init(0),
++
++    pub fn observe(t: *ReadTiming, ns: u64) void {
++        const s: f64 = @as(f64, @floatFromInt(ns)) / 1e9;
++        var i: usize = 0;
++        while (i < api.EngramStats.bucket_edges.len and s > api.EngramStats.bucket_edges[i]) i += 1;
++        _ = t.counts[i].fetchAdd(1, .monotonic);
++        _ = t.ns.fetchAdd(ns, .monotonic);
++        _ = t.n.fetchAdd(1, .monotonic);
++    }
++
++    pub fn snapshot(t: *const ReadTiming) api.EngramStats {
++        var out: api.EngramStats = .{};
++        for (t.counts, 0..) |c, i| out.counts[i] = c.load(.monotonic);
++        out.total = @as(f64, @floatFromInt(t.ns.load(.monotonic))) / 1e9;
++        out.n = t.n.load(.monotonic);
++        return out;
++    }
++};
++
++/// The read timing's clock (EngramHost.io, set with the switch); 0 when it keeps no time.
++pub fn readStamp(eh: *const EngramHost) u64 {
++    const io = eh.io orelse return 0;
++    return @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds);
++}
++
+ /// Engram on the host: the hasher (the compressed token map, the multipliers), this rank's hash columns [lo, hi) of
+ /// each Engram layer's, its tables and readers, and host buffers for a chunk's rows (model.py's Engram).
+ pub const EngramHost = struct {
+@@ -1419,6 +1456,9 @@ pub const EngramHost = struct {
+     paio: ?*engram_aio.Aio = null, // a prompt chunk's reads the same way, on a ring of its own (else the pool)
+     // the rounds' Engram host time (ns, summed; a profile reads it): hashing, the table reads, the decode, the upload
+     io: ?std.Io = null,
++    profile: bool = false, // --profile: the p_* split below (its pstamp synchronizes, so not with metrics alone)
++    metrics: bool = false, // TF_DS_ENGRAM_METRICS: the table reads' latencies for /metrics (0: off)
++    reads: ReadTiming = .{},
+     t_hash: u64 = 0,
+     t_read: u64 = 0,
+     t_decode: u64 = 0,
+@@ -1540,7 +1580,10 @@ fn engramAhead1(eh: *EngramHost, c: *const Config, seq: []const i32, start: usiz
+     }
+     const m = n * k;
+     // by AIO on the prompt's ring when it is open (the main thread reads by it only after joining this one)
++    const timed = eh.metrics;
++    const t0 = if (timed) readStamp(eh) else 0;
+     if (eh.paio) |aio| try aioGather(aio, t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s]) else try eh.pool.gather(t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s]);
++    if (timed) eh.reads.observe(readStamp(eh) - t0);
+     engram.decodeRows(eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], eh.ahead_rows[j][0 .. m * t.row_w], m, t.row_w, t.row_s, 8);
+     eh.ahead_ready[j] = true;
+ }
+@@ -1581,7 +1624,10 @@ pub fn engramRows(eh: *EngramHost, l: usize, t: engram_io.Table, seq: []const i3
+     }
+     // (TF_DS_ENGRAM_LEAD: on this layer's ring, its reader joined; the other layer's may be reading on its own)
+     const ring = if (lead) eh.lead_ring[l] else eh.paio;
++    const timed = eh.metrics;
++    const t0 = if (timed) readStamp(eh) else 0;
+     const read = if (ring) |aio| aioGather(aio, t, eh.flat[0..m], eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s]) else eh.pool.gather(t, eh.flat[0..m], eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s]);
++    if (timed) eh.reads.observe(readStamp(eh) - t0);
+     read catch |err| return rankFault(err);
+     engram.decodeRows(eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s], eh.rows[0 .. m * t.row_w], m, t.row_w, t.row_s, 8); // the rows on 8 threads
+     return eh.rows[0 .. m * t.row_w];
+@@ -1605,7 +1651,7 @@ pub fn engramApply(e: *const Engine, ch: *Chunk, eh: *EngramHost, li: usize, seq
+     const t = eh.tables.layers.get(@intCast(li)) orelse return error.MissingEngramTable;
+     const k = eh.hi - eh.lo;
+     const m = n * k;
+-    const prof = eh.io != null;
++    const prof = eh.profile;
+     var tq = if (prof) pstamp(e, eh) else 0;
+     // the rows read ahead (fillChunk's thread) when they are this chunk's, else read here
+     const rows = try engramRows(eh, l, t, seq, ch.start, n);
+@@ -1787,6 +1833,24 @@ test "rankFault: a read this rank could not make ends the pair; other errors pas
+         try std.testing.expectEqual(err, rankFault(err));
+ }
+ 
++test "TF_DS_ENGRAM_METRICS: 0 turns the read timing off, everything else leaves it on" {
++    for ([_]?[]const u8{ null, "", "1", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(metricsEnabled(v));
++    try std.testing.expect(!metricsEnabled("0"));
++}
++
++test "the read timing lands each read in its latency bucket, the ones past every edge last" {
++    var t: ReadTiming = .{};
++    t.observe(500_000); // 0.5 ms
++    t.observe(2_000_000); // 2 ms
++    t.observe(30_000_000_000); // 30 s
++    const s = t.snapshot();
++    try std.testing.expectEqual(@as(u64, 1), s.counts[0]); // up to 0.001 s
++    try std.testing.expectEqual(@as(u64, 1), s.counts[1]); // up to 0.0025 s
++    try std.testing.expectEqual(@as(u64, 1), s.counts[api.EngramStats.bucket_edges.len]); // past 10 s
++    try std.testing.expectEqual(@as(u64, 3), s.n);
++    try std.testing.expectApproxEqAbs(@as(f64, 30.0025), s.total, 1e-9);
++}
++
+ test "the indexer's row blocks are whole 16-row multiples, so every block's views stay 16-byte aligned" {
+     // 137,612 compressed keys gave 121-row blocks before: the second block's views began at row 121 (968 bytes), off
+     // the 16-byte boundary the kit's kernels were captured for
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index e7816c92..50a3998b 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1714,6 +1714,7 @@ fn engramLand(e: *const Engine, rd: *Round, eh: *prompt.EngramHost, ah: *const A
+         try eh.aio.?.wait(ah.ids[j]);
+     } else try eh.pool.gather(tbl, eh.flat[f0..][0..m], eh.w[f0 * tbl.row_w ..][0 .. m * tbl.row_w], eh.s[f0 * tbl.row_s ..][0 .. m * tbl.row_s]);
+     const t2 = stamp(eh);
++    if (eh.metrics) eh.reads.observe(t2 - t1); // TF_DS_ENGRAM_METRICS: the round's table read
+     const w0 = f0 * tbl.row_w;
+     const s0 = f0 * tbl.row_s;
+     for (0..m) |i| engram.decodeRow(eh.w[w0 + i * tbl.row_w ..][0..tbl.row_w], eh.s[s0 + i * tbl.row_s ..][0..tbl.row_s], eh.rows[w0 + i * tbl.row_w ..][0..tbl.row_w]);
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index ecf42473..032b9dd6 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -162,6 +162,7 @@ const Host = struct {
+     lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
+     cache: ?api.prompt_cache.Store = null, // kept prompt states, when the family keeps them
+     kv_parts: ?lanes.kv_parts.Source = null, // the family's KV-ownership stats (its pool sharded over the ranks)
++    engram: ?api.EngramSource = null, // the family's Engram table-read latencies (TF_DS_ENGRAM_METRICS; 0: off)
+     snap_vt: api.prompt_cache.Snapshots.VTable = undefined,
+     spill: ?api.Spill = null, // the spill tier the family bound: the lane host is configured with it
+     // robustness: the family's broken-pair policy and service fence, handed to the lane host before it starts
+@@ -214,6 +215,7 @@ const Host = struct {
+         h.host.explain = explain;
+         if (h.cache) |*store| h.host.cache = store;
+         h.host.kv_parts = h.kv_parts;
++        h.host.engram = h.engram;
+         if (h.spill) |sp| h.host.configure(sp); // (after the cache and its tier: Spill.unbound sees Status.cache)
+         h.host.pair = h.pair;
+         h.host.quiet = h.quiet;
+@@ -436,6 +438,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+     });
+     errdefer gpa.free(h.startup);
+     if (@hasField(@TypeOf(loaded), "kv_parts")) h.kv_parts = loaded.kv_parts;
++    if (@hasField(@TypeOf(loaded), "engram")) h.engram = loaded.engram;
+     // robustness: a family's broken-pair policy (dsv41: TF_DS_PAIR_BROKEN=exit) and its device's word for the
+     // lane host's service fence; both null keep the host exactly as before
+     if (@hasField(@TypeOf(loaded), "pair")) if (loaded.pair) |p| {
+diff --git a/zig/src/server/metrics.zig b/zig/src/server/metrics.zig
+index 064410be..8de495ed 100644
+--- a/zig/src/server/metrics.zig
++++ b/zig/src/server/metrics.zig
+@@ -161,6 +161,7 @@ pub const Metrics = struct {
+         if (status.preemptions) |p| try gauge(w, "preemptions_total", "counter", "Requests that had to give a lane up to a later one.", p);
+         if (status.cache) |c| try cacheFamilies(w, c);
+         if (status.kv_parts) |k| try kvPartFamilies(w, k);
++        if (status.engram) |e| try histogram(w, "engram_lookup_seconds", api.EngramStats.help, e); // TF_DS_ENGRAM_METRICS
+         if (status.pair) |p| try pairFamilies(w, p);
+     }
+ };
+@@ -529,3 +530,32 @@ test "kv shard families: present only with a sharded backend's stats, its counte
+         "tensorfold:kv_shard_rank_copy_bytes{rank=\"1\"} 4096\n",
+     }) |line| try std.testing.expect(std.mem.indexOf(u8, out2.written(), line) != null);
+ }
++
++test "engram read latencies: the histogram only when the engine reports them" {
++    const gpa = std.testing.allocator;
++    var m: Metrics = .{ .gpa = gpa };
++    var stub: RenderStub = .{};
++    var plain: std.Io.Writer.Allocating = .init(gpa);
++    defer plain.deinit();
++    try m.render(std.testing.io, &plain.writer, stub.engine(), 4096);
++    try std.testing.expect(std.mem.indexOf(u8, plain.written(), "engram_lookup_seconds") == null);
++
++    var e: api.EngramStats = .{};
++    e.counts[0] = 1;
++    e.counts[3] = 1;
++    e.n = 2;
++    e.total = 0.5;
++    stub.status_value.engram = e;
++    var out: std.Io.Writer.Allocating = .init(gpa);
++    defer out.deinit();
++    try m.render(std.testing.io, &out.writer, stub.engine(), 4096);
++    const body = out.written();
++    for ([_][]const u8{
++        "# TYPE tensorfold:engram_lookup_seconds histogram\n",
++        "tensorfold:engram_lookup_seconds_bucket{le=\"0.001\"} 1\n",
++        "tensorfold:engram_lookup_seconds_bucket{le=\"0.01\"} 2\n",
++        "tensorfold:engram_lookup_seconds_bucket{le=\"+Inf\"} 2\n",
++        "tensorfold:engram_lookup_seconds_sum 0.5\n",
++        "tensorfold:engram_lookup_seconds_count 2\n",
++    }) |line| try std.testing.expect(std.mem.indexOf(u8, body, line) != null);
++}
+-- 
+2.56.0
+

@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000106 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 09:14:47 -0800
+Subject: [PATCH] dsv41: TF_DS_DRAFT_DEPTH5=1 adds the 5-deep benchmark pin
+
+The last of the four toggles (0103-0106): 2, 3, 4 and 5 deep, one at a time,
+each bypassing the round loop's depth pricing for a benchmark. The checkpoint's
+own draft count clamps a pin (a checkpoint with fewer draft blocks drafts fewer).
+---
+ zig/src/families/dsv41/lanes.zig  | 16 +++++++++-------
+ zig/src/families/dsv41/native.zig |  1 +
+ 2 files changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index aac05a20..b7695034 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -404,6 +404,7 @@ pub const depth_pins = [_]DepthPin{
+     .{ .name = "TF_DS_DRAFT_DEPTH2", .depth = 2 },
+     .{ .name = "TF_DS_DRAFT_DEPTH3", .depth = 3 },
+     .{ .name = "TF_DS_DRAFT_DEPTH4", .depth = 4 },
++    .{ .name = "TF_DS_DRAFT_DEPTH5", .depth = 5 },
+ };
+ 
+ /// The pin from the toggles' values ("1" on; unset, empty or "0" off), refusing two at once.
+@@ -2186,13 +2187,14 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+ }
+ 
+ test "one depth toggle at a time pins the depth" {
+-    try std.testing.expectEqual(@as(?u32, null), try parseDepthPin(&[_]?[]const u8{ null, null, null }));
+-    try std.testing.expectEqual(@as(?u32, null), try parseDepthPin(&[_]?[]const u8{ "0", null, null }));
+-    try std.testing.expectEqual(@as(?u32, 2), try parseDepthPin(&[_]?[]const u8{ "1", null, null }));
+-    try std.testing.expectEqual(@as(?u32, 3), try parseDepthPin(&[_]?[]const u8{ null, "1", null }));
+-    try std.testing.expectEqual(@as(?u32, 4), try parseDepthPin(&[_]?[]const u8{ null, null, "1" }));
+-    try std.testing.expectError(error.BadDraftPin, parseDepthPin(&[_]?[]const u8{ "1", "1", null }));
+-    try std.testing.expectError(error.BadDraftPin, parseDepthPin(&[_]?[]const u8{ null, "1", "1" }));
++    try std.testing.expectEqual(@as(?u32, null), try parseDepthPin(&[_]?[]const u8{ null, null, null, null }));
++    try std.testing.expectEqual(@as(?u32, null), try parseDepthPin(&[_]?[]const u8{ "0", null, null, null }));
++    try std.testing.expectEqual(@as(?u32, 2), try parseDepthPin(&[_]?[]const u8{ "1", null, null, null }));
++    try std.testing.expectEqual(@as(?u32, 3), try parseDepthPin(&[_]?[]const u8{ null, "1", null, null }));
++    try std.testing.expectEqual(@as(?u32, 4), try parseDepthPin(&[_]?[]const u8{ null, null, "1", null }));
++    try std.testing.expectEqual(@as(?u32, 5), try parseDepthPin(&[_]?[]const u8{ null, null, null, "1" }));
++    try std.testing.expectError(error.BadDraftPin, parseDepthPin(&[_]?[]const u8{ "1", "1", null, null }));
++    try std.testing.expectError(error.BadDraftPin, parseDepthPin(&[_]?[]const u8{ null, "1", null, "1" }));
+ }
+ 
+ test "a calibration weight parses to a finite value in 0..1" {
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 0f57e621..6ba59539 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -49,6 +49,7 @@
+ //!                                               the rule; the checkpoint's draft count clamps it)
+ //!   TF_DS_DRAFT_DEPTH3=1                        the same pin at 3 deep (unset or 0: the rule)
+ //!   TF_DS_DRAFT_DEPTH4=1                        the same pin at 4 deep (unset or 0: the rule)
++//!   TF_DS_DRAFT_DEPTH5=1                        the same pin at 5 deep (unset or 0: the rule)
+ //!   TF_DS_NO_COPIES=1                           a drafted stream proposes no suffix-lookup copy windows
+ //!   TF_DS_POOL=P, TF_DS_WINDOW=W                (0008, pool.zig) the pool's positions, every stream's extents
+ //!                                               together (unset: the context), and the window a request may use

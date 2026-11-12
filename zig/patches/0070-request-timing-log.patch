@@ -1,0 +1,113 @@
+From e9534bffbfdd98c29ff322c9dde0b5bfcac03759 Mon Sep 17 00:00:00 2001
+From: MiaAI-Lab <MiaAI-Lab@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 09:11:59 -0800
+Subject: [PATCH] server: the done line carries each finished request's
+ prefill, TTFT, decode and draft-acceptance figures
+
+The per-request line logged the reply's id, prompt and cached tokens, token sha, finish, rounds and the
+accepted/drafted counts, but not the timings the response body already carries (runtime.prefill_seconds,
+time_to_first_token, tokens_per_second) nor the drafts' acceptance rate: an operator reading docker logs could not
+see where a request's time went or how well the drafter did without scraping /metrics or the reply's runtime fields.
+
+The done line now ends with prefill_s (the engine's own prompt-pass measurement, LaneHost's job.began to prefilled),
+ttft_s (arrival to the first token), decode_s (prefilled to the last token), s_per_token (decode seconds divided by
+the generated tokens less one), tok_per_s, accept (accepted/drafted as a percentage) and tokens_per_round. A figure
+the request has none of (no prefilled event, one token only, no drafts or rounds) prints "-". The existing fields,
+including the reply's token sha, are unchanged and the new ones come after them, so parsers of the old line
+(tools/zig/reuse_served.py) still match. The values are the request's own, not a rolling average; nothing is shared
+between requests.
+
+Tests: chat.zig (the figures from given timestamps, the null cases, the formatter); zig/tests/server/zig_test.sh
+(179 server tests, 108 engine-seam tests). Replies and their bits are unchanged.
+---
+ zig/src/server/chat.zig | 70 ++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 69 insertions(+), 1 deletion(-)
+
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index 5f04ed27..4e23d8fc 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -718,7 +718,17 @@ const Generation = struct {
+             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
+         var cycle_text: [32]u8 = undefined;
+         const cycle = if (s.loop_period) |period| std.fmt.bufPrint(&cycle_text, " loop=period:{d}", .{period}) catch "" else "";
+-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted });
++        // the request's own figures for the done line: the engine's prefill, the wall times and the drafts' rate
++        const avg = averages(received, g.first_ns, prefilled, finished_ns, g.collected.items.len, s.rounds, s.accepted, s.drafted);
++        var b_prefill: [24]u8 = undefined;
++        var b_ttft: [24]u8 = undefined;
++        var b_decode: [24]u8 = undefined;
++        var b_tpot: [24]u8 = undefined;
++        var b_tok_s: [24]u8 = undefined;
++        var b_accept: [24]u8 = undefined;
++        var b_tpr: [24]u8 = undefined;
++        const accept = if (avg.accept_pct) |pct| std.fmt.bufPrint(&b_accept, "{d:.1}%", .{pct}) catch "-" else "-";
++        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} prefill_s={s} ttft_s={s} decode_s={s} s_per_token={s} tok_per_s={s} accept={s} tokens_per_round={s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, fmtNum(&b_prefill, "{d:.1}", s.prefill_seconds), fmtNum(&b_ttft, "{d:.1}", avg.ttft_s), fmtNum(&b_decode, "{d:.1}", avg.decode_s), fmtNum(&b_tpot, "{d:.4}", avg.s_per_token), fmtNum(&b_tok_s, "{d:.1}", avg.tok_per_s), accept, fmtNum(&b_tpr, "{d:.1}", avg.tokens_per_round) });
+         return reply;
+     }
+ };
+@@ -765,3 +775,61 @@ pub fn tokenSha(tokens: []const u32) [12]u8 {
+     @memcpy(&out, &hex);
+     return out;
+ }
++
++/// A finished request's own timing figures for the done line; null where the request has none (no first token, no
++/// prefilled event, no drafts, no rounds).
++const Averages = struct {
++    ttft_s: ?f64 = null,
++    decode_s: ?f64 = null,
++    s_per_token: ?f64 = null,
++    tok_per_s: ?f64 = null,
++    accept_pct: ?f64 = null,
++    tokens_per_round: ?f64 = null,
++};
++
++fn averages(received: i96, first: ?i96, prefilled: ?i96, finished: i96, generated: usize, rounds: u64, accepted: u64, drafted: u64) Averages {
++    const ttft: ?f64 = if (first) |t| seconds(t - received) else null;
++    const decode: ?f64 = if (prefilled) |p| @max(0, seconds(finished - p)) else null;
++    const per_token: ?f64 = if (decode) |d| if (generated > 1 and d > 0) d / @as(f64, @floatFromInt(generated - 1)) else null else null;
++    return .{
++        .ttft_s = ttft,
++        .decode_s = decode,
++        .s_per_token = per_token,
++        .tok_per_s = if (per_token) |t| 1.0 / t else null,
++        .accept_pct = if (drafted > 0) 100.0 * @as(f64, @floatFromInt(accepted)) / @as(f64, @floatFromInt(drafted)) else null,
++        .tokens_per_round = if (rounds > 0) @as(f64, @floatFromInt(generated)) / @as(f64, @floatFromInt(rounds)) else null,
++    };
++}
++
++/// A figure for the done line: "-" where the request has none.
++fn fmtNum(buf: []u8, comptime fmt: []const u8, v: ?f64) []const u8 {
++    const x = v orelse return "-";
++    return std.fmt.bufPrint(buf, fmt, .{x}) catch "-";
++}
++
++test "the done line's figures come from the request's own times, null where it has none" {
++    const s: i96 = 1_000_000_000;
++    const a = averages(10 * s, 15 * s, 12 * s, 20 * s, 101, 10, 30, 50);
++    try std.testing.expectApproxEqAbs(@as(f64, 5.0), a.ttft_s.?, 1e-9);
++    try std.testing.expectApproxEqAbs(@as(f64, 8.0), a.decode_s.?, 1e-9);
++    try std.testing.expectApproxEqAbs(@as(f64, 0.08), a.s_per_token.?, 1e-12);
++    try std.testing.expectApproxEqAbs(@as(f64, 12.5), a.tok_per_s.?, 1e-9);
++    try std.testing.expectApproxEqAbs(@as(f64, 60.0), a.accept_pct.?, 1e-9);
++    try std.testing.expectApproxEqAbs(@as(f64, 10.1), a.tokens_per_round.?, 1e-9);
++    // one generated token has no per-token average; no prefilled event, no drafts or rounds: null
++    const b = averages(0, s, null, s, 1, 0, 0, 0);
++    try std.testing.expectApproxEqAbs(@as(f64, 1.0), b.ttft_s.?, 1e-9);
++    try std.testing.expectEqual(@as(?f64, null), b.decode_s);
++    try std.testing.expectEqual(@as(?f64, null), b.s_per_token);
++    try std.testing.expectEqual(@as(?f64, null), b.tok_per_s);
++    try std.testing.expectEqual(@as(?f64, null), b.accept_pct);
++    try std.testing.expectEqual(@as(?f64, null), b.tokens_per_round);
++    // no first token: no time to first token
++    try std.testing.expectEqual(@as(?f64, null), averages(0, null, null, s, 1, 0, 0, 0).ttft_s);
++}
++
++test "a done line's figure prints, or - when the request has none" {
++    var buf: [24]u8 = undefined;
++    try std.testing.expectEqualStrings("2.0", fmtNum(&buf, "{d:.1}", 2.0));
++    try std.testing.expectEqualStrings("-", fmtNum(&buf, "{d:.1}", null));
++}
+-- 
+2.56.0
+

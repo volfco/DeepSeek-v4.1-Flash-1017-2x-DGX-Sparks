@@ -201,7 +201,7 @@ index 3d3dc4a..b8c3e4a 100644
 +            if (job != null) p.active += 1;
 +            p.mutex.unlock(p.io);
 +            if (job) |j| {
-+                p.work(j);
++                work(j);
 +                p.mutex.lockUncancelable(p.io);
 +                p.active -= 1;
 +                p.done_cond.broadcast(p.io);

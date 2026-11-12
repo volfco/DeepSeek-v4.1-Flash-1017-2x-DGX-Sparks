@@ -1,0 +1,360 @@
+{
+ "schema": 1,
+ "label": "t25-02",
+ "model": "DeepSeek-V4.1-Flash-1017",
+ "url": "http://127.0.0.1:8000",
+ "salt": "7792a5f2",
+ "seed": 1234,
+ "thinking": true,
+ "started": "2026-11-12T21:01:56+0000",
+ "host": "gx10-eb0e",
+ "python": "3.12.3",
+ "argv": [
+  "--url",
+  "http://127.0.0.1:8000",
+  "--model",
+  "DeepSeek-V4.1-Flash-1017",
+  "--suite",
+  "prefill,decode,multi",
+  "--streams",
+  "1,4",
+  "--reps",
+  "3",
+  "--metrics",
+  "--label",
+  "t25-02",
+  "--out",
+  "runs/matrix/t25-02.bench.json",
+  "--prefill-sizes",
+  "8000",
+  "--thinking"
+ ],
+ "snapshots": {
+  "metrics_before": "# HELP tensorfold:requests_running Requests in prefill or decode.\n# TYPE tensorfold:requests_running gauge\ntensorfold:requests_running 0\n# HELP tensorfold:requests_waiting Requests queued or held until a lane is free.\n# TYPE tensorfold:requests_waiting gauge\ntensorfold:requests_waiting 0\n# HELP tensorfold:generation_tokens_running Generated tokens held by live streams.\n# TYPE tensorfold:generation_tokens_running gauge\ntensorfold:generation_tokens_running 0\n# HELP tensorfold:prompt_tokens_total Prompt tokens of finished requests, those restored from kept prompt states included.\n# TYPE tensorfold:prompt_tokens_total counter\ntensorfold:prompt_tokens_total 22948\n# HELP tensorfold:prompt_tokens_cached_total Prompt tokens of finished requests restored from kept prompt states (counted in prompt_tokens_total too); the rest were computed.\n# TYPE tensorfold:prompt_tokens_cached_total counter\ntensorfold:prompt_tokens_cached_total 20480\n# HELP tensorfold:generation_tokens_total Generated tokens of finished requests.\n# TYPE tensorfold:generation_tokens_total counter\ntensorfold:generation_tokens_total 1314\n# HELP tensorfold:kv_cache_usage_ratio Tokens in a stream cache divided by that stream's context window.\n# TYPE tensorfold:kv_cache_usage_ratio gauge\ntensorfold:kv_cache_usage_ratio{pool=\"0\"} 0\n# HELP tensorfold:mtp_drafted_total Draft tokens verified on finished requests.\n# TYPE tensorfold:mtp_drafted_total counter\ntensorfold:mtp_drafted_total 1039\n# HELP tensorfold:mtp_accepted_total Draft tokens kept on finished requests.\n# TYPE tensorfold:mtp_accepted_total counter\ntensorfold:mtp_accepted_total 791\n# HELP tensorfold:request_latency_seconds Seconds from arrival to the reply leaving.\n# TYPE tensorfold:request_latency_seconds histogram\ntensorfold:request_latency_seconds_bucket{le=\"0.01\"} 0\ntensorfold:request_latency_seconds_bucket{le=\"0.05\"} 0\ntensorfold:request_latency_seconds_bucket{le=\"0.1\"} 0\ntensorfold:request_latency_seconds_bucket{le=\"0.25\"} 1\ntensorfold:request_latency_seconds_bucket{le=\"0.5\"} 5\ntensorfold:request_latency_seconds_bucket{le=\"1\"} 11\ntensorfold:request_latency_seconds_bucket{le=\"2.5\"} 18\ntensorfold:request_latency_seconds_bucket{le=\"5\"} 22\ntensorfold:request_latency_seconds_bucket{le=\"10\"} 23\ntensorfold:request_latency_seconds_bucket{le=\"30\"} 23\ntensorfold:request_latency_seconds_bucket{le=\"60\"} 23\ntensorfold:request_latency_seconds_bucket{le=\"120\"} 23\ntensorfold:request_latency_seconds_bucket{le=\"300\"} 23\ntensorfold:request_latency_seconds_bucket{le=\"+Inf\"} 23\ntensorfold:request_latency_seconds_sum 36.734859\ntensorfold:request_latency_seconds_count 23\n# HELP tensorfold:time_to_first_token_seconds Seconds from arrival to the first generated token.\n# TYPE tensorfold:time_to_first_token_seconds histogram\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.01\"} 0\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.05\"} 0\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.1\"} 10\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.25\"} 13\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.5\"} 19\ntensorfold:time_to_first_token_seconds_bucket{le=\"1\"} 22\ntensorfold:time_to_first_token_seconds_bucket{le=\"2.5\"} 23\ntensorfold:time_to_first_token_seconds_bucket{le=\"5\"} 23\ntensorfold:time_to_first_token_seconds_bucket{le=\"10\"} 23\ntensorfold:time_to_first_token_seconds_bucket{le=\"30\"} 23\ntensorfold:time_to_first_token_seconds_bucket{le=\"60\"} 23\ntensorfold:time_to_first_token_seconds_bucket{le=\"120\"} 23\ntensorfold:time_to_first_token_seconds_bucket{le=\"300\"} 23\ntensorfold:time_to_first_token_seconds_bucket{le=\"+Inf\"} 23\ntensorfold:time_to_first_token_seconds_sum 6.611348\ntensorfold:time_to_first_token_seconds_count 23\n# HELP tensorfold:request_decode_seconds Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.\n# TYPE tensorfold:request_decode_seconds histogram\ntensorfold:request_decode_seconds_bucket{le=\"0.01\"} 0\ntensorfold:request_decode_seconds_bucket{le=\"0.05\"} 4\ntensorfold:request_decode_seconds_bucket{le=\"0.1\"} 4\ntensorfold:request_decode_seconds_bucket{le=\"0.25\"} 6\ntensorfold:request_decode_seconds_bucket{le=\"0.5\"} 10\ntensorfold:request_decode_seconds_bucket{le=\"1\"} 12\ntensorfold:request_decode_seconds_bucket{le=\"2.5\"} 18\ntensorfold:request_decode_seconds_bucket{le=\"5\"} 23\ntensorfold:request_decode_seconds_bucket{le=\"10\"} 23\ntensorfold:request_decode_seconds_bucket{le=\"30\"} 23\ntensorfold:request_decode_seconds_bucket{le=\"60\"} 23\ntensorfold:request_decode_seconds_bucket{le=\"120\"} 23\ntensorfold:request_decode_seconds_bucket{le=\"300\"} 23\ntensorfold:request_decode_seconds_bucket{le=\"+Inf\"} 23\ntensorfold:request_decode_seconds_sum 30.123511\ntensorfold:request_decode_seconds_count 23\n# HELP tensorfold:request_time_per_output_token_seconds Seconds from the first generated token to the last, divided by the tokens less one.\n# TYPE tensorfold:request_time_per_output_token_seconds histogram\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.0025\"} 0\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.005\"} 0\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.0075\"} 1\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.01\"} 4\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.015\"} 7\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.02\"} 10\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.025\"} 14\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.03\"} 14\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.04\"} 18\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.05\"} 20\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.075\"} 22\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.1\"} 22\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.15\"} 23\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.2\"} 23\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.3\"} 23\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.5\"} 23\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"1\"} 23\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"+Inf\"} 23\ntensorfold:request_time_per_output_token_seconds_sum 0.65297\ntensorfold:request_time_per_output_token_seconds_count 23\n# HELP tensorfold:decode_rounds_total Decode rounds used by finished requests.\n# TYPE tensorfold:decode_rounds_total counter\ntensorfold:decode_rounds_total 513\n# HELP tensorfold:request_prefill_seconds Seconds a finished request's prompt pass took.\n# TYPE tensorfold:request_prefill_seconds histogram\ntensorfold:request_prefill_seconds_bucket{le=\"0.01\"} 0\ntensorfold:request_prefill_seconds_bucket{le=\"0.05\"} 0\ntensorfold:request_prefill_seconds_bucket{le=\"0.1\"} 17\ntensorfold:request_prefill_seconds_bucket{le=\"0.25\"} 18\ntensorfold:request_prefill_seconds_bucket{le=\"0.5\"} 21\ntensorfold:request_prefill_seconds_bucket{le=\"1\"} 22\ntensorfold:request_prefill_seconds_bucket{le=\"2.5\"} 23\ntensorfold:request_prefill_seconds_bucket{le=\"5\"} 23\ntensorfold:request_prefill_seconds_bucket{le=\"10\"} 23\ntensorfold:request_prefill_seconds_bucket{le=\"30\"} 23\ntensorfold:request_prefill_seconds_bucket{le=\"60\"} 23\ntensorfold:request_prefill_seconds_bucket{le=\"120\"} 23\ntensorfold:request_prefill_seconds_bucket{le=\"300\"} 23\ntensorfold:request_prefill_seconds_bucket{le=\"+Inf\"} 23\ntensorfold:request_prefill_seconds_sum 4.405303\ntensorfold:request_prefill_seconds_count 23\n# HELP tensorfold:device_memory_bytes Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).\n# TYPE tensorfold:device_memory_bytes gauge\ntensorfold:device_memory_bytes 112979029028\n# HELP tensorfold:device_memory_peak_bytes The most device memory the engine has held since start or the last /health?reset_peak=1.\n# TYPE tensorfold:device_memory_peak_bytes gauge\ntensorfold:device_memory_peak_bytes 112979029028\n# HELP tensorfold:num_requests_running Requests in prefill or decode. A mirror of tensorfold:requests_running.\n# TYPE tensorfold:num_requests_running gauge\ntensorfold:num_requests_running 0\n# HELP tensorfold:num_requests_waiting Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.\n# TYPE tensorfold:num_requests_waiting gauge\ntensorfold:num_requests_waiting 0\n# HELP tensorfold:kv_cache_usage_perc A stream's cache occupancy under vLLM's name; same streams and ratios as tensorfold:kv_cache_usage_ratio.\n# TYPE tensorfold:kv_cache_usage_perc gauge\ntensorfold:kv_cache_usage_perc{stream=\"0\"} 0\n# HELP tensorfold:spec_decode_num_draft_tokens_total Draft tokens verified on finished requests, this server's single draft counter.\n# TYPE tensorfold:spec_decode_num_draft_tokens_total counter\ntensorfold:spec_decode_num_draft_tokens_total 1039\n# HELP tensorfold:spec_decode_num_accepted_tokens_total Draft tokens kept on finished requests.\n# TYPE tensorfold:spec_decode_num_accepted_tokens_total counter\ntensorfold:spec_decode_num_accepted_tokens_total 791\n# HELP tensorfold:e2e_request_latency_seconds Seconds from arrival to the reply leaving, under vLLM's name.\n# TYPE tensorfold:e2e_request_latency_seconds histogram\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.01\"} 0\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.05\"} 0\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.1\"} 0\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.25\"} 1\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.5\"} 5\ntensorfold:e2e_request_latency_seconds_bucket{le=\"1\"} 11\ntensorfold:e2e_request_latency_seconds_bucket{le=\"2.5\"} 18\ntensorfold:e2e_request_latency_seconds_bucket{le=\"5\"} 22\ntensorfold:e2e_request_latency_seconds_bucket{le=\"10\"} 23\ntensorfold:e2e_request_latency_seconds_bucket{le=\"30\"} 23\ntensorfold:e2e_request_latency_seconds_bucket{le=\"60\"} 23\ntensorfold:e2e_request_latency_seconds_bucket{le=\"120\"} 23\ntensorfold:e2e_request_latency_seconds_bucket{le=\"300\"} 23\ntensorfold:e2e_request_latency_seconds_bucket{le=\"+Inf\"} 23\ntensorfold:e2e_request_latency_seconds_sum 36.734859\ntensorfold:e2e_request_latency_seconds_count 23\n# HELP tensorfold:request_decode_time_seconds Seconds a finished request spent decoding, under vLLM's name.\n# TYPE tensorfold:request_decode_time_seconds histogram\ntensorfold:request_decode_time_seconds_bucket{le=\"0.01\"} 0\ntensorfold:request_decode_time_seconds_bucket{le=\"0.05\"} 4\ntensorfold:request_decode_time_seconds_bucket{le=\"0.1\"} 4\ntensorfold:request_decode_time_seconds_bucket{le=\"0.25\"} 6\ntensorfold:request_decode_time_seconds_bucket{le=\"0.5\"} 10\ntensorfold:request_decode_time_seconds_bucket{le=\"1\"} 12\ntensorfold:request_decode_time_seconds_bucket{le=\"2.5\"} 18\ntensorfold:request_decode_time_seconds_bucket{le=\"5\"} 23\ntensorfold:request_decode_time_seconds_bucket{le=\"10\"} 23\ntensorfold:request_decode_time_seconds_bucket{le=\"30\"} 23\ntensorfold:request_decode_time_seconds_bucket{le=\"60\"} 23\ntensorfold:request_decode_time_seconds_bucket{le=\"120\"} 23\ntensorfold:request_decode_time_seconds_bucket{le=\"300\"} 23\ntensorfold:request_decode_time_seconds_bucket{le=\"+Inf\"} 23\ntensorfold:request_decode_time_seconds_sum 30.123511\ntensorfold:request_decode_time_seconds_count 23\n# HELP tensorfold:request_prefill_time_seconds Seconds a finished request's prompt pass took, under vLLM's name.\n# TYPE tensorfold:request_prefill_time_seconds histogram\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.01\"} 0\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.05\"} 0\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.1\"} 17\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.25\"} 18\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.5\"} 21\ntensorfold:request_prefill_time_seconds_bucket{le=\"1\"} 22\ntensorfold:request_prefill_time_seconds_bucket{le=\"2.5\"} 23\ntensorfold:request_prefill_time_seconds_bucket{le=\"5\"} 23\ntensorfold:request_prefill_time_seconds_bucket{le=\"10\"} 23\ntensorfold:request_prefill_time_seconds_bucket{le=\"30\"} 23\ntensorfold:request_prefill_time_seconds_bucket{le=\"60\"} 23\ntensorfold:request_prefill_time_seconds_bucket{le=\"120\"} 23\ntensorfold:request_prefill_time_seconds_bucket{le=\"300\"} 23\ntensorfold:request_prefill_time_seconds_bucket{le=\"+Inf\"} 23\ntensorfold:request_prefill_time_seconds_sum 4.405303\ntensorfold:request_prefill_time_seconds_count 23\n# HELP tensorfold:prefix_cache_queries_total Prompt tokens of finished requests, looked up in the kept prompt states, under vLLM's name.\n# TYPE tensorfold:prefix_cache_queries_total counter\ntensorfold:prefix_cache_queries_total 22948\n# HELP tensorfold:prefix_cache_hits_total Prompt tokens of finished requests restored from kept prompt states, under vLLM's name.\n# TYPE tensorfold:prefix_cache_hits_total counter\ntensorfold:prefix_cache_hits_total 20480\n# HELP tensorfold:client_disconnections_total Requests a client left before the reply left the server.\n# TYPE tensorfold:client_disconnections_total counter\ntensorfold:client_disconnections_total 0\n# HELP tensorfold:preemptions_total Requests that had to give a lane up to a later one.\n# TYPE tensorfold:preemptions_total counter\ntensorfold:preemptions_total 0\n# HELP tensorfold:chats_continued Streams that continued a conversation without resuming from its own turn state.\n# TYPE tensorfold:chats_continued counter\ntensorfold:chats_continued 0\n# HELP tensorfold:chats_continued_prefill_tokens Prompt tokens those streams prefilled.\n# TYPE tensorfold:chats_continued_prefill_tokens counter\ntensorfold:chats_continued_prefill_tokens 0\n# HELP tensorfold:prompt_cache_memory_hits Prompt passes that resumed a kept state in memory.\n# TYPE tensorfold:prompt_cache_memory_hits counter\ntensorfold:prompt_cache_memory_hits 1\n# HELP tensorfold:prompt_cache_memory_misses Prompt lookups that found no usable kept state.\n# TYPE tensorfold:prompt_cache_memory_misses counter\ntensorfold:prompt_cache_memory_misses 22\n# HELP tensorfold:prompt_cache_kept Prompt states kept in memory.\n# TYPE tensorfold:prompt_cache_kept counter\ntensorfold:prompt_cache_kept 0\n# HELP tensorfold:prompt_cache_evicted Kept states evicted from memory for room.\n# TYPE tensorfold:prompt_cache_evicted counter\ntensorfold:prompt_cache_evicted 0\n# HELP tensorfold:prompt_cache_refused Prompt states not kept: past the memory budget.\n# TYPE tensorfold:prompt_cache_refused counter\ntensorfold:prompt_cache_refused 0\n# HELP tensorfold:prompt_cache_failed Kept states that failed to save or restore.\n# TYPE tensorfold:prompt_cache_failed counter\ntensorfold:prompt_cache_failed 0\n# HELP tensorfold:prompt_cache_entries Prompt states kept in memory now.\n# TYPE tensorfold:prompt_cache_entries gauge\ntensorfold:prompt_cache_entries 1\n# HELP tensorfold:prompt_cache_held_bytes Bytes the kept states hold now.\n# TYPE tensorfold:prompt_cache_held_bytes gauge\ntensorfold:prompt_cache_held_bytes 6684672\n# HELP tensorfold:prompt_cache_disk_lookups Lookups that asked the disk tier.\n# TYPE tensorfold:prompt_cache_disk_lookups counter\ntensorfold:prompt_cache_disk_lookups 24\n# HELP tensorfold:prompt_cache_disk_hits Lookups whose durable point was longer than the best usable memory state.\n# TYPE tensorfold:prompt_cache_disk_hits counter\ntensorfold:prompt_cache_disk_hits 1\n# HELP tensorfold:prompt_cache_disk_hits_committed Disk restores every rank installed, adopted as kept states.\n# TYPE tensorfold:prompt_cache_disk_hits_committed counter\ntensorfold:prompt_cache_disk_hits_committed 1\n# HELP tensorfold:prompt_cache_restores_begun Disk restore jobs started.\n# TYPE tensorfold:prompt_cache_restores_begun counter\ntensorfold:prompt_cache_restores_begun 1\n# HELP tensorfold:prompt_cache_restores_shared Requests that joined a disk restore already in flight.\n# TYPE tensorfold:prompt_cache_restores_shared counter\ntensorfold:prompt_cache_restores_shared 0\n# HELP tensorfold:prompt_cache_restores_failed Disk restores aborted on every rank (missing, damaged, guarded).\n# TYPE tensorfold:prompt_cache_restores_failed counter\ntensorfold:prompt_cache_restores_failed 0\n# HELP tensorfold:prompt_cache_restores_cancelled Disk restores stopped: no request waited for them any more, or shutdown.\n# TYPE tensorfold:prompt_cache_restores_cancelled counter\ntensorfold:prompt_cache_restores_cancelled 0\n# HELP tensorfold:prompt_cache_restores_dropped Installed disk restores not adopted: no room, or memory already had them.\n# TYPE tensorfold:prompt_cache_restores_dropped counter\ntensorfold:prompt_cache_restores_dropped 0\n# HELP tensorfold:prompt_cache_restores_refused Disk restores not begun: the memory budget could not hold their destination, or the tier was at its capacity (once a request).\n# TYPE tensorfold:prompt_cache_restores_refused counter\ntensorfold:prompt_cache_restores_refused 0\n# HELP tensorfold:prompt_cache_restores_active Disk restore jobs in flight.\n# TYPE tensorfold:prompt_cache_restores_active gauge\ntensorfold:prompt_cache_restores_active 0\n# HELP tensorfold:prompt_cache_restoring_bytes Memory the disk restores in flight reserved, charged to the prompt cache's budget.\n# TYPE tensorfold:prompt_cache_restoring_bytes gauge\ntensorfold:prompt_cache_restoring_bytes 0\n# HELP tensorfold:prompt_cache_restore_blocks_done Blocks the restores in flight have copied so far.\n# TYPE tensorfold:prompt_cache_restore_blocks_done gauge\ntensorfold:prompt_cache_restore_blocks_done 0\n# HELP tensorfold:prompt_cache_restore_blocks_total Blocks the restores in flight copy in all.\n# TYPE tensorfold:prompt_cache_restore_blocks_total gauge\ntensorfold:prompt_cache_restore_blocks_total 0\n# HELP tensorfold:prompt_cache_restored_tokens Prompt tokens restored from disk.\n# TYPE tensorfold:prompt_cache_restored_tokens counter\ntensorfold:prompt_cache_restored_tokens 20480\n# HELP tensorfold:prompt_cache_restore_waits Requests parked on a disk restore.\n# TYPE tensorfold:prompt_cache_restore_waits counter\ntensorfold:prompt_cache_restore_waits 1\n# HELP tensorfold:prompt_cache_restore_wait_timeouts Requests admitted without their disk restore after TF_SPILL_LOAD_WAIT_MS.\n# TYPE tensorfold:prompt_cache_restore_wait_timeouts counter\ntensorfold:prompt_cache_restore_wait_timeouts 0\n# HELP tensorfold:prompt_cache_restore_wait_ns Nanoseconds requests waited for disk restores.\n# TYPE tensorfold:prompt_cache_restore_wait_ns counter\ntensorfold:prompt_cache_restore_wait_ns 31246060\n# HELP tensorfold:prompt_cache_restore_wait_max_ns The longest wait for a disk restore, in nanoseconds.\n# TYPE tensorfold:prompt_cache_restore_wait_max_ns counter\ntensorfold:prompt_cache_restore_wait_max_ns 31246060\n# HELP tensorfold:prompt_cache_restores_deferred Requests whose disk restore was refused for capacity (restores or read slots in flight) and retried shortly instead of prefilling.\n# TYPE tensorfold:prompt_cache_restores_deferred counter\ntensorfold:prompt_cache_restores_deferred 0\n# HELP tensorfold:prompt_cache_restores_deferred_expired Of them, requests admitted on what memory holds after TF_SPILL_DEFER_MS without the restore starting.\n# TYPE tensorfold:prompt_cache_restores_deferred_expired counter\ntensorfold:prompt_cache_restores_deferred_expired 0\n# HELP tensorfold:prompt_cache_restores_room_waits Requests whose disk restore the KV pool had no room for while streams ran, and that waited for room as a prompt pass does instead of prefilling.\n# TYPE tensorfold:prompt_cache_restores_room_waits counter\ntensorfold:prompt_cache_restores_room_waits 0\n# HELP tensorfold:prompt_cache_restores_room_wait_expired Of them, requests admitted on what memory holds after TF_SPILL_LOAD_WAIT_MS without room for the restore.\n# TYPE tensorfold:prompt_cache_restores_room_wait_expired counter\ntensorfold:prompt_cache_restores_room_wait_expired 0\n# HELP tensorfold:prompt_cache_writes_enqueued Kept states enqueued for the disk tier at their keep.\n# TYPE tensorfold:prompt_cache_writes_enqueued counter\ntensorfold:prompt_cache_writes_enqueued 0\n# HELP tensorfold:prompt_cache_shared_promoted Disk points promoted to shared prefixes.\n# TYPE tensorfold:prompt_cache_shared_promoted counter\ntensorfold:prompt_cache_shared_promoted",
+  "metrics_after": "# HELP tensorfold:requests_running Requests in prefill or decode.\n# TYPE tensorfold:requests_running gauge\ntensorfold:requests_running 0\n# HELP tensorfold:requests_waiting Requests queued or held until a lane is free.\n# TYPE tensorfold:requests_waiting gauge\ntensorfold:requests_waiting 0\n# HELP tensorfold:generation_tokens_running Generated tokens held by live streams.\n# TYPE tensorfold:generation_tokens_running gauge\ntensorfold:generation_tokens_running 0\n# HELP tensorfold:prompt_tokens_total Prompt tokens of finished requests, those restored from kept prompt states included.\n# TYPE tensorfold:prompt_tokens_total counter\ntensorfold:prompt_tokens_total 47320\n# HELP tensorfold:prompt_tokens_cached_total Prompt tokens of finished requests restored from kept prompt states (counted in prompt_tokens_total too); the rest were computed.\n# TYPE tensorfold:prompt_tokens_cached_total counter\ntensorfold:prompt_tokens_cached_total 20480\n# HELP tensorfold:generation_tokens_total Generated tokens of finished requests.\n# TYPE tensorfold:generation_tokens_total counter\ntensorfold:generation_tokens_total 5925\n# HELP tensorfold:kv_cache_usage_ratio Tokens in a stream cache divided by that stream's context window.\n# TYPE tensorfold:kv_cache_usage_ratio gauge\ntensorfold:kv_cache_usage_ratio{pool=\"0\"} 0\n# HELP tensorfold:mtp_drafted_total Draft tokens verified on finished requests.\n# TYPE tensorfold:mtp_drafted_total counter\ntensorfold:mtp_drafted_total 4240\n# HELP tensorfold:mtp_accepted_total Draft tokens kept on finished requests.\n# TYPE tensorfold:mtp_accepted_total counter\ntensorfold:mtp_accepted_total 2975\n# HELP tensorfold:request_latency_seconds Seconds from arrival to the reply leaving.\n# TYPE tensorfold:request_latency_seconds histogram\ntensorfold:request_latency_seconds_bucket{le=\"0.01\"} 0\ntensorfold:request_latency_seconds_bucket{le=\"0.05\"} 0\ntensorfold:request_latency_seconds_bucket{le=\"0.1\"} 0\ntensorfold:request_latency_seconds_bucket{le=\"0.25\"} 1\ntensorfold:request_latency_seconds_bucket{le=\"0.5\"} 5\ntensorfold:request_latency_seconds_bucket{le=\"1\"} 11\ntensorfold:request_latency_seconds_bucket{le=\"2.5\"} 18\ntensorfold:request_latency_seconds_bucket{le=\"5\"} 31\ntensorfold:request_latency_seconds_bucket{le=\"10\"} 44\ntensorfold:request_latency_seconds_bucket{le=\"30\"} 44\ntensorfold:request_latency_seconds_bucket{le=\"60\"} 44\ntensorfold:request_latency_seconds_bucket{le=\"120\"} 44\ntensorfold:request_latency_seconds_bucket{le=\"300\"} 44\ntensorfold:request_latency_seconds_bucket{le=\"+Inf\"} 44\ntensorfold:request_latency_seconds_sum 164.189566\ntensorfold:request_latency_seconds_count 44\n# HELP tensorfold:time_to_first_token_seconds Seconds from arrival to the first generated token.\n# TYPE tensorfold:time_to_first_token_seconds histogram\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.01\"} 0\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.05\"} 0\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.1\"} 10\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.25\"} 16\ntensorfold:time_to_first_token_seconds_bucket{le=\"0.5\"} 28\ntensorfold:time_to_first_token_seconds_bucket{le=\"1\"} 37\ntensorfold:time_to_first_token_seconds_bucket{le=\"2.5\"} 41\ntensorfold:time_to_first_token_seconds_bucket{le=\"5\"} 44\ntensorfold:time_to_first_token_seconds_bucket{le=\"10\"} 44\ntensorfold:time_to_first_token_seconds_bucket{le=\"30\"} 44\ntensorfold:time_to_first_token_seconds_bucket{le=\"60\"} 44\ntensorfold:time_to_first_token_seconds_bucket{le=\"120\"} 44\ntensorfold:time_to_first_token_seconds_bucket{le=\"300\"} 44\ntensorfold:time_to_first_token_seconds_bucket{le=\"+Inf\"} 44\ntensorfold:time_to_first_token_seconds_sum 26.866035\ntensorfold:time_to_first_token_seconds_count 44\n# HELP tensorfold:request_decode_seconds Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.\n# TYPE tensorfold:request_decode_seconds histogram\ntensorfold:request_decode_seconds_bucket{le=\"0.01\"} 3\ntensorfold:request_decode_seconds_bucket{le=\"0.05\"} 7\ntensorfold:request_decode_seconds_bucket{le=\"0.1\"} 7\ntensorfold:request_decode_seconds_bucket{le=\"0.25\"} 9\ntensorfold:request_decode_seconds_bucket{le=\"0.5\"} 13\ntensorfold:request_decode_seconds_bucket{le=\"1\"} 15\ntensorfold:request_decode_seconds_bucket{le=\"2.5\"} 21\ntensorfold:request_decode_seconds_bucket{le=\"5\"} 32\ntensorfold:request_decode_seconds_bucket{le=\"10\"} 44\ntensorfold:request_decode_seconds_bucket{le=\"30\"} 44\ntensorfold:request_decode_seconds_bucket{le=\"60\"} 44\ntensorfold:request_decode_seconds_bucket{le=\"120\"} 44\ntensorfold:request_decode_seconds_bucket{le=\"300\"} 44\ntensorfold:request_decode_seconds_bucket{le=\"+Inf\"} 44\ntensorfold:request_decode_seconds_sum 137.323532\ntensorfold:request_decode_seconds_count 44\n# HELP tensorfold:request_time_per_output_token_seconds Seconds from the first generated token to the last, divided by the tokens less one.\n# TYPE tensorfold:request_time_per_output_token_seconds histogram\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.0025\"} 0\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.005\"} 0\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.0075\"} 1\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.01\"} 4\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.015\"} 10\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.02\"} 16\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.025\"} 20\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.03\"} 32\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.04\"} 36\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.05\"} 38\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.075\"} 40\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.1\"} 40\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.15\"} 41\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.2\"} 41\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.3\"} 41\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"0.5\"} 41\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"1\"} 41\ntensorfold:request_time_per_output_token_seconds_bucket{le=\"+Inf\"} 41\ntensorfold:request_time_per_output_token_seconds_sum 1.073331\ntensorfold:request_time_per_output_token_seconds_count 41\n# HELP tensorfold:decode_rounds_total Decode rounds used by finished requests.\n# TYPE tensorfold:decode_rounds_total counter\ntensorfold:decode_rounds_total 2923\n# HELP tensorfold:request_prefill_seconds Seconds a finished request's prompt pass took.\n# TYPE tensorfold:request_prefill_seconds histogram\ntensorfold:request_prefill_seconds_bucket{le=\"0.01\"} 0\ntensorfold:request_prefill_seconds_bucket{le=\"0.05\"} 0\ntensorfold:request_prefill_seconds_bucket{le=\"0.1\"} 17\ntensorfold:request_prefill_seconds_bucket{le=\"0.25\"} 26\ntensorfold:request_prefill_seconds_bucket{le=\"0.5\"} 39\ntensorfold:request_prefill_seconds_bucket{le=\"1\"} 40\ntensorfold:request_prefill_seconds_bucket{le=\"2.5\"} 41\ntensorfold:request_prefill_seconds_bucket{le=\"5\"} 44\ntensorfold:request_prefill_seconds_bucket{le=\"10\"} 44\ntensorfold:request_prefill_seconds_bucket{le=\"30\"} 44\ntensorfold:request_prefill_seconds_bucket{le=\"60\"} 44\ntensorfold:request_prefill_seconds_bucket{le=\"120\"} 44\ntensorfold:request_prefill_seconds_bucket{le=\"300\"} 44\ntensorfold:request_prefill_seconds_bucket{le=\"+Inf\"} 44\ntensorfold:request_prefill_seconds_sum 20.079461\ntensorfold:request_prefill_seconds_count 44\n# HELP tensorfold:device_memory_bytes Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).\n# TYPE tensorfold:device_memory_bytes gauge\ntensorfold:device_memory_bytes 112999083044\n# HELP tensorfold:device_memory_peak_bytes The most device memory the engine has held since start or the last /health?reset_peak=1.\n# TYPE tensorfold:device_memory_peak_bytes gauge\ntensorfold:device_memory_peak_bytes 112999083044\n# HELP tensorfold:num_requests_running Requests in prefill or decode. A mirror of tensorfold:requests_running.\n# TYPE tensorfold:num_requests_running gauge\ntensorfold:num_requests_running 0\n# HELP tensorfold:num_requests_waiting Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.\n# TYPE tensorfold:num_requests_waiting gauge\ntensorfold:num_requests_waiting 0\n# HELP tensorfold:kv_cache_usage_perc A stream's cache occupancy under vLLM's name; same streams and ratios as tensorfold:kv_cache_usage_ratio.\n# TYPE tensorfold:kv_cache_usage_perc gauge\ntensorfold:kv_cache_usage_perc{stream=\"0\"} 0\n# HELP tensorfold:spec_decode_num_draft_tokens_total Draft tokens verified on finished requests, this server's single draft counter.\n# TYPE tensorfold:spec_decode_num_draft_tokens_total counter\ntensorfold:spec_decode_num_draft_tokens_total 4240\n# HELP tensorfold:spec_decode_num_accepted_tokens_total Draft tokens kept on finished requests.\n# TYPE tensorfold:spec_decode_num_accepted_tokens_total counter\ntensorfold:spec_decode_num_accepted_tokens_total 2975\n# HELP tensorfold:e2e_request_latency_seconds Seconds from arrival to the reply leaving, under vLLM's name.\n# TYPE tensorfold:e2e_request_latency_seconds histogram\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.01\"} 0\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.05\"} 0\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.1\"} 0\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.25\"} 1\ntensorfold:e2e_request_latency_seconds_bucket{le=\"0.5\"} 5\ntensorfold:e2e_request_latency_seconds_bucket{le=\"1\"} 11\ntensorfold:e2e_request_latency_seconds_bucket{le=\"2.5\"} 18\ntensorfold:e2e_request_latency_seconds_bucket{le=\"5\"} 31\ntensorfold:e2e_request_latency_seconds_bucket{le=\"10\"} 44\ntensorfold:e2e_request_latency_seconds_bucket{le=\"30\"} 44\ntensorfold:e2e_request_latency_seconds_bucket{le=\"60\"} 44\ntensorfold:e2e_request_latency_seconds_bucket{le=\"120\"} 44\ntensorfold:e2e_request_latency_seconds_bucket{le=\"300\"} 44\ntensorfold:e2e_request_latency_seconds_bucket{le=\"+Inf\"} 44\ntensorfold:e2e_request_latency_seconds_sum 164.189566\ntensorfold:e2e_request_latency_seconds_count 44\n# HELP tensorfold:request_decode_time_seconds Seconds a finished request spent decoding, under vLLM's name.\n# TYPE tensorfold:request_decode_time_seconds histogram\ntensorfold:request_decode_time_seconds_bucket{le=\"0.01\"} 3\ntensorfold:request_decode_time_seconds_bucket{le=\"0.05\"} 7\ntensorfold:request_decode_time_seconds_bucket{le=\"0.1\"} 7\ntensorfold:request_decode_time_seconds_bucket{le=\"0.25\"} 9\ntensorfold:request_decode_time_seconds_bucket{le=\"0.5\"} 13\ntensorfold:request_decode_time_seconds_bucket{le=\"1\"} 15\ntensorfold:request_decode_time_seconds_bucket{le=\"2.5\"} 21\ntensorfold:request_decode_time_seconds_bucket{le=\"5\"} 32\ntensorfold:request_decode_time_seconds_bucket{le=\"10\"} 44\ntensorfold:request_decode_time_seconds_bucket{le=\"30\"} 44\ntensorfold:request_decode_time_seconds_bucket{le=\"60\"} 44\ntensorfold:request_decode_time_seconds_bucket{le=\"120\"} 44\ntensorfold:request_decode_time_seconds_bucket{le=\"300\"} 44\ntensorfold:request_decode_time_seconds_bucket{le=\"+Inf\"} 44\ntensorfold:request_decode_time_seconds_sum 137.323532\ntensorfold:request_decode_time_seconds_count 44\n# HELP tensorfold:request_prefill_time_seconds Seconds a finished request's prompt pass took, under vLLM's name.\n# TYPE tensorfold:request_prefill_time_seconds histogram\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.01\"} 0\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.05\"} 0\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.1\"} 17\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.25\"} 26\ntensorfold:request_prefill_time_seconds_bucket{le=\"0.5\"} 39\ntensorfold:request_prefill_time_seconds_bucket{le=\"1\"} 40\ntensorfold:request_prefill_time_seconds_bucket{le=\"2.5\"} 41\ntensorfold:request_prefill_time_seconds_bucket{le=\"5\"} 44\ntensorfold:request_prefill_time_seconds_bucket{le=\"10\"} 44\ntensorfold:request_prefill_time_seconds_bucket{le=\"30\"} 44\ntensorfold:request_prefill_time_seconds_bucket{le=\"60\"} 44\ntensorfold:request_prefill_time_seconds_bucket{le=\"120\"} 44\ntensorfold:request_prefill_time_seconds_bucket{le=\"300\"} 44\ntensorfold:request_prefill_time_seconds_bucket{le=\"+Inf\"} 44\ntensorfold:request_prefill_time_seconds_sum 20.079461\ntensorfold:request_prefill_time_seconds_count 44\n# HELP tensorfold:prefix_cache_queries_total Prompt tokens of finished requests, looked up in the kept prompt states, under vLLM's name.\n# TYPE tensorfold:prefix_cache_queries_total counter\ntensorfold:prefix_cache_queries_total 47320\n# HELP tensorfold:prefix_cache_hits_total Prompt tokens of finished requests restored from kept prompt states, under vLLM's name.\n# TYPE tensorfold:prefix_cache_hits_total counter\ntensorfold:prefix_cache_hits_total 20480\n# HELP tensorfold:client_disconnections_total Requests a client left before the reply left the server.\n# TYPE tensorfold:client_disconnections_total counter\ntensorfold:client_disconnections_total 0\n# HELP tensorfold:preemptions_total Requests that had to give a lane up to a later one.\n# TYPE tensorfold:preemptions_total counter\ntensorfold:preemptions_total 0\n# HELP tensorfold:chats_continued Streams that continued a conversation without resuming from its own turn state.\n# TYPE tensorfold:chats_continued counter\ntensorfold:chats_continued 0\n# HELP tensorfold:chats_continued_prefill_tokens Prompt tokens those streams prefilled.\n# TYPE tensorfold:chats_continued_prefill_tokens counter\ntensorfold:chats_continued_prefill_tokens 0\n# HELP tensorfold:prompt_cache_memory_hits Prompt passes that resumed a kept state in memory.\n# TYPE tensorfold:prompt_cache_memory_hits counter\ntensorfold:prompt_cache_memory_hits 1\n# HELP tensorfold:prompt_cache_memory_misses Prompt lookups that found no usable kept state.\n# TYPE tensorfold:prompt_cache_memory_misses counter\ntensorfold:prompt_cache_memory_misses 43\n# HELP tensorfold:prompt_cache_kept Prompt states kept in memory.\n# TYPE tensorfold:prompt_cache_kept counter\ntensorfold:prompt_cache_kept 3\n# HELP tensorfold:prompt_cache_evicted Kept states evicted from memory for room.\n# TYPE tensorfold:prompt_cache_evicted counter\ntensorfold:prompt_cache_evicted 0\n# HELP tensorfold:prompt_cache_refused Prompt states not kept: past the memory budget.\n# TYPE tensorfold:prompt_cache_refused counter\ntensorfold:prompt_cache_refused 0\n# HELP tensorfold:prompt_cache_failed Kept states that failed to save or restore.\n# TYPE tensorfold:prompt_cache_failed counter\ntensorfold:prompt_cache_failed 0\n# HELP tensorfold:prompt_cache_entries Prompt states kept in memory now.\n# TYPE tensorfold:prompt_cache_entries gauge\ntensorfold:prompt_cache_entries 4\n# HELP tensorfold:prompt_cache_held_bytes Bytes the kept states hold now.\n# TYPE tensorfold:prompt_cache_held_bytes gauge\ntensorfold:prompt_cache_held_bytes 26738688\n# HELP tensorfold:prompt_cache_disk_lookups Lookups that asked the disk tier.\n# TYPE tensorfold:prompt_cache_disk_lookups counter\ntensorfold:prompt_cache_disk_lookups 45\n# HELP tensorfold:prompt_cache_disk_hits Lookups whose durable point was longer than the best usable memory state.\n# TYPE tensorfold:prompt_cache_disk_hits counter\ntensorfold:prompt_cache_disk_hits 1\n# HELP tensorfold:prompt_cache_disk_hits_committed Disk restores every rank installed, adopted as kept states.\n# TYPE tensorfold:prompt_cache_disk_hits_committed counter\ntensorfold:prompt_cache_disk_hits_committed 1\n# HELP tensorfold:prompt_cache_restores_begun Disk restore jobs started.\n# TYPE tensorfold:prompt_cache_restores_begun counter\ntensorfold:prompt_cache_restores_begun 1\n# HELP tensorfold:prompt_cache_restores_shared Requests that joined a disk restore already in flight.\n# TYPE tensorfold:prompt_cache_restores_shared counter\ntensorfold:prompt_cache_restores_shared 0\n# HELP tensorfold:prompt_cache_restores_failed Disk restores aborted on every rank (missing, damaged, guarded).\n# TYPE tensorfold:prompt_cache_restores_failed counter\ntensorfold:prompt_cache_restores_failed 0\n# HELP tensorfold:prompt_cache_restores_cancelled Disk restores stopped: no request waited for them any more, or shutdown.\n# TYPE tensorfold:prompt_cache_restores_cancelled counter\ntensorfold:prompt_cache_restores_cancelled 0\n# HELP tensorfold:prompt_cache_restores_dropped Installed disk restores not adopted: no room, or memory already had them.\n# TYPE tensorfold:prompt_cache_restores_dropped counter\ntensorfold:prompt_cache_restores_dropped 0\n# HELP tensorfold:prompt_cache_restores_refused Disk restores not begun: the memory budget could not hold their destination, or the tier was at its capacity (once a request).\n# TYPE tensorfold:prompt_cache_restores_refused counter\ntensorfold:prompt_cache_restores_refused 0\n# HELP tensorfold:prompt_cache_restores_active Disk restore jobs in flight.\n# TYPE tensorfold:prompt_cache_restores_active gauge\ntensorfold:prompt_cache_restores_active 0\n# HELP tensorfold:prompt_cache_restoring_bytes Memory the disk restores in flight reserved, charged to the prompt cache's budget.\n# TYPE tensorfold:prompt_cache_restoring_bytes gauge\ntensorfold:prompt_cache_restoring_bytes 0\n# HELP tensorfold:prompt_cache_restore_blocks_done Blocks the restores in flight have copied so far.\n# TYPE tensorfold:prompt_cache_restore_blocks_done gauge\ntensorfold:prompt_cache_restore_blocks_done 0\n# HELP tensorfold:prompt_cache_restore_blocks_total Blocks the restores in flight copy in all.\n# TYPE tensorfold:prompt_cache_restore_blocks_total gauge\ntensorfold:prompt_cache_restore_blocks_total 0\n# HELP tensorfold:prompt_cache_restored_tokens Prompt tokens restored from disk.\n# TYPE tensorfold:prompt_cache_restored_tokens counter\ntensorfold:prompt_cache_restored_tokens 20480\n# HELP tensorfold:prompt_cache_restore_waits Requests parked on a disk restore.\n# TYPE tensorfold:prompt_cache_restore_waits counter\ntensorfold:prompt_cache_restore_waits 1\n# HELP tensorfold:prompt_cache_restore_wait_timeouts Requests admitted without their disk restore after TF_SPILL_LOAD_WAIT_MS.\n# TYPE tensorfold:prompt_cache_restore_wait_timeouts counter\ntensorfold:prompt_cache_restore_wait_timeouts 0\n# HELP tensorfold:prompt_cache_restore_wait_ns Nanoseconds requests waited for disk restores.\n# TYPE tensorfold:prompt_cache_restore_wait_ns counter\ntensorfold:prompt_cache_restore_wait_ns 31246060\n# HELP tensorfold:prompt_cache_restore_wait_max_ns The longest wait for a disk restore, in nanoseconds.\n# TYPE tensorfold:prompt_cache_restore_wait_max_ns counter\ntensorfold:prompt_cache_restore_wait_max_ns 31246060\n# HELP tensorfold:prompt_cache_restores_deferred Requests whose disk restore was refused for capacity (restores or read slots in flight) and retried shortly instead of prefilling.\n# TYPE tensorfold:prompt_cache_restores_deferred counter\ntensorfold:prompt_cache_restores_deferred 0\n# HELP tensorfold:prompt_cache_restores_deferred_expired Of them, requests admitted on what memory holds after TF_SPILL_DEFER_MS without the restore starting.\n# TYPE tensorfold:prompt_cache_restores_deferred_expired counter\ntensorfold:prompt_cache_restores_deferred_expired 0\n# HELP tensorfold:prompt_cache_restores_room_waits Requests whose disk restore the KV pool had no room for while streams ran, and that waited for room as a prompt pass does instead of prefilling.\n# TYPE tensorfold:prompt_cache_restores_room_waits counter\ntensorfold:prompt_cache_restores_room_waits 0\n# HELP tensorfold:prompt_cache_restores_room_wait_expired Of them, requests admitted on what memory holds after TF_SPILL_LOAD_WAIT_MS without room for the restore.\n# TYPE tensorfold:prompt_cache_restores_room_wait_expired counter\ntensorfold:prompt_cache_restores_room_wait_expired 0\n# HELP tensorfold:prompt_cache_writes_enqueued Kept states enqueued for the disk tier at their keep.\n# TYPE tensorfold:prompt_cache_writes_enqueued counter\ntensorfold:prompt_cache_writes_enqueued 3\n# HELP tensorfold:prompt_cache_shared_promoted Disk points promoted to shared prefixes.\n# TYPE tensorfold:prompt_cache_shared_promoted counter\ntensorfold:prompt_cache_sh"
+ },
+ "runs": [
+  {
+   "prompt_tokens": 7724,
+   "completion_tokens": 1,
+   "cached_tokens": 0,
+   "ttft_s": 3.721131719998084,
+   "prefill_tok_s": 2075.71260068267,
+   "decode_tok_s": null,
+   "total_s": 3.721235735982191,
+   "sse_events": 1,
+   "finish_reason": "length",
+   "t_last": 344980.073872942,
+   "text": "",
+   "server": {
+    "enable_thinking": true,
+    "reasoning_effort": null,
+    "engine": "lanes",
+    "tokens_per_second": 0.0,
+    "seconds": 3.711846412,
+    "prefill_seconds": 3.711473804,
+    "prefill_widths": [],
+    "prefill_raised": [],
+    "time_to_first_token": 3.720404806,
+    "sampling": "greedy",
+    "drafts": true,
+    "token_sha": "fd77ae3ed92c",
+    "min_rows": 0
+   },
+   "draft": {},
+   "suite": "prefill",
+   "target_tokens": 8000,
+   "rep": 0
+  },
+  {
+   "prompt_tokens": 7709,
+   "completion_tokens": 1,
+   "cached_tokens": 0,
+   "ttft_s": 3.725118932023179,
+   "prefill_tok_s": 2069.464127367634,
+   "decode_tok_s": null,
+   "total_s": 3.7252158439951017,
+   "sse_events": 1,
+   "finish_reason": "length",
+   "t_last": 344983.800512086,
+   "text": "",
+   "server": {
+    "enable_thinking": true,
+    "reasoning_effort": null,
+    "engine": "lanes",
+    "tokens_per_second": 0.0,
+    "seconds": 3.715476855,
+    "prefill_seconds": 3.715087351,
+    "prefill_widths": [],
+    "prefill_raised": [],
+    "time_to_first_token": 3.724324033,
+    "sampling": "greedy",
+    "drafts": true,
+    "token_sha": "fd77ae3ed92c",
+    "min_rows": 0
+   },
+   "draft": {},
+   "suite": "prefill",
+   "target_tokens": 8000,
+   "rep": 1
+  },
+  {
+   "prompt_tokens": 7709,
+   "completion_tokens": 1,
+   "cached_tokens": 0,
+   "ttft_s": 3.748621912964154,
+   "prefill_tok_s": 2056.489072247953,
+   "decode_tok_s": null,
+   "total_s": 3.748717032955028,
+   "sse_events": 1,
+   "finish_reason": "length",
+   "t_last": 344987.550662787,
+   "text": "",
+   "server": {
+    "enable_thinking": true,
+    "reasoning_effort": null,
+    "engine": "lanes",
+    "tokens_per_second": 0.0,
+    "seconds": 3.739209966,
+    "prefill_seconds": 3.738820284,
+    "prefill_widths": [],
+    "prefill_raised": [],
+    "time_to_first_token": 3.747859446,
+    "sampling": "greedy",
+    "drafts": true,
+    "token_sha": "fd77ae3ed92c",
+    "min_rows": 0
+   },
+   "draft": {},
+   "suite": "prefill",
+   "target_tokens": 8000,
+   "rep": 2
+  },
+  {
+   "prompt_tokens": 65,
+   "completion_tokens": 256,
+   "cached_tokens": 0,
+   "ttft_s": 0.24738669500220567,
+   "prefill_tok_s": 262.74654746254834,
+   "decode_tok_s": 65.94642174462102,
+   "total_s": 4.114237322995905,
+   "sse_events": 127,
+   "finish_reason": "length",
+   "t_last": 344991.665054287,
+   "text": "",
+   "server": {
+    "enable_thinking": true,
+    "reasoning_effort": null,
+    "engine": "lanes",
+    "tokens_per_second": 65.94345055240083,
+    "seconds": 4.11309076,
+    "prefill_seconds": 0.246036819,
+    "prefill_widths": [],
+    "prefill_raised": [],
+    "time_to_first_token": 0.246700245,
+    "sampling": "greedy",
+    "drafts": true,
+    "token_sha": "6051ea1a0331",
+    "min_rows": 1
+   },
+   "draft": {},
+   "suite": "decode",
+   "rep": 0
+  },
+  {
+   "prompt_tokens": 65,
+   "completion_tokens": 256,
+   "cached_tokens": 0,
+   "ttft_s": 0.24472796701593325,
+   "prefill_tok_s": 265.60102955363544,
+   "decode_tok_s": 67.26238117767532,
+   "total_s": 4.036338342004456,
+   "sse_events": 123,
+   "finish_reason": "length",
+   "t_last": 344995.701076452,
+   "text": "",
+   "server": {
+    "enable_thinking": true,
+    "reasoning_effort": null,
+    "engine": "lanes",
+    "tokens_per_second": 67.25917553292746,
+    "seconds": 4.034877426,
+    "prefill_seconds": 0.243459147,
+    "prefill_widths": [],
+    "prefill_raised": [],
+    "time_to_first_token": 0.244152046,
+    "sampling": "greedy",
+    "drafts": true,
+    "token_sha": "fdf44038dea0",
+    "min_rows": 1
+   },
+   "draft": {},
+   "suite": "decode",
+   "rep": 1
+  },
+  {
+   "prompt_tokens": 65,
+   "completion_tokens": 256,
+   "cached_tokens": 0,
+   "ttft_s": 0.250193006999325,
+   "prefill_tok_s": 259.7994275682348,
+   "decode_tok_s": 59.70757808978825,
+   "total_s": 4.521066423039883,
+   "sse_events": 144,
+   "finish_reason": "length",
+   "t_last": 345000.222666796,
+   "text": "",
+   "server": {
+    "enable_thinking": true,
+    "reasoning_effort": null,
+    "engine": "lanes",
+    "tokens_per_second": 59.70536523313482,
+    "seconds": 4.519901699,
+    "prefill_seconds": 0.248816363,
+    "prefill_widths": [],
+    "prefill_raised": [],
+    "time_to_first_token": 0.249417421,
+    "sampling": "greedy",
+    "drafts": true,
+    "token_sha": "0eb3169bce17",
+    "min_rows": 1
+   },
+   "draft": {},
+   "suite": "decode",
+   "rep": 2
+  },
+  {
+   "suite": "multi",
+   "streams": 1,
+   "rep": 0,
+   "errors": [],
+   "per_stream_decode_tok_s": [
+    67.80699222459147
+   ],
+   "ttft_s": [
+    0.25196912401588634
+   ],
+   "completion_tokens": 256,
+   "window_s": 3.7606741079944186,
+   "aggregate_tok_s": 67.80699222459147,
+   "mean_stream_decode_tok_s": 67.80699222459147,
+   "draft": {}
+  },
+  {
+   "suite": "multi",
+   "streams": 1,
+   "rep": 1,
+   "errors": [],
+   "per_stream_decode_tok_s": [
+    66.13343188932662
+   ],
+   "ttft_s": [
+    0.2555862070294097
+   ],
+   "completion_tokens": 256,
+   "window_s": 3.8558410279802047,
+   "aggregate_tok_s": 66.13343188932662,
+   "mean_stream_decode_tok_s": 66.13343188932662,
+   "draft": {}
+  },
+  {
+   "suite": "multi",
+   "streams": 1,
+   "rep": 2,
+   "errors": [],
+   "per_stream_decode_tok_s": [
+    68.57546039402047
+   ],
+   "ttft_s": [
+    0.25469866901403293
+   ],
+   "completion_tokens": 256,
+   "window_s": 3.718531359976623,
+   "aggregate_tok_s": 68.57546039402047,
+   "mean_stream_decode_tok_s": 68.57546039402047,
+   "draft": {}
+  },
+  {
+   "suite": "multi",
+   "streams": 4,
+   "rep": 0,
+   "errors": [],
+   "per_stream_decode_tok_s": [
+    37.22003767493593,
+    35.978235605432964,
+    38.83160601524928,
+    35.73451383625419
+   ],
+   "ttft_s": [
+    0.7592306960141286,
+    0.2597166189807467,
+    1.0059336599661037,
+    0.5099766830098815
+   ],
+   "completion_tokens": 1024,
+   "window_s": 7.38595692202216,
+   "aggregate_tok_s": 138.09991186906893,
+   "mean_stream_decode_tok_s": 36.94109828296809,
+   "draft": {}
+  },
+  {
+   "suite": "multi",
+   "streams": 4,
+   "rep": 1,
+   "errors": [],
+   "per_stream_decode_tok_s": [
+    39.41320874187697,
+    38.193036335343095,
+    34.32139818927245,
+    34.384357239311605
+   ],
+   "ttft_s": [
+    1.0054735949961469,
+    0.7548694660072215,
+    0.5041236259858124,
+    0.25358087301719934
+   ],
+   "completion_tokens": 1024,
+   "window_s": 7.6809991499758326,
+   "aggregate_tok_s": 132.79522365305942,
+   "mean_stream_decode_tok_s": 36.57800012645103,
+   "draft": {}
+  },
+  {
+   "suite": "multi",
+   "streams": 4,
+   "rep": 2,
+   "errors": [],
+   "per_stream_decode_tok_s": [
+    34.139074395669674,
+    37.57833700054156,
+    38.08495099081065,
+    34.71516723897661
+   ],
+   "ttft_s": [
+    0.25537914998130873,
+    1.0073286560364068,
+    0.7565608950098976,
+    0.505218077043537
+   ],
+   "completion_tokens": 1024,
+   "window_s": 7.595071281015407,
+   "aggregate_tok_s": 134.29762042518095,
+   "mean_stream_decode_tok_s": 36.12938240649962,
+   "draft": {}
+  }
+ ],
+ "summary": {
+  "prefill.8000.ttft_s": 3.725118932023179,
+  "prefill.8000.tok_s": 2069.464127367634,
+  "decode.tok_s": 65.94642174462102,
+  "decode.ttft_s": 0.24738669500220567,
+  "decode.accepted_over_drafted": null,
+  "multi.1.aggregate_tok_s": 67.80699222459147,
+  "multi.1.per_stream_tok_s": 67.80699222459147,
+  "multi.4.aggregate_tok_s": 134.29762042518095,
+  "multi.4.per_stream_tok_s": 36.57800012645103,
+  "errors": 0
+ },
+ "finished": "2026-11-12T21:02:55+0000"
+}
