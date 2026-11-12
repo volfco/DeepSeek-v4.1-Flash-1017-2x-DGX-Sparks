@@ -17,8 +17,9 @@ DeepSeek-V4.1-Flash on 2x DGX Spark (TensorFold engine, EXL3 TP2). Read `README.
 
 ## Next
 
-1. Dedupe same-prompt probe (`scripts/dedupe_probe.sh`) in flight - patch its numbers into the "Dedupe
-   same-prompt probe" table in `to-benchmark.md`, then commit everything with a `decisions.md` entry.
+1. Benchmark results are in `to-benchmark.md` (committed `0bef000`): sign-offs - keep LEAD (confirm with strict
+   3x alternation), drop DEDUPE+LEAD (engine crash 2/2), hold SCALES=map until `map-warm` decides, all other
+   toggles neutral as measured.
 2. Prefix-cache hit-rate review is done (`docs/prefix-cache-hitrate-review.md`): 18 ranked, code-validated
    improvements. Pick which to implement (top: shared-cut discovery, edit-recovery gate, shared/branch
    eviction protection, `SPILL_MIN_TOKENS` exemption, strided spill retention, Engram row cache), and capture
