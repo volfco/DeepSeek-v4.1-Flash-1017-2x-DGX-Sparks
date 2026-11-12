@@ -1,0 +1,268 @@
+From 0000000000000000000000000000000000000095 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Tue, 11 Nov 2026 10:10:00 +0000
+Subject: [PATCH] dsv41: TF_DS_ENGRAM_SCALES=map serves a row's scales from a
+ mapping instead of a second I/O
+
+A row of an Engram table is an FP8 weight row (256 B) and an E8M0 scale row (8 B) in two separate tensors, so a
+lookup submits two reads and the 8-byte scale row costs its own 4 KiB page. For a 2,048-token chunk that is
+49,152 page reads a rank for 6.5 MB of payload, half of them scales for 3 % of the bytes.
+
+With the switch, Tables.openWith maps each layer's scale tensor read-only (MAP_SHARED, PROT_READ) and the pool
+and the AIO ring copy a row's scales out of the mapping instead of submitting the read: the AIO batch carries
+half the iocbs, and a scale row is a page-cache hit when its page is resident (a fault-in otherwise, which is
+the same 4 KiB read as before, so the worst case is today's cost). The mapping is clean page cache, which
+MemAvailable counts as available and the kernel gives back under pressure, so it costs the memory guard
+nothing (unlike pinning the 3.07 GB a rank's scales as resident memory, which the head cannot spare).
+
+The bytes are identical: the scale rows are the file's bytes either way. The read timing runs inside `wait`,
+where the scale read used to be, so `engram_lookup_seconds` shows the change rather than hiding it.
+
+Tests: engram_io.zig (a mapped toy table's pool gather gives the pread path's bytes), engram_aio.zig (the same
+through the ring), prompt.zig (the switch's values). Not run on a pair; the mapping's worst case is the old path.
+
+---
+diff --git a/zig/src/families/dsv41/engram_aio.zig b/zig/src/families/dsv41/engram_aio.zig
+index e3e1997..064f3bd 100644
+--- a/zig/src/families/dsv41/engram_aio.zig
++++ b/zig/src/families/dsv41/engram_aio.zig
+@@ -60,6 +60,12 @@ const Batch = struct {
+     bytes: []usize,
+     failed: bool = false,
+     touch: bool = false,
++    // TF_DS_ENGRAM_SCALES=map: the scale rows come from the table's mapping, copied out when the batch is waited for
++    // (no scale read is submitted), so `ids` (the caller's, alive until `wait`) and `s_dst` name them
++    ids: []const i64 = &.{},
++    s_dst: ?[]u8 = null,
++    row_s: usize = 0,
++    s_map: ?[]const u8 = null,
+ };
+ 
+ pub const Aio = struct {
+@@ -135,7 +141,9 @@ pub const Aio = struct {
+     /// The submission (`mutex` held): rows `ids` of table `t`, a weight then a scale read each, copied into out_w /
+     /// out_s as they complete when given (null: a touch). Returns the batch id.
+     fn submitLocked(a: *Aio, t: engram_io.Table, ids: []const i64, out_w: ?[]u8, out_s: ?[]u8) !u64 {
+-        const reads = 2 * ids.len;
++        // scales mapped (TF_DS_ENGRAM_SCALES=map): a weight read a row, their scales copied from the mapping in `wait`
++        const mapped = t.s_map != null and out_s != null;
++        const reads = if (mapped) ids.len else 2 * ids.len;
+         if (reads > a.slots or reads >= 1 << 20) return error.TooManyRows;
+         if (t.row_w + block > slot or t.row_s + block > slot) return error.RowTooWide;
+         for (ids) |x| if (x < 0 or @as(u64, @intCast(x)) >= t.rows) return error.RowOutOfRange; // before the batch allocates
+@@ -171,10 +179,22 @@ pub const Aio = struct {
+         const ptrs = try a.gpa.alloc(*Iocb, reads);
+         defer a.gpa.free(ptrs);
+         const id = a.next_id;
+-        var b: Batch = .{ .first = a.head, .n = reads, .left = reads, .touch = out_w == null, .dst = dst, .skew = skew, .bytes = bytes };
++        var b: Batch = .{
++            .first = a.head,
++            .n = reads,
++            .left = reads,
++            .touch = out_w == null,
++            .dst = dst,
++            .skew = skew,
++            .bytes = bytes,
++            .ids = if (mapped) ids else &.{},
++            .s_dst = if (mapped) out_s else null,
++            .row_s = t.row_s,
++            .s_map = if (mapped) t.s_map else null,
++        };
+         for (0..reads) |j| {
+-            const i = j >> 1;
+-            const sc = j & 1 == 1;
++            const i = if (mapped) j else j >> 1;
++            const sc = !mapped and (j & 1 == 1);
+             const rb = if (sc) t.row_s else t.row_w;
+             const row: u64 = @intCast(ids[i]); // checked above
+             const off = (if (sc) t.base_s else t.base_w) + row * rb;
+@@ -246,6 +266,14 @@ pub const Aio = struct {
+             a.reap();
+             if (b.left == 0) {
+                 const failed = b.failed;
++                // scales mapped: their rows are copied out now, from the page-cache mapping (inside this call, so the
++                // read timing counts them as the I/O it replaced)
++                if (!failed) if (b.s_map) |m| {
++                    for (b.ids, 0..) |rid, i| {
++                        const row: u64 = @intCast(rid);
++                        @memcpy(b.s_dst.?[i * b.row_s ..][0..b.row_s], m[row * b.row_s ..][0..b.row_s]);
++                    }
++                };
+                 if (a.batches.fetchRemove(id)) |kv| a.freeBatch(kv.value);
+                 for (a.live.items, 0..) |l, k| if (l[0] == id) {
+                     _ = a.live.orderedRemove(k);
+@@ -420,3 +448,38 @@ test "an allocation failure while submitting commits nothing and leaks nothing"
+         }
+     }
+ }
++
++test "a mapped table's rows by AIO: the weight reads land, the scales come from the mapping" {
++    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
++    const a = std.testing.allocator;
++    const io = std.testing.io;
++    var tmp = std.testing.tmpDir(.{ .iterate = true });
++    defer tmp.cleanup();
++    const json = "{\"layers.14.engram.embed.weight\":{\"dtype\":\"U8\",\"shape\":[6,4],\"data_offsets\":[0,24]}," ++
++        "\"layers.14.engram.embed.scale\":{\"dtype\":\"U8\",\"shape\":[6,1],\"data_offsets\":[24,30]}}";
++    var file: std.ArrayList(u8) = .empty;
++    defer file.deinit(a);
++    var len: [8]u8 = undefined;
++    std.mem.writeInt(u64, &len, json.len, .little);
++    try file.appendSlice(a, &len);
++    try file.appendSlice(a, json);
++    for (0..30) |i| try file.append(a, @intCast(i));
++    try tmp.dir.writeFile(io, .{ .sub_path = "engram.safetensors", .data = file.items });
++    const dir = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
++    defer a.free(dir);
++    var t = try engram_io.Tables.openWith(a, io, dir, .{ .map_scales = true });
++    defer t.close();
++    const tab = t.layers.get(14).?;
++    if (tab.s_map == null) return error.SkipZigTest; // (a file system the mapping refuses)
++    const aio = Aio.init(a, io, 16) catch |e| switch (e) {
++        error.AioUnavailable => return error.SkipZigTest,
++        else => return e,
++    };
++    defer aio.deinit();
++    var w: [3 * 4]u8 = @splat(0);
++    var s: [3]u8 = @splat(0);
++    const id = try aio.start(tab, &.{ 5, 0, 2 }, &w, &s);
++    try aio.wait(id);
++    try std.testing.expectEqualSlices(u8, &.{ 20, 21, 22, 23, 0, 1, 2, 3, 8, 9, 10, 11 }, &w);
++    try std.testing.expectEqualSlices(u8, &.{ 29, 24, 26 }, &s);
++}
+diff --git a/zig/src/families/dsv41/engram_io.zig b/zig/src/families/dsv41/engram_io.zig
+index 0ba0e4d..3d3dc4a 100644
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -9,16 +9,21 @@ const dio = @import("core").direct_io;
+ 
+ /// One layer's table: [rows, row_w] FP8 weights and [rows, row_s] E8M0 scales, by file and offset; fd_wd / fd_sd the same
+ /// files through O_DIRECT (-1 where the file system refuses it: the buffered ones serve). `writable`: the file was opened
+-/// for writing (TF_DS_ENGRAM_TRIM), so its unread rows can be punched out (punchHole).
+-pub const Table = struct { fd_w: std.c.fd_t, base_w: u64, row_w: usize, fd_s: std.c.fd_t, base_s: u64, row_s: usize, rows: u64, fd_wd: std.c.fd_t = -1, fd_sd: std.c.fd_t = -1, writable: bool = false };
++/// for writing (TF_DS_ENGRAM_TRIM), so its unread rows can be punched out (punchHole). `s_map`: the scale tensor mapped
++/// read-only (TF_DS_ENGRAM_SCALES=map), [rows, row_s] from base_s; a read of it is a copy from the page cache.
++pub const Table = struct { fd_w: std.c.fd_t, base_w: u64, row_w: usize, fd_s: std.c.fd_t, base_s: u64, row_s: usize, rows: u64, fd_wd: std.c.fd_t = -1, fd_sd: std.c.fd_t = -1, writable: bool = false, s_map: ?[]const u8 = null };
+ 
+ /// How `openWith` opens the tables: `trim` opens their files for writing, so `prompt.trimTables` can give back the blocks
+ /// of the rows this rank never reads (TF_DS_ENGRAM_TRIM; a read-only mount or file system falls back to a read-only open).
+-pub const OpenOptions = struct { trim: bool = false };
++/// `map_scales` maps each layer's scale tensor read-only (TF_DS_ENGRAM_SCALES=map), so a row's E8M0 scales come from the
++/// page cache instead of a second random 4 KiB read.
++pub const OpenOptions = struct { trim: bool = false, map_scales: bool = false };
+ 
+ pub const Tables = struct {
+     gpa: std.mem.Allocator,
+     fds: std.ArrayList(std.c.fd_t) = .empty,
++    /// The scale tensors' mappings (TF_DS_ENGRAM_SCALES=map), unmapped by `close`.
++    maps: std.ArrayList([]align(std.heap.page_size_min) const u8) = .empty,
+     /// By Engram layer id (layers.<id>.engram.embed.*).
+     layers: std.AutoHashMapUnmanaged(u32, Table) = .empty,
+ 
+@@ -90,12 +95,32 @@ pub const Tables = struct {
+             const w = kv.value_ptr[0] orelse return error.MissingEngramTable;
+             const s = kv.value_ptr[1] orelse return error.MissingEngramTable;
+             if (w.rows != s.rows) return error.BadEngramTable;
+-            try t.layers.put(gpa, kv.key_ptr.*, .{ .fd_w = w.fd, .base_w = w.base, .row_w = w.row, .fd_s = s.fd, .base_s = s.base, .row_s = s.row, .rows = w.rows, .fd_wd = w.dfd, .fd_sd = s.dfd, .writable = w.writable and s.writable });
++            const s_map: ?[]const u8 = if (o.map_scales) mapScales(&t, s.fd, s.base, s.row, s.rows) else null;
++            try t.layers.put(gpa, kv.key_ptr.*, .{ .fd_w = w.fd, .base_w = w.base, .row_w = w.row, .fd_s = s.fd, .base_s = s.base, .row_s = s.row, .rows = w.rows, .fd_wd = w.dfd, .fd_sd = s.dfd, .writable = w.writable and s.writable, .s_map = s_map });
+         }
+         return t;
+     }
+ 
++    /// The scale tensor's bytes [base, base + rows * row) as a read-only mapping, [rows, row) from `base`; null where the
++    /// kernel refuses it (the caller then reads them, as before).
++    fn mapScales(t: *Tables, fd: std.c.fd_t, base: u64, row: usize, rows: u64) ?[]const u8 {
++        const page = std.heap.pageSize();
++        const lo = std.mem.alignBackward(u64, base, page);
++        const len: usize = @intCast(base - lo + rows * row);
++        const m = std.posix.mmap(null, len, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, lo) catch |err| {
++            std.log.warn("dsv41: Engram scales: mapping {d} bytes failed ({s}); the scale rows are read instead", .{ len, @errorName(err) });
++            return null;
++        };
++        t.maps.append(t.gpa, m) catch {
++            std.posix.munmap(m);
++            return null;
++        };
++        return m[@intCast(base - lo)..][0..@intCast(rows * row)];
++    }
++
+     pub fn close(t: *Tables) void {
++        for (t.maps.items) |m| std.posix.munmap(m);
++        t.maps.deinit(t.gpa);
+         for (t.fds.items) |fd| _ = std.c.close(fd);
+         t.fds.deinit(t.gpa);
+         t.layers.deinit(t.gpa);
+@@ -258,7 +283,9 @@ pub const Pool = struct {
+                 if (j.direct and j.t.fd_wd >= 0) {
+                     readDirect(j.t.fd_wd, &bounce, w, j.t.base_w + id * j.t.row_w) catch j.failed.store(true, .monotonic);
+                 } else preadAll(j.t.fd_w, w, j.t.base_w + id * j.t.row_w) catch j.failed.store(true, .monotonic);
+-                if (j.direct and j.t.fd_sd >= 0) {
++                if (j.t.s_map) |m| {
++                    @memcpy(s, m[id * j.t.row_s ..][0..j.t.row_s]);
++                } else if (j.direct and j.t.fd_sd >= 0) {
+                     readDirect(j.t.fd_sd, &bounce, s, j.t.base_s + id * j.t.row_s) catch j.failed.store(true, .monotonic);
+                 } else preadAll(j.t.fd_s, s, j.t.base_s + id * j.t.row_s) catch j.failed.store(true, .monotonic);
+             } else j.failed.store(true, .monotonic);
+@@ -360,4 +387,14 @@ test "rows of a toy table by id, on the pool" {
+     try std.testing.expectEqualSlices(u8, &.{ 20, 21, 22, 23, 0, 1, 2, 3, 8, 9, 10, 11 }, &w);
+     try std.testing.expectEqualSlices(u8, &.{ 29, 24, 26 }, &s);
+     try std.testing.expectError(error.ReadFailed, pool.gather(tab, &.{6}, w[0..4], s[0..1]));
++    // TF_DS_ENGRAM_SCALES=map: the same bytes with the scale rows copied from the mapping
++    var mapped = try Tables.openWith(a, io, dir, .{ .map_scales = true });
++    defer mapped.close();
++    const mtab = mapped.layers.get(14).?;
++    try std.testing.expect(mtab.s_map != null);
++    @memset(&w, 0);
++    @memset(&s, 0);
++    try pool.gather(mtab, &.{ 5, 0, 2 }, &w, &s);
++    try std.testing.expectEqualSlices(u8, &.{ 20, 21, 22, 23, 0, 1, 2, 3, 8, 9, 10, 11 }, &w);
++    try std.testing.expectEqualSlices(u8, &.{ 29, 24, 26 }, &s);
+ }
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 708cf7d..038f4bf 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -461,7 +461,11 @@ pub const Model = struct {
+             for (ej.multipliers, 0..) |row, l| for (row, 0..) |v, k| {
+                 mult[l][k] = v;
+             };
+-            m.tables = try engram_io.Tables.openWith(gpa, io, edir, .{ .trim = prompt.trimEnabled(if (std.c.getenv("TF_DS_ENGRAM_TRIM")) |v| std.mem.span(v) else null) });
++            // TF_DS_ENGRAM_TRIM=1 opens the tables for writing (prompt.trimTables); TF_DS_ENGRAM_SCALES=map maps their scales
++            m.tables = try engram_io.Tables.openWith(gpa, io, edir, .{
++                .trim = prompt.trimEnabled(if (std.c.getenv("TF_DS_ENGRAM_TRIM")) |v| std.mem.span(v) else null),
++                .map_scales = prompt.scalesMapped(if (std.c.getenv("TF_DS_ENGRAM_SCALES")) |v| std.mem.span(v) else null),
++            });
+             m.epool = try engram_io.Pool.init(gpa, io, 64);
+             m.eh = try prompt.EngramHost.init(a, c, engram.Hasher.init(c.*, map, mult), &m.tables.?, m.epool.?, sp.rank, sp.world, chunk_rows);
+             // TF_DS_ENGRAM_TRIM=1: give back the blocks of the rows this rank never reads (the other rank's hash columns)
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 70a100b..d99f039 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1546,6 +1546,13 @@ pub const EngramHost = struct {
+     }
+ };
+ 
++/// TF_DS_ENGRAM_SCALES=map serves each row's E8M0 scales from a read-only mapping of the scale tensor (page-cache backed,
++/// so it costs no resident memory the guard counts and gives the pages back under pressure) instead of a second random
++/// 4 KiB read a row; unset or `io` reads them as before. The bytes are the same either way.
++pub fn scalesMapped(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse "io", "map");
++}
++
+ /// TF_DS_ENGRAM_TRIM=1 turns the trim on (off by default: it changes the tables' files, not their bytes).
+ pub fn trimEnabled(v: ?[]const u8) bool {
+     return std.mem.eql(u8, v orelse "0", "1");
+@@ -1656,6 +1663,11 @@ test "unreadRows: each rank's dead range is the other rank's buckets" {
+     try std.testing.expectEqual(rows, (r0[1][0] - r0[0][1]) + (r1[1][0] - r1[0][1]));
+ }
+ 
++test "TF_DS_ENGRAM_SCALES: map, or everything else reads the scales" {
++    try std.testing.expect(scalesMapped("map"));
++    for ([_]?[]const u8{ null, "", "io", "0", "1", "MAP", " map" }) |v| try std.testing.expect(!scalesMapped(v));
++}
++
+ test "TF_DS_ENGRAM_TRIM: only 1 turns it on" {
+     try std.testing.expect(trimEnabled("1"));
+     for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!trimEnabled(v));

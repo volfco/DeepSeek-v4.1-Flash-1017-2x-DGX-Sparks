@@ -63,6 +63,7 @@ for v in CONTEXT PARALLEL MAX_TOKENS TOP_K; do [[ "${!v}" =~ ^[1-9][0-9]*$ ]] ||
 (( PARALLEL <= 16 )) || die "PARALLEL is 1 to 16 (the engine's streams), not $PARALLEL"
 [[ -z "$ROUND_ROWS" ]] || { [[ "$ROUND_ROWS" =~ ^[0-9]+$ ]] && (( ROUND_ROWS == 16 )); } || die "ROUND_ROWS must be empty or 16: the pinned kit has no wider row kernels (issue #23), not $ROUND_ROWS"
 [[ -z "$THINKING_BUDGET" || "$THINKING_BUDGET" =~ ^[1-9][0-9]*$ ]] || die "THINKING_BUDGET is a positive count of reasoning tokens (or empty for no cap), not $THINKING_BUDGET"
+[[ -z "$CPUSET" || "$CPUSET" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || die "CPUSET is a docker cpu list (15-19, or empty to take the host's), not $CPUSET"
 [[ "$DROP_REASONING_HISTORY" =~ ^[01]$ ]] || die "DROP_REASONING_HISTORY is 0 or 1, not $DROP_REASONING_HISTORY"
 [[ -z "$REASONING_EFFORT" || "$REASONING_EFFORT" =~ ^(low|medium|high|xhigh)$ ]] || die "REASONING_EFFORT is low, medium, high or xhigh (or empty), not $REASONING_EFFORT"
 [[ "$MIN_AVAIL_GIB" =~ ^[0-9]+$ ]] || die "MIN_AVAIL_GIB is a whole number of GiB (0 turns it off), not $MIN_AVAIL_GIB"
@@ -274,6 +275,7 @@ ENGINE_ENV+=(${PORT_IDENT_ENV[@]+"${PORT_IDENT_ENV[@]}"})   # the spill tier's i
 while IFS='=' read -r name _; do ENGINE_ENV+=("$name=${!name}"); done < <(env | grep -E '^(TENSORFOLD|TF_DS|TF_SPILL|TF_FILL)_[A-Z0-9_]+=' | grep -vE '^TF_DS_(REPLAY_FLOOR|STREAMS|POOL|WINDOW|ROUND_ROWS|GRAPHS|GRAPH_CAP|HC_SIDE|L2_PREFETCH|ENGRAM_AIO|RANK_CACHE|KIT|ENGRAM|TOKEN_MAP)=' | grep -vE "^(${PORT_MAPPED_RE:-^$})=" || true)
 envs() { local x; for x in "$@"; do printf -- '-e %q ' "$x"; done; }
 RUN_ARGS="--label tf.recipe.ablit=$(ablit_identity) --label tf.recipe.port=$(port_identity) --gpus all --ipc=host --network host --ulimit memlock=-1 --ulimit stack=67108864 --cap-add IPC_LOCK --device /dev/infiniband"
+[[ -z "$CPUSET" ]] || RUN_ARGS+=" --cpuset-cpus $CPUSET"   # both ranks: the serving cores (config.sh's CPUSET)
 # each rank's container log rotates (LOG_MAX_SIZE, LOG_MAX_FILE; issue #49): the engine logs every response
 [[ -z "$LOG_MAX_SIZE" ]] || RUN_ARGS+=" --log-driver json-file --log-opt max-size=$LOG_MAX_SIZE --log-opt max-file=$LOG_MAX_FILE"
 DATA=/hf/$DATA_SUB
@@ -308,10 +310,14 @@ fi
 step 3 "Launch: container $CONTAINER_NAME, rank 1 on the worker, then rank 0 here"
 # spill files a crashed run left as root go back to their directory's owner (scripts/port.sh; nothing with SPILL_GIB=0)
 (( DRY )) || port_spill_fix_both
+# TF_DS_ENGRAM_TRIM=1 (zig/patches/0094) punches each rank's unread Engram rows out of its tables, so the folders must be
+# mounted writable; a table hardlinked into the HF cache is left alone by the engine (a later VERIFY_SHA needs it whole)
+ENGRAM_MOUNT=ro
+[[ "${TF_DS_ENGRAM_TRIM:-0}" == 1 ]] && ENGRAM_MOUNT=rw
 cmd="tf-dsv41-lanes $MODEL_ARG /rank-cache 1 2 ${LINK_HEAD_ADDR[1]:-$MASTER_ADDR} $MASTER_PORT $KIT --engram /engram --token-map $DATA/dsv41_token_map.json $FOLLOW"
 [[ "$RDMA" == 0 ]] || cmd+=" --rdma ${NODE_HCAS[1]}"   # this node's RoCE devices
 spill1=$(port_spill_args 1)   # rank 1's spill directory (scripts/port.sh; empty, and no extra space, with it off)
-remote="mkdir -p \$HOME/.cache/dsv41-tensorfold && docker run -d --name $CONTAINER_NAME $RUN_ARGS -v $NFS_VOLUME:/hf:ro -v $WORKER_ENGRAM_DIR:/engram:ro -v $WORKER_CACHE_DIR:/rank-cache:ro ${spill1:+$spill1 }$(envs "${ENGINE_ENV[@]}" "TF_RDMA_GID_INDEX=${NODE_GID[1]}" ${PORT_RANK_SHA[1]:+"TF_DS_RANK_CACHE_SHA=${PORT_RANK_SHA[1]}"} ${PORT_RANK1_ENV[@]+"${PORT_RANK1_ENV[@]}"}) $(rank_nccl_env 1) $IMAGE $cmd"
+remote="mkdir -p \$HOME/.cache/dsv41-tensorfold && docker run -d --name $CONTAINER_NAME $RUN_ARGS -v $NFS_VOLUME:/hf:ro -v $WORKER_ENGRAM_DIR:/engram:$ENGRAM_MOUNT -v $WORKER_CACHE_DIR:/rank-cache:ro ${spill1:+$spill1 }$(envs "${ENGINE_ENV[@]}" "TF_RDMA_GID_INDEX=${NODE_GID[1]}" ${PORT_RANK_SHA[1]:+"TF_DS_RANK_CACHE_SHA=${PORT_RANK_SHA[1]}"} ${PORT_RANK1_ENV[@]+"${PORT_RANK1_ENV[@]}"}) $(rank_nccl_env 1) $IMAGE $cmd"
 if (( DRY )); then printf '[dry-run] rank 1 on %s:\n  %s\n' "$(worker_host 1)" "$remote"
 else
   log "Rank 1 on $(worker_host 1): $cmd"
@@ -324,7 +330,7 @@ if (( DRY )); then HEAD_HF=${HEAD_NFS_SERVER:+$HEAD_NFS_VOLUME}; HEAD_HF=${HEAD_
 here=(docker run -d --name "$CONTAINER_NAME" $RUN_ARGS -v "$HEAD_HF:/hf:ro")
 read -ra port0 <<<"$(port_spill_args 0)"; here+=(${port0[@]+"${port0[@]}"})   # rank 0's spill directory (scripts/port.sh)
 if [[ -n "$HEAD_ENGRAM_DIR" ]]; then
-  here+=(-v "$HEAD_ENGRAM_DIR:/engram:ro")
+  here+=(-v "$HEAD_ENGRAM_DIR:/engram:$ENGRAM_MOUNT")
 fi
 [[ "$RDMA" == 0 ]] || ENV0+=("TF_RDMA_DEVICES=${NODE_HCAS[0]}")
 [[ -z "${PORT_RANK_SHA[0]:-}" ]] || ENV0+=("TF_DS_RANK_CACHE_SHA=${PORT_RANK_SHA[0]}")   # this rank's own weight file's

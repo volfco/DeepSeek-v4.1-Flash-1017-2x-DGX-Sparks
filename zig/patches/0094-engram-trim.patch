@@ -1,0 +1,287 @@
+From 0000000000000000000000000000000000000094 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Tue, 11 Nov 2026 10:00:00 +0000
+Subject: [PATCH] dsv41: TF_DS_ENGRAM_TRIM=1 gives each Spark back the Engram
+ rows its rank never reads
+
+Engram's tables are ~203 GB on each Spark, but a rank reads only its own hash columns: EngramHost.init splits
+them (lo = rank*cols/world), so half the file (the other rank's 12 of 24 buckets, laid end to end by
+Hasher.offsets) is never touched by that Spark. With the trim on, the tables are opened for writing and the
+dead row ranges are punched out of both tensors (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE): ~101 GB a
+Spark, the worker's ~203 GB copy falling to ~101 GB.
+
+The files keep their names and sizes, so the ranks' fingerprint and port_engram_check see the same listing;
+a read of a punched row returns zeros, and none is read. A table with more than one link is left alone: with
+HEAD_ENGRAM_DIR hardlinked into the HF cache the inode is shared, and punching it would empty the cache's copy
+of those rows, which a later VERIFY_SHA check of the shards would fail; a real copy on the head's own disk is
+trimmed. A read-only mount falls back to a read-only open and punches nothing: start.sh mounts /engram
+writable when ENGRAM_TRIM=1 (that wiring is in the recipe, not in this patch).
+
+Tests: prompt.zig (each rank's dead range is exactly the other rank's buckets; the switch's values), and
+engram_io.zig punches a real file and checks the blocks go, the range reads as zeros and the size stays
+(skipped where the file system refuses the hole). Not run on a pair: the punch is metadata-only and the reads
+it removes were never made.
+
+---
+diff --git a/zig/src/families/dsv41/engram_io.zig b/zig/src/families/dsv41/engram_io.zig
+index 4041ede..0ba0e4d 100644
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -4,11 +4,17 @@
+ //! aligned bounce buffer, then the row copied out; the same bytes, the page cache skipped), and engram_aio.zig submits
+ //! a decode round's rows as kernel AIO on the same descriptors.
+ const std = @import("std");
++const builtin = @import("builtin");
+ const dio = @import("core").direct_io;
+ 
+ /// One layer's table: [rows, row_w] FP8 weights and [rows, row_s] E8M0 scales, by file and offset; fd_wd / fd_sd the same
+-/// files through O_DIRECT (-1 where the file system refuses it: the buffered ones serve).
+-pub const Table = struct { fd_w: std.c.fd_t, base_w: u64, row_w: usize, fd_s: std.c.fd_t, base_s: u64, row_s: usize, rows: u64, fd_wd: std.c.fd_t = -1, fd_sd: std.c.fd_t = -1 };
++/// files through O_DIRECT (-1 where the file system refuses it: the buffered ones serve). `writable`: the file was opened
++/// for writing (TF_DS_ENGRAM_TRIM), so its unread rows can be punched out (punchHole).
++pub const Table = struct { fd_w: std.c.fd_t, base_w: u64, row_w: usize, fd_s: std.c.fd_t, base_s: u64, row_s: usize, rows: u64, fd_wd: std.c.fd_t = -1, fd_sd: std.c.fd_t = -1, writable: bool = false };
++
++/// How `openWith` opens the tables: `trim` opens their files for writing, so `prompt.trimTables` can give back the blocks
++/// of the rows this rank never reads (TF_DS_ENGRAM_TRIM; a read-only mount or file system falls back to a read-only open).
++pub const OpenOptions = struct { trim: bool = false };
+ 
+ pub const Tables = struct {
+     gpa: std.mem.Allocator,
+@@ -18,6 +24,10 @@ pub const Tables = struct {
+ 
+     /// Every "*.safetensors" in `dir` whose header names a layer's engram.embed weight or scale.
+     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Tables {
++        return openWith(gpa, io, dir, .{});
++    }
++
++    pub fn openWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: OpenOptions) !Tables {
+         var t: Tables = .{ .gpa = gpa };
+         errdefer t.close();
+         var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+@@ -25,7 +35,7 @@ pub const Tables = struct {
+         var arena = std.heap.ArenaAllocator.init(gpa);
+         defer arena.deinit();
+         const a = arena.allocator();
+-        var halves: std.AutoHashMapUnmanaged(u32, [2]?struct { fd: std.c.fd_t, dfd: std.c.fd_t, base: u64, row: usize, rows: u64 }) = .empty;
++        var halves: std.AutoHashMapUnmanaged(u32, [2]?struct { fd: std.c.fd_t, dfd: std.c.fd_t, base: u64, row: usize, rows: u64, writable: bool }) = .empty;
+         var it = d.iterate();
+         while (try it.next(io)) |e| {
+             if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+@@ -42,6 +52,7 @@ pub const Tables = struct {
+             if (h != .object) return error.BadSafetensors;
+             var opened: ?std.c.fd_t = null;
+             var direct: std.c.fd_t = -1;
++            var writable = false;
+             var names = h.object.iterator();
+             while (names.next()) |kv| {
+                 const name = kv.key_ptr.*;
+@@ -50,7 +61,13 @@ pub const Tables = struct {
+                 const en = try entry(kv.value_ptr.*);
+                 if (opened == null) {
+                     try t.fds.ensureUnusedCapacity(gpa, 2); // (an fd opened below always has its slot: none leaks)
+-                    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
++                    var fd: std.c.fd_t = -1;
++                    if (o.trim) {
++                        fd = std.c.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true });
++                        writable = fd >= 0;
++                        if (!writable) std.log.warn("dsv41: Engram trim: {s}/{s} is not writable (a read-only mount?); its unread rows stay on disk", .{ dir, e.name });
++                    }
++                    if (fd < 0) fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+                     if (fd < 0) return error.FileNotFound;
+                     t.fds.appendAssumeCapacity(fd);
+                     opened = fd;
+@@ -65,7 +82,7 @@ pub const Tables = struct {
+                 }
+                 const gop = try halves.getOrPut(a, layer);
+                 if (!gop.found_existing) gop.value_ptr.* = .{ null, null };
+-                gop.value_ptr[which] = .{ .fd = opened.?, .dfd = direct, .base = 8 + n + en.begin, .row = en.cols * en.size, .rows = en.rows };
++                gop.value_ptr[which] = .{ .fd = opened.?, .dfd = direct, .base = 8 + n + en.begin, .row = en.cols * en.size, .rows = en.rows, .writable = writable };
+             }
+         }
+         var hv = halves.iterator();
+@@ -73,7 +90,7 @@ pub const Tables = struct {
+             const w = kv.value_ptr[0] orelse return error.MissingEngramTable;
+             const s = kv.value_ptr[1] orelse return error.MissingEngramTable;
+             if (w.rows != s.rows) return error.BadEngramTable;
+-            try t.layers.put(gpa, kv.key_ptr.*, .{ .fd_w = w.fd, .base_w = w.base, .row_w = w.row, .fd_s = s.fd, .base_s = s.base, .row_s = s.row, .rows = w.rows, .fd_wd = w.dfd, .fd_sd = s.dfd });
++            try t.layers.put(gpa, kv.key_ptr.*, .{ .fd_w = w.fd, .base_w = w.base, .row_w = w.row, .fd_s = s.fd, .base_s = s.base, .row_s = s.row, .rows = w.rows, .fd_wd = w.dfd, .fd_sd = s.dfd, .writable = w.writable and s.writable });
+         }
+         return t;
+     }
+@@ -119,6 +136,20 @@ fn layerOf(name: []const u8) !u32 {
+ /// The largest row a direct read takes: its span is at most three 4 KiB blocks (read_row_direct's bounce buffer).
+ pub const direct_row_max = 2 * dio.alignment;
+ 
++/// FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE (linux/falloc.h).
++const falloc_keep = 0x01;
++const falloc_punch = 0x02;
++
++/// Punch `len` bytes at `off` out of `fd`'s file: the blocks go back to the file system and the file keeps its size (a
++/// read of the range returns zeros). False where the kernel or the file system refuses it (a read-only mount is refused
++/// at open already; tmpfs, NFS and older file systems refuse the hole).
++pub fn punchHole(fd: std.c.fd_t, off: u64, len: u64) bool {
++    if (comptime builtin.os.tag != .linux) return false;
++    if (len == 0) return true;
++    const r = std.os.linux.syscall4(.fallocate, @intCast(fd), falloc_keep | falloc_punch, @intCast(off), @intCast(len));
++    return r == 0;
++}
++
+ /// A row through an O_DIRECT descriptor (read_row_direct): its aligned span into `bounce`, then the row copied out.
+ fn readDirect(fd: std.c.fd_t, bounce: []align(dio.alignment) u8, out: []u8, at: u64) !void {
+     const f: dio.File = .{ .fd = fd, .direct = true };
+@@ -268,6 +299,31 @@ pub const Pool = struct {
+     }
+ };
+ 
++test "punchHole: the blocks go, the bytes read as zeros and the file keeps its size" {
++    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
++    const a = std.testing.allocator;
++    const io = std.testing.io;
++    var tmp = std.testing.tmpDir(.{ .iterate = true });
++    defer tmp.cleanup();
++    var data: [4096]u8 = @splat(7);
++    try tmp.dir.writeFile(io, .{ .sub_path = "hole.bin", .data = &data });
++    const path = try std.fs.path.joinZ(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "hole.bin" });
++    defer a.free(path);
++    const fd = std.c.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true });
++    if (fd < 0) return error.SkipZigTest;
++    defer _ = std.c.close(fd);
++    if (!punchHole(fd, 0, 2048)) return error.SkipZigTest; // (tmpfs and some file systems refuse the hole)
++    var got: [4096]u8 = undefined;
++    var done: usize = 0;
++    while (done < got.len) {
++        const n = std.c.pread(fd, got[done..].ptr, got.len - done, @intCast(done));
++        if (n <= 0) return error.SkipZigTest;
++        done += @intCast(n);
++    }
++    for (got[0..2048]) |b| try std.testing.expectEqual(@as(u8, 0), b);
++    for (got[2048..]) |b| try std.testing.expectEqual(@as(u8, 7), b);
++}
++
+ test "rows of a toy table by id, on the pool" {
+     const a = std.testing.allocator;
+     const io = std.testing.io;
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 3bc7025..f37911a 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -461,9 +461,11 @@ pub const Model = struct {
+             for (ej.multipliers, 0..) |row, l| for (row, 0..) |v, k| {
+                 mult[l][k] = v;
+             };
+-            m.tables = try engram_io.Tables.open(gpa, io, edir);
++            m.tables = try engram_io.Tables.openWith(gpa, io, edir, .{ .trim = prompt.trimEnabled(if (std.c.getenv("TF_DS_ENGRAM_TRIM")) |v| std.mem.span(v) else null) });
+             m.epool = try engram_io.Pool.init(gpa, io, 64);
+             m.eh = try prompt.EngramHost.init(a, c, engram.Hasher.init(c.*, map, mult), &m.tables.?, m.epool.?, sp.rank, sp.world, chunk_rows);
++            // TF_DS_ENGRAM_TRIM=1: give back the blocks of the rows this rank never reads (the other rank's hash columns)
++            if (prompt.trimEnabled(if (std.c.getenv("TF_DS_ENGRAM_TRIM")) |v| std.mem.span(v) else null)) prompt.trimTables(&m.eh.?, c, io);
+             // TF_DS_ENGRAM_METRICS (on; 0 turns it off): every table read timed for /metrics (the clock; --profile's p_* split stays off)
+             if (prompt.metricsEnabled(if (std.c.getenv("TF_DS_ENGRAM_METRICS")) |v| std.mem.span(v) else null)) {
+                 m.eh.?.io = io;
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index aca4348..851a646 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1546,6 +1546,66 @@ pub const EngramHost = struct {
+     }
+ };
+ 
++/// TF_DS_ENGRAM_TRIM=1 turns the trim on (off by default: it changes the tables' files, not their bytes).
++pub fn trimEnabled(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse "0", "1");
++}
++
++/// The row ranges of layer l's table this rank never reads: before its first hash column's bucket and after its last's
++/// (the ranks split the hash columns, so each owns a contiguous run of buckets and the other rank's rows are dead on this
++/// Spark). `rows` is the table's, from its header.
++pub fn unreadRows(h: engram.Hasher, l: usize, lo: usize, hi: usize, rows: u64) [2][2]u64 {
++    const cols = h.cols();
++    const first: u64 = if (lo == 0) 0 else @intCast(h.offsets[l][lo]);
++    const last: u64 = if (hi >= cols) h.rowsNeeded(l) else @intCast(h.offsets[l][hi]);
++    return .{ .{ 0, first }, .{ last, rows } };
++}
++
++/// TF_DS_ENGRAM_TRIM=1: punch each Engram table's unread row ranges out of its file, so a Spark keeps only its half of the
++/// ~203 GB (each rank reads its own columns only: `lo`..`hi` of the hasher's). The tables' names and sizes stay as they
++/// were (FALLOC_FL_KEEP_SIZE), so the ranks' fingerprint and `port_engram_check` see the same listing; a read of a punched
++/// row would return zeros, and none is ever read. The file is written in place: with HEAD_ENGRAM_DIR hardlinked to the HF
++/// cache, the cache's inode is trimmed too (harmless for this two-rank world, which is all this recipe serves). Nothing is
++/// punched when the tables were opened read-only (a `:ro` mount: `start.sh` mounts /engram writable with ENGRAM_TRIM=1).
++pub fn trimTables(eh: *EngramHost, c: *const Config, io: std.Io) void {
++    var freed: u64 = 0;
++    for (c.engram_layers.slice(), 0..) |id, l| {
++        const t = eh.tables.layers.get(@intCast(id)) orelse continue;
++        if (!t.writable) {
++            std.log.info("dsv41: Engram trim: layer {d}'s table was opened read-only; nothing punched", .{id});
++            return;
++        }
++        // a table hardlinked into the HF cache (HEAD_ENGRAM_DIR's `cp -lL`) is shared: punching it would empty the cache's
++        // copy of the rows this rank never reads, which a VERIFY_SHA check of the shards would then fail
++        const fw: std.Io.File = .{ .handle = t.fd_w, .flags = .{ .nonblocking = false } };
++        const fs: std.Io.File = .{ .handle = t.fd_s, .flags = .{ .nonblocking = false } };
++        const sw = fw.stat(io) catch {
++            std.log.warn("dsv41: Engram trim: layer {d}: stat failed; nothing punched", .{id});
++            continue;
++        };
++        const ss = fs.stat(io) catch {
++            std.log.warn("dsv41: Engram trim: layer {d}: stat failed; nothing punched", .{id});
++            continue;
++        };
++        if (sw.nlink > 1 or ss.nlink > 1) {
++            std.log.info("dsv41: Engram trim: layer {d}'s table is hardlinked ({d} links); not punched (the cache keeps both halves)", .{ id, sw.nlink });
++            continue;
++        }
++        for (unreadRows(eh.hasher, l, eh.lo, eh.hi, t.rows)) |r| {
++            if (r[0] == r[1]) continue;
++            const n = r[1] - r[0];
++            if (!engram_io.punchHole(t.fd_w, t.base_w + r[0] * t.row_w, n * t.row_w) or
++                !engram_io.punchHole(t.fd_s, t.base_s + r[0] * t.row_s, n * t.row_s))
++            {
++                std.log.warn("dsv41: Engram trim: layer {d}: the file system refused the hole at row {d} ({d} rows); nothing more punched", .{ id, r[0], n });
++                return;
++            }
++            freed += n * (t.row_w + t.row_s);
++        }
++    }
++    std.log.info("dsv41: Engram trim: punched {d} MiB this rank never reads (columns {d}..{d})", .{ freed >> 20, eh.lo, eh.hi });
++}
++
+ /// A prompt chunk's Engram layer j rows ahead of its layer, on a thread of the caller's while the GPU runs the layers
+ /// before it: the n-grams hashed (j 0: every layer's at once), the rows read and decoded into ahead_rows[j], exactly
+ /// as engramApply would at the layer. Errors land in ahead_err.
+@@ -1588,6 +1648,35 @@ fn engramAhead1(eh: *EngramHost, c: *const Config, seq: []const i32, start: usiz
+     eh.ahead_ready[j] = true;
+ }
+ 
++test "unreadRows: each rank's dead range is the other rank's buckets" {
++    var why: @import("config.zig").Why = .{};
++    var c = try @import("config.zig").parse(std.testing.allocator, @import("config.zig").test_config, &why);
++    c.engram_vocab = 10;
++    c.engram_heads = 1;
++    c.engram_pad = 0;
++    const map = [_]i32{ 7, 1, 2, 3, 4, 5 };
++    const h = engram.Hasher.init(c, &map, .{ .{ 3, 5, 7, 9 }, .{ 11, 13, 15, 17 } });
++    const rows = h.rowsNeeded(0);
++    // three columns (one head, three orders): rank 0 reads column 0, rank 1 columns 1 and 2
++    const r0 = unreadRows(h, 0, 0, 1, rows);
++    try std.testing.expectEqual(@as(u64, 0), r0[0][0]);
++    try std.testing.expectEqual(@as(u64, 0), r0[0][1]);
++    try std.testing.expectEqual(@as(u64, @intCast(h.offsets[0][1])), r0[1][0]);
++    try std.testing.expectEqual(rows, r0[1][1]);
++    const r1 = unreadRows(h, 0, 1, 3, rows);
++    try std.testing.expectEqual(@as(u64, 0), r1[0][0]);
++    try std.testing.expectEqual(@as(u64, @intCast(h.offsets[0][1])), r1[0][1]);
++    try std.testing.expectEqual(rows, r1[1][0]);
++    try std.testing.expectEqual(rows, r1[1][1]);
++    // and the two ranks' live ranges plus the dead ones are the whole table
++    try std.testing.expectEqual(rows, (r0[1][0] - r0[0][1]) + (r1[1][0] - r1[0][1]));
++}
++
++test "TF_DS_ENGRAM_TRIM: only 1 turns it on" {
++    try std.testing.expect(trimEnabled("1"));
++    for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!trimEnabled(v));
++}
++
+ /// An Engram row read that failed on this rank alone (a disk or memory fault; the peer's own read went through) leaves
+ /// this rank without its part of the layer's allGather while the peer waits in it, so the ranks cannot go on together:
+ /// the error becomes EngramRankFault, which ends the pair (round.pair_ending) instead of failing one request. It is

@@ -1,0 +1,298 @@
+From 0000000000000000000000000000000000000096 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Tue, 11 Nov 2026 10:20:00 +0000
+Subject: [PATCH] dsv41: TF_DS_ENGRAM_DEDUPE=1 reads a prompt chunk's repeated
+ rows once
+
+A prompt repeats n-grams: the 2-gram columns of ordinary prose hit the same bucket row for the same token pair
+at many positions (" the", " of", punctuation and a word), and code or structured text repeats more. Every
+occurrence was read from disk again, though the row id (bucket offset + hash mod prime) names the same bytes.
+
+With the switch, the read-ahead and TF_DS_ENGRAM_LEAD's readers dedupe a chunk's row ids: the distinct ids are
+read once and their rows copied to the repeats, which is exact. The map is open addressing from a row id to its
+row in a scratch buffer, cleared per chunk, and a chunk with no repeats takes the old path untouched (so the
+switch costs one pass over the ids when it finds nothing to save). The buffers are ~7.4 MB at a 2,048-token
+chunk and are allocated only with the switch on.
+
+The round's reads and the main thread's fallback are left as they are: a round can run beside the next chunk's
+read-ahead (TF_DS_ENGRAM_LEAD's readers are joined before a chunk's layers), and sharing the scratch with them
+would race. Bytes are identical; only the read count changes, which `tensorfold:engram_lookup_seconds_count`
+shows.
+
+Tests: prompt.zig (dedupeIds' repeats, distinct ids and clearing; a toy host's deduped gather gives the plain
+gather's bytes for a chunk with repeats and for one without; the switch's values). Not run on a pair.
+
+---
+diff --git a/zig/src/families/dsv41/engram_lead.zig b/zig/src/families/dsv41/engram_lead.zig
+index 45f05cd..7064791 100644
+--- a/zig/src/families/dsv41/engram_lead.zig
++++ b/zig/src/families/dsv41/engram_lead.zig
+@@ -100,7 +100,7 @@ fn read1(eh: *EngramHost, c: *const Config, seq: []const i32, start: usize, n: u
+     }
+     const timed = eh.metrics;
+     const t0 = if (timed) prompt.readStamp(eh) else 0;
+-    try prompt.aioGather(ring, t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s]);
++    try prompt.engramReadRows(eh, ring, t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], true);
+     if (timed) eh.reads.observe(prompt.readStamp(eh) - t0);
+     engram.decodeRows(eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], eh.ahead_rows[j][0 .. m * t.row_w], m, t.row_w, t.row_s, 8);
+     eh.lead_ready[j] = true;
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 038f4bf..33a54b0 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -475,6 +475,9 @@ pub const Model = struct {
+                 m.eh.?.io = io;
+                 m.eh.?.metrics = true;
+             }
++            // TF_DS_ENGRAM_DEDUPE=1: a prompt chunk's distinct rows read once, copied to their repeats
++            if (prompt.dedupeEnabled(if (std.c.getenv("TF_DS_ENGRAM_DEDUPE")) |v| std.mem.span(v) else null))
++                try m.eh.?.useDedupe(a, c, chunk_rows);
+             if (o.engram_aio) {
+                 // a round's reads, 2 x 12 x its rows at most: 1,024 slots for each 16 rows of the round-row setting
+                 m.aio = try engram_aio.Aio.init(gpa, io, 1024 * ((o.round_rows + 15) / 16));
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index d99f039..b20183e 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1459,6 +1459,18 @@ pub const EngramHost = struct {
+     profile: bool = false, // --profile: the p_* split below (its pstamp synchronizes, so not with metrics alone)
+     metrics: bool = false, // TF_DS_ENGRAM_METRICS: the table reads' latencies for /metrics (0: off)
+     reads: ReadTiming = .{},
++    // TF_DS_ENGRAM_DEDUPE: each prompt chunk's distinct row ids read once and copied to their repeats (dedupeIds); the
++    // buffers are sized by useDedupe, empty when it is off. Only the readers that are joined before a chunk's layers use
++    // them (the read-ahead, TF_DS_ENGRAM_LEAD's), so a round's reads never share them.
++    dedupe: bool = false,
++    d_uniq: []i64 = &.{},
++    d_back: []u32 = &.{},
++    d_w: []u8 = &.{},
++    d_s: []u8 = &.{},
++    d_keys: []i64 = &.{},
++    d_vals: []u32 = &.{},
++    d_row_w: usize = 0,
++    d_row_s: usize = 0,
+     t_hash: u64 = 0,
+     t_read: u64 = 0,
+     t_decode: u64 = 0,
+@@ -1538,6 +1550,31 @@ pub const EngramHost = struct {
+         };
+     }
+ 
++    /// TF_DS_ENGRAM_DEDUPE: the buffers a prompt chunk's distinct rows are read into (the largest layer's row widths), and
++    /// the open-addressing map from a row id to its row in them (twice the chunk's ids, a power of two).
++    pub fn useDedupe(eh: *EngramHost, gpa: std.mem.Allocator, c: *const Config, cap: usize) !void {
++        const k = eh.hi - eh.lo;
++        var rw: usize = 0;
++        var rs: usize = 0;
++        for (c.engram_layers.slice()) |id| {
++            const t = eh.tables.layers.get(@intCast(id)) orelse return error.MissingEngramTable;
++            rw = @max(rw, t.row_w);
++            rs = @max(rs, t.row_s);
++        }
++        const n = cap * k;
++        var slots: usize = 2;
++        while (slots < 2 * n) slots <<= 1;
++        eh.d_uniq = try gpa.alloc(i64, n);
++        eh.d_back = try gpa.alloc(u32, n);
++        eh.d_w = try gpa.alloc(u8, n * rw);
++        eh.d_s = try gpa.alloc(u8, n * rs);
++        eh.d_keys = try gpa.alloc(i64, slots);
++        eh.d_vals = try gpa.alloc(u32, slots);
++        eh.d_row_w = rw;
++        eh.d_row_s = rs;
++        eh.dedupe = true;
++    }
++
+     /// TF_DS_ENGRAM_LEAD: each Engram layer's prompt reader gets a hash buffer of its own and its ring, rings[j].
+     pub fn useLead(eh: *EngramHost, gpa: std.mem.Allocator, cap: usize, rings: [2]*engram_aio.Aio) !void {
+         for (&eh.lead_hashes) |*h| h.* = try gpa.alloc(i64, cap * eh.hasher.layers * eh.hasher.cols());
+@@ -1546,6 +1583,39 @@ pub const EngramHost = struct {
+     }
+ };
+ 
++/// TF_DS_ENGRAM_DEDUPE=1 turns the prompt chunks' row dedupe on (off by default; the bytes are the same either way).
++pub fn dedupeEnabled(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse "0", "1");
++}
++
++/// The distinct ids of `ids` into `uniq`, each with its row in `uniq` written to `back`; returns how many there are. The
++/// same row id is the same bytes (the hash's bucket and offset), so a repeat needs no second read. Open addressing over
++/// `keys` (a power of two, at least twice `ids.len`, `-1` empty; ids are never negative) with linear probing.
++pub fn dedupeIds(ids: []const i64, uniq: []i64, back: []u32, keys: []i64, vals: []u32) usize {
++    @memset(keys, -1);
++    const shift: u6 = @intCast(64 - @as(u7, std.math.log2_int(usize, keys.len)));
++    var u: usize = 0;
++    for (ids, 0..) |id, i| {
++        var slot: usize = @intCast((@as(u64, @bitCast(id)) *% 0x9E3779B97F4A7C15) >> shift);
++        while (true) {
++            if (keys[slot] == -1) {
++                keys[slot] = id;
++                vals[slot] = @intCast(u);
++                uniq[u] = id;
++                back[i] = @intCast(u);
++                u += 1;
++                break;
++            }
++            if (keys[slot] == id) {
++                back[i] = vals[slot];
++                break;
++            }
++            slot = (slot + 1) & (keys.len - 1);
++        }
++    }
++    return u;
++}
++
+ /// TF_DS_ENGRAM_SCALES=map serves each row's E8M0 scales from a read-only mapping of the scale tensor (page-cache backed,
+ /// so it costs no resident memory the guard counts and gives the pages back under pressure) instead of a second random
+ /// 4 KiB read a row; unset or `io` reads them as before. The bytes are the same either way.
+@@ -1597,6 +1667,28 @@ pub fn trimTables(eh: *EngramHost, c: *const Config) void {
+     std.log.info("dsv41: Engram trim: punched {d} MiB this rank never reads (columns {d}..{d})", .{ freed >> 20, eh.lo, eh.hi });
+ }
+ 
++/// Rows `ids` of table `t` into out_w / out_s: on the AIO ring when given, else the pool's preads. With `dedupe` and the
++/// switch on, the distinct ids are read once and their rows copied to the repeats (exact: the same id is the same bytes),
++/// so the n-grams a prompt repeats cost one read instead of one each.
++pub fn engramReadRows(eh: *EngramHost, ring: ?*engram_aio.Aio, t: engram_io.Table, ids: []const i64, out_w: []u8, out_s: []u8, dedupe: bool) !void {
++    if (!dedupe or !eh.dedupe or ids.len < 2 or t.row_w > eh.d_row_w or t.row_s > eh.d_row_s)
++        return readRows(eh, ring, t, ids, out_w, out_s);
++    const uniq = eh.d_uniq[0..ids.len];
++    const back = eh.d_back[0..ids.len];
++    const u = dedupeIds(ids, uniq, back, eh.d_keys, eh.d_vals);
++    if (u == ids.len) return readRows(eh, ring, t, ids, out_w, out_s);
++    try readRows(eh, ring, t, uniq[0..u], eh.d_w[0 .. u * t.row_w], eh.d_s[0 .. u * t.row_s]);
++    for (0..ids.len) |i| {
++        @memcpy(out_w[i * t.row_w ..][0..t.row_w], eh.d_w[back[i] * t.row_w ..][0..t.row_w]);
++        @memcpy(out_s[i * t.row_s ..][0..t.row_s], eh.d_s[back[i] * t.row_s ..][0..t.row_s]);
++    }
++}
++
++fn readRows(eh: *EngramHost, ring: ?*engram_aio.Aio, t: engram_io.Table, ids: []const i64, out_w: []u8, out_s: []u8) !void {
++    if (ring) |aio| return aioGather(aio, t, ids, out_w, out_s);
++    return eh.pool.gather(t, ids, out_w, out_s);
++}
++
+ /// A prompt chunk's Engram layer j rows ahead of its layer, on a thread of the caller's while the GPU runs the layers
+ /// before it: the n-grams hashed (j 0: every layer's at once), the rows read and decoded into ahead_rows[j], exactly
+ /// as engramApply would at the layer. Errors land in ahead_err.
+@@ -1633,12 +1725,98 @@ fn engramAhead1(eh: *EngramHost, c: *const Config, seq: []const i32, start: usiz
+     // by AIO on the prompt's ring when it is open (the main thread reads by it only after joining this one)
+     const timed = eh.metrics;
+     const t0 = if (timed) readStamp(eh) else 0;
+-    if (eh.paio) |aio| try aioGather(aio, t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s]) else try eh.pool.gather(t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s]);
++    try engramReadRows(eh, eh.paio, t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], true);
+     if (timed) eh.reads.observe(readStamp(eh) - t0);
+     engram.decodeRows(eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], eh.ahead_rows[j][0 .. m * t.row_w], m, t.row_w, t.row_s, 8);
+     eh.ahead_ready[j] = true;
+ }
+ 
++/// The dedupe test's tables: layers 1 and 14, rows[j] rows of 32 weight bytes and 1 scale, each byte set by its offset.
++fn dedupeToyFile(a: std.mem.Allocator, rows: [2]usize) ![]u8 {
++    const w0 = rows[0] * 32;
++    const s0 = rows[0];
++    const w1 = rows[1] * 32;
++    const s1 = rows[1];
++    var json_buf: [1024]u8 = undefined;
++    const json = try std.fmt.bufPrint(&json_buf, "{{\"layers.1.engram.embed.weight\":{{\"dtype\":\"U8\",\"shape\":[{d},32],\"data_offsets\":[0,{d}]}}," ++
++        "\"layers.1.engram.embed.scale\":{{\"dtype\":\"U8\",\"shape\":[{d},1],\"data_offsets\":[{d},{d}]}}," ++
++        "\"layers.14.engram.embed.weight\":{{\"dtype\":\"U8\",\"shape\":[{d},32],\"data_offsets\":[{d},{d}]}}," ++
++        "\"layers.14.engram.embed.scale\":{{\"dtype\":\"U8\",\"shape\":[{d},1],\"data_offsets\":[{d},{d}]}}}}", .{ rows[0], w0, rows[0], w0, w0 + s0, rows[1], w0 + s0, w0 + s0 + w1, rows[1], w0 + s0 + w1, w0 + s0 + w1 + s1 });
++    var file: std.ArrayList(u8) = .empty;
++    var len: [8]u8 = undefined;
++    std.mem.writeInt(u64, &len, json.len, .little);
++    try file.appendSlice(a, &len);
++    try file.appendSlice(a, json);
++    for (0..w0 + s0 + w1 + s1) |i| try file.append(a, @intCast((i * 131 + 17) % 251));
++    return file.items;
++}
++
++test "dedupeIds: repeats point at the first occurrence's row, distinct ids get their own" {
++    var uniq: [5]i64 = undefined;
++    var back: [5]u32 = undefined;
++    var keys: [16]i64 = undefined;
++    var vals: [16]u32 = undefined;
++    const ids = [_]i64{ 7, 3, 7, 40, 3 };
++    const u = dedupeIds(&ids, &uniq, &back, &keys, &vals);
++    try std.testing.expectEqual(@as(usize, 3), u);
++    try std.testing.expectEqualSlices(i64, &.{ 7, 3, 40 }, uniq[0..u]);
++    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 0, 2, 1 }, &back);
++    // and the map is cleared for the next chunk
++    const one = [_]i64{ 3, 3 };
++    try std.testing.expectEqual(@as(usize, 1), dedupeIds(&one, &uniq, &back, &keys, &vals));
++    try std.testing.expectEqualSlices(u32, &.{ 0, 0 }, back[0..2]);
++}
++
++test "TF_DS_ENGRAM_DEDUPE: a chunk's repeated rows are read once and copied to their places" {
++    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
++    const gpa = std.testing.allocator;
++    const io = std.testing.io;
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var why: @import("config.zig").Why = .{};
++    var c = try @import("config.zig").parse(a, @import("config.zig").test_config, &why);
++    c.engram_vocab = 10;
++    c.engram_heads = 1;
++    c.engram_pad = 0;
++    var map: [40]i32 = undefined;
++    for (&map, 0..) |*x, i| x.* = @intCast((i * 7 + 3) % 31);
++    const hasher = engram.Hasher.init(c, &map, .{ .{ 3, 5, 7, 9 }, .{ 11, 13, 15, 17 } });
++    var tmp = std.testing.tmpDir(.{ .iterate = true });
++    defer tmp.cleanup();
++    try tmp.dir.writeFile(io, .{ .sub_path = "engram.safetensors", .data = try dedupeToyFile(a, .{ 41, 71 }) });
++    const dir = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
++    var tables = try engram_io.Tables.open(gpa, io, dir);
++    defer tables.close();
++    const pool = try engram_io.Pool.init(gpa, io, 3);
++    defer pool.deinit(gpa);
++    var eh = try EngramHost.init(a, &c, hasher, &tables, pool, 0, 2, 8);
++    try eh.useDedupe(a, &c, 8);
++    const t = tables.layers.get(1).?;
++    const ids = [_]i64{ 5, 0, 5, 17, 0, 40 };
++    var w1: [6 * 32]u8 = @splat(0);
++    var s1: [6]u8 = @splat(0);
++    var w2: [6 * 32]u8 = @splat(0);
++    var s2: [6]u8 = @splat(0);
++    try eh.pool.gather(t, &ids, &w1, &s1);
++    try engramReadRows(&eh, null, t, &ids, &w2, &s2, true);
++    try std.testing.expectEqualSlices(u8, &w1, &w2);
++    try std.testing.expectEqualSlices(u8, &s1, &s2);
++    // a chunk with no repeats takes the plain path: the same bytes
++    const fresh = [_]i64{ 1, 2, 3 };
++    @memset(&w2, 0);
++    @memset(&s2, 0);
++    try eh.pool.gather(t, &fresh, w1[0 .. 3 * 32], s1[0..3]);
++    try engramReadRows(&eh, null, t, &fresh, w2[0 .. 3 * 32], s2[0..3], true);
++    try std.testing.expectEqualSlices(u8, w1[0 .. 3 * 32], w2[0 .. 3 * 32]);
++    try std.testing.expectEqualSlices(u8, s1[0..3], s2[0..3]);
++}
++
++test "TF_DS_ENGRAM_DEDUPE: only 1 turns it on" {
++    try std.testing.expect(dedupeEnabled("1"));
++    for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!dedupeEnabled(v));
++}
++
+ test "unreadRows: each rank's dead range is the other rank's buckets" {
+     var why: @import("config.zig").Why = .{};
+     var c = try @import("config.zig").parse(std.testing.allocator, @import("config.zig").test_config, &why);
+@@ -1711,7 +1889,7 @@ pub fn engramRows(eh: *EngramHost, l: usize, t: engram_io.Table, seq: []const i3
+     const ring = if (lead) eh.lead_ring[l] else eh.paio;
+     const timed = eh.metrics;
+     const t0 = if (timed) readStamp(eh) else 0;
+-    const read = if (ring) |aio| aioGather(aio, t, eh.flat[0..m], eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s]) else eh.pool.gather(t, eh.flat[0..m], eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s]);
++    const read = engramReadRows(eh, ring, t, eh.flat[0..m], eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s], true);
+     if (timed) eh.reads.observe(readStamp(eh) - t0);
+     read catch |err| return rankFault(err);
+     engram.decodeRows(eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s], eh.rows[0 .. m * t.row_w], m, t.row_w, t.row_s, 8); // the rows on 8 threads
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 50a3998..2b2c7ca 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1712,7 +1712,7 @@ fn engramLand(e: *const Engine, rd: *Round, eh: *prompt.EngramHost, ah: *const A
+     const t1 = stamp(eh);
+     if (ah.aio) {
+         try eh.aio.?.wait(ah.ids[j]);
+-    } else try eh.pool.gather(tbl, eh.flat[f0..][0..m], eh.w[f0 * tbl.row_w ..][0 .. m * tbl.row_w], eh.s[f0 * tbl.row_s ..][0 .. m * tbl.row_s]);
++    } else try prompt.engramReadRows(eh, null, tbl, eh.flat[f0..][0..m], eh.w[f0 * tbl.row_w ..][0 .. m * tbl.row_w], eh.s[f0 * tbl.row_s ..][0 .. m * tbl.row_s], false);
+     const t2 = stamp(eh);
+     if (eh.metrics) eh.reads.observe(t2 - t1); // TF_DS_ENGRAM_METRICS: the round's table read
+     const w0 = f0 * tbl.row_w;

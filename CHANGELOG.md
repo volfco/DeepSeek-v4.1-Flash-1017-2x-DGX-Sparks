@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- `zig/patches/0094-engram-trim.patch` (`TF_DS_ENGRAM_TRIM=1`, off unless set; `start.sh` mounts `/engram` writable
+  with it): each rank reads only its own 12 of the 24 hash columns, so half of each Spark's ~203 GB Engram copy is never
+  touched; the trim punches those rows out of both tensors (~101 GB a Spark) and the files keep their names and sizes, so
+  the ranks' fingerprint and `port_engram_check` see the same listing. A table hardlinked into the HF cache is left alone
+  (a later `VERIFY_SHA` needs it whole). Host tests: `prompt.unreadRows`, `engram_io.punchHole`. Not run on a pair.
+- `zig/patches/0095-engram-scales-mapped.patch` (`TF_DS_ENGRAM_SCALES=map`, off unless set): a row's 8-byte E8M0 scale
+  row is a separate tensor, so a lookup's second read is a random 4 KiB page for 3 % of the bytes; with `map` the scale
+  tensors are mapped read-only and their rows come from the page cache (the AIO batch carries half the iocbs, and a
+  fault-in is the old 4 KiB read, so the worst case is today's cost). Bytes identical. Host tests: the pool's and the
+  ring's mapped gather give the pread path's bytes. Not run on a pair.
+- `zig/patches/0096-engram-dedupe.patch` (`TF_DS_ENGRAM_DEDUPE=1`, off unless set): a prompt's repeated n-grams (prose's
+  2-gram columns) read one row once and copy it to the repeats, exactly; rounds and the main thread's fallback keep the
+  old path (they can run beside the next chunk's read-ahead). Host tests: `dedupeIds`, and a toy host's deduped gather
+  gives the plain one's bytes. Not run on a pair; `engram_lookup_seconds_count` shows the read count it changes.
+- `zig/patches/0097-engram-fast.patch` (`TF_DS_ENGRAM_FAST=1`, off unless set; `TF_DS_ENGRAM_AIO_SLOTS` with it): the
+  hash's modulo by a reciprocal instead of a 64-bit divide (tested against `@mod` for every prime and 5,000 values each),
+  a chunk's decode on 8 persistent threads instead of a spawn a call, the fallback path's hashes kept for a chunk's second
+  layer, and a knob for the prompt ring's slots. Bit-identical; each is expected under 1 % of a chunk, so the switch is
+  there to measure rather than to claim. Not run on a pair.
+- `zig/patches/0098-engram-strict.patch` (`TF_DS_ENGRAM_STRICT=1`, off unless set): refuses a table whose dtype is wider
+  than a byte (the rows are always decoded as FP8 E4M3 / E8M0) and one whose scale row is shorter than `decodeRow` reads;
+  without the switch both are warned about and read as before. An id past the token map now blocks its n-gram instead of
+  reading past the array (not gated: a no-op for every id the map has). Host tests: a BF16 toy refused, `scalesCover`'s
+  edges, `comp` past the map. Not run on a pair.
 - `zig/patches/0055-device-draw.patch` (`TF_DS_T27_DEVICE_DRAW=1`, off unless set): sampled rows are drawn on the device with the host sampler's math, so a round returns tokens instead of the full logits. On a GB10 pair, with 0054 on, sampled code went up 2.4 percent and prose 1.6 percent over it, and the replies were identical at temperatures 0.7 and 1.0 (the author's engine line). The device `exp` and `log` can round differently from libm, so a pick can differ only where two scores lie within that rounding. A NaN in a logit row is not reproduced. By **Lukasz Raczylo ([lukaszraczylo](https://github.com/lukaszraczylo))**, [pull request #110](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/pull/110).
 - `zig/patches/0054-keyed-draft.patch` (`TF_DS_T26_KEYED_DRAFT=1`, off unless set): the drafter adds the served sampler's keyed Gumbel noise to its logits before each Markov step. On a GB10 pair, sampled decode of prose went up 4.6 percent at temperature 0.7 (74.2 to 77.6 tok/s) and 7.2 percent at 1.0 (73.7 to 79.0), code up 3.2 percent at 0.7 and down 1.1 percent at 1.0 (single runs). Greedy decode is unchanged (the author's engine line). By **Lukasz Raczylo ([lukaszraczylo](https://github.com/lukaszraczylo))**, [pull request #109](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/pull/109).
 - `zig/patches/0053-expert-prune-cap.patch` (`TF_DS_T13_EXPERT_PRUNE`, `TF_DS_T13_EXPERT_CAP`, `TF_DS_T15_PLACE_BOUND`; all off unless set; **lossy**): a router-side kernel drops routed experts, so replies change when a switch is set. On a GB10 pair `TF_DS_T13_EXPERT_CAP=12,1` raised code decode from about 99 to 112 tok/s, with the author's quality set at 40 of 40 and exact copy at 15 of 15 (the author's engine line); `10,1` was faster but lost one quality item. By **Lukasz Raczylo ([lukaszraczylo](https://github.com/lukaszraczylo))**, [pull request #108](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/pull/108).
@@ -526,3 +550,55 @@
   ([#40](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/issues/40)): 59-67 °C pinned
   against 70-81 °C unpinned with three proxies on a four-GB10 ring, no throughput change. Ported by **Hector Isaza
   ([hecisaza](https://github.com/hecisaza))**.
+- `zig/patches/0069-engram-lookup-latency.patch` (on; `TF_DS_ENGRAM_METRICS=0` turns it off): every read of Engram's
+  table rows is timed and published as `tensorfold:engram_lookup_seconds` on `/metrics`, a histogram with 1 ms to 10 s
+  buckets plus `_sum` and `_count`. It covers a decode round's reads, a prompt chunk's read-ahead and
+  `TF_DS_ENGRAM_LEAD`'s reader threads, i.e. the I/O the engine's docs name as the expensive part (about 70 random 4 KiB
+  rows a stream a decode round; ~0.07 s a 2,048-row prompt chunk by AIO against ~0.5 s by the pool's preads on one
+  GB10). The counters are atomics in the Engram host (the read-ahead threads record off the engine thread); the lane
+  host copies them on its engine thread and `Status.engram` carries them, as the cache and KV counters are. It counts
+  this rank's reads (rank 0's, the one serving `/metrics`): the ranks split the hash columns, so each reads its own
+  half. `0`: no clock read, no metric; every other value and unset leave it on. `--profile`'s prefill split is gated on its own flag now,
+  so the timing alone does not add the profile's stream synchronizations to a prompt pass. Replies and their bits are
+  unchanged. Tests in `zig/src/families/dsv41/prompt.zig` (the switch's values; the buckets and the sum, past every
+  edge) and `zig/src/server/metrics.zig` (the histogram with the stats, absent without them). The same patch fixes
+  `0051`'s `decodeLaunches` test calls for `0053`'s `places` argument, which the series missed: the dsv41 module's host
+  tests did not compile after both. Not served on a pair yet: host tests only (`zig/tests/server/zig_test.sh`, 177
+  pass; `zig build test`, 487/488, the one failure lane_host's prefill-interleave test, which fails the same way on the
+  unpatched series and passes on a rerun).
+- `zig/patches/0070-request-timing-log.patch` (always on): the `done` line of every finished request now ends with
+  `prefill_s` (the engine's own prompt-pass measurement), `ttft_s` (arrival to the first token), `decode_s` (prefilled to
+  the last token), `s_per_token` (decode seconds divided by the generated tokens less one), `tok_per_s`, `accept` (the
+  drafts' acceptance rate, accepted/drafted as a percentage) and `tokens_per_round`. A figure the request has none of
+  (no prefilled event, one token only, no drafts or rounds) prints `-`. The values are that request's own, not a rolling
+  average; the existing fields, the reply's token sha included, are unchanged and the new ones come after them, so
+  parsers of the old line (`tools/zig/reuse_served.py`) still match. Before, an operator reading `docker logs` saw the
+  rounds and the accepted/drafted counts but not the timings the response body already carries (`runtime.prefill_seconds`,
+  `time_to_first_token`, `tokens_per_second`) or the rate. Tests in `zig/src/server/chat.zig` (the figures from given
+  timestamps, the null cases, the formatter); `zig/tests/server/zig_test.sh` (179 server tests, 108 engine-seam tests).
+  Replies and their bits are unchanged.
+- `CPUSET` (`scripts/config.sh`, default `15-19`): both ranks' containers now run with docker's `--cpuset-cpus` on the
+  GB10's fastest cores, the Cortex-X925s of the 16 MB-L3 cluster (`cpu_capacity` 1017-1024 at 3.9 GHz). Measured on one
+  pair: A725 = 0-4 (`capacity` 718) and 10-14 (731) at 2.8 GHz; X925 = 5-9 (997, 8 MB L3) and 15-19 (1017-1024, 16 MB
+  L3). Before, the containers only inherited the host's docker cgroup parent (10-19: 5 X925s and 5 A725s, the split
+  `spark-glm53`'s ansible applies with `vllm.slice` on 10-19 and the OS slices on 0-9), so the engine competed with
+  2.8 GHz cores while the scheduler, tokenizer and I/O threads could take a 3.9 GHz one. 15-19 is inside that parent set
+  (no host change, no root, and the GLM deployment sharing these Sparks is unaffected); the A725s 10-14 stay idle now
+  and the OS keeps 0-9. `CPUSET=` (empty) keeps the old inherited behaviour, and a list the kernel or docker rejects
+  refuses the start. `TF_DS_RDMA_CPUS=15` (`zig/patches/0068`) already pinned the RDMA proxy into this set. Test in
+  `scripts/test_scripts.py` (both ranks' `docker run` carry the flag; empty leaves it out; a malformed list is refused
+  before anything starts). Measured effect not yet taken: compare with `tools/bench.py` at 1-4 streams, `CPUSET=10-19`.
+- `scripts/cores.sh` + `just check-cores|harden-cores|grub-engine-irq`: the engine cores (15-19) kept at max clocks and
+  as clear of interrupts as this host allows. Measured first: `scaling_governor=performance` was already set on all 20
+  cores (X925 at 3.9 GHz), but nothing enforced it across a reboot; the NVMe driver pins one queue IRQ per CPU onto
+  15-19 (`nvme0q16..q20` on the head, `q13..q17` on the worker) and `nvme0q17` alone delivered ~3,900 interrupts/s on CPU
+  16 while the engine read Engram's tables. Those are managed MSI-X IRQs, and the kernel refuses a userspace
+  `smp_affinity_list` write for them (EIO), so the no-reboot half is only the governor: `harden-cores` sets
+  `performance` on every core now and installs `/usr/local/sbin/tf-cores` + `tf-cores.service` (oneshot, enabled) on
+  both Sparks so a boot sets it again. The IRQs need `isolcpus=managed_irq`: `grub-engine-irq` stages
+  `isolcpus=managed_irq,0-4,10-14,15-19` in `/etc/default/grub.d/zzz-spark-ring.cfg` and regenerates grub on both
+  Sparks (verified in `grub.cfg`); it takes effect at the next reboot, and the GLM repo that owns that file
+  (`kernel_cmdline_params`) needs the same value or its next ansible run reverts it. `nohz_full=5-9,15-19`,
+  `rcu_nocbs=5-9,15-19`, the OS slices on 0-9 and the containers' `CPUSET` were already in place, so with the reboot
+  only per-CPU kernel threads (idle at rest) remain. Tests in `scripts/test_scripts.py` (the check mode's sets and
+  governors, an engine set this host lacks, `apply` refusing without root, a bad mode).

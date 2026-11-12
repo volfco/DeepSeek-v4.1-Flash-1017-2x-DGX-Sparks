@@ -327,6 +327,55 @@ detect_links() {
         self.assertEqual(sorted(self.launched()), ["head", "w1"], out)
         self.assertIn("is now LIVE", out)
 
+    def test_cpuset_pins_both_ranks_to_the_serving_cores(self):
+        # CPUSET (config.sh, default 15-19) is docker's --cpuset-cpus: both containers take the GB10's fastest cores
+        for h in ["head", "w1"]:
+            self.containers(h, NAME)
+        code, out = self.run_script(["start.sh", "restart"], {"PREPARE": "0"})
+        self.assertEqual(code, 0, out)
+        runs = [l for l in (self.sim / "docker.log").read_text().splitlines() if " docker run -d " in l]
+        self.assertEqual(len(runs), 2, out)
+        for line in runs:
+            self.assertIn("--cpuset-cpus 15-19", line)
+        # empty: the host's docker cgroup parent decides (the flag is left out)
+        for h in ["head", "w1"]:
+            self.containers(h, NAME)
+        code, out = self.run_script(["start.sh", "restart"], {"PREPARE": "0", "CPUSET": ""})
+        self.assertEqual(code, 0, out)
+        runs = [l for l in (self.sim / "docker.log").read_text().splitlines() if " docker run -d " in l]
+        self.assertTrue(runs, out)
+        for line in runs[-2:]:
+            self.assertNotIn("--cpuset-cpus", line)
+        # a malformed list is refused before anything is started
+        for h in ["head", "w1"]:
+            self.containers(h, NAME)
+        code, out = self.run_script(["start.sh", "restart"], {"PREPARE": "0", "CPUSET": "15..19"})
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("CPUSET is a docker cpu list", out)
+
+    def test_engram_trim_mounts_the_tables_writable(self):
+        # TF_DS_ENGRAM_TRIM=1 (zig/patches/0094) punches the rows a rank never reads out of its tables, so the folders
+        # are mounted writable only with it; the switch itself reaches both ranks as a TF_DS_* variable
+        # the release's two shards at their sizes (start.sh checks them; sparse files, so they cost no disk)
+        shards = {"model-00047-of-00048.safetensors": 101535150936, "model-00048-of-00048.safetensors": 101537926640}
+        for name in ["engram-head", "engram-worker"]:
+            (self.sim / name).mkdir(exist_ok=True)
+            for f, size in shards.items():
+                (self.sim / name / f).touch()
+                os.truncate(self.sim / name / f, size)
+        for trim, want in [("0", ":ro"), ("1", ":rw")]:
+            with self.subTest(trim=trim):
+                for h in ["head", "w1"]:
+                    self.containers(h, NAME)
+                code, out = self.run_script(["start.sh", "restart"], {"PREPARE": "0", "TF_DS_ENGRAM_TRIM": trim,
+                    "HEAD_ENGRAM_DIR": str(self.sim / "engram-head"), "WORKER_ENGRAM_DIR": str(self.sim / "engram-worker")})
+                self.assertEqual(code, 0, out)
+                runs = [l for l in (self.sim / "docker.log").read_text().splitlines() if " docker run -d " in l]
+                self.assertTrue(len(runs) >= 2, out)
+                for line in runs[-2:]:
+                    self.assertIn("/engram" + want, line)
+                    self.assertIn("TF_DS_ENGRAM_TRIM=" + trim, line)
+
     def test_graphs_with_a_pool_off_the_4096_grid_warns(self):
         # issues #65 and #63: a round's context bucket is capped at the pool, so a pool off the 4,096 grid gives the
         # indexer's _index_score a tile count the kit has no captured variant for (MissingTritonVariant, then 901)
@@ -491,6 +540,38 @@ class PreparedState(ScriptTest):
         for var, value in [("ABLIT", "1"), ("WORKER_ENGRAM_DIR", "/other/engram"), ("WORKER_CACHE_DIR", "/other/cache"), ("WORKER2", "w9")]:
             with self.subTest(var=var):
                 self.assertChanges({var: value})
+
+
+class CoresScript(unittest.TestCase):
+    """scripts/cores.sh: the engine cores' host-side check (read-only here; apply needs root and a Spark's NVMe)."""
+
+    def run_cores(self, *args, **env):
+        e = dict(os.environ, **env)
+        return subprocess.run([find_bash(), str(ROOT / "scripts" / "cores.sh"), *args], capture_output=True, text=True, env=e)
+
+    def test_check_reports_the_sets_and_governors_without_touching_anything(self):
+        r = self.run_cores("check")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("engine cores: 15-19", r.stdout)
+        self.assertIn("governors:", r.stdout)
+        self.assertIn("IRQs wholly inside the engine cores:", r.stdout)
+
+    def test_an_engine_set_this_host_does_not_have_finds_no_irqs(self):
+        r = self.run_cores("check", ENGINE_CPUS="90-99")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("  none", r.stdout)
+
+    def test_apply_refuses_without_root(self):
+        if os.geteuid() == 0:
+            self.skipTest("running as root: apply would run")
+        r = self.run_cores("apply")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("apply needs root", r.stderr)
+
+    def test_unknown_mode_is_a_usage_error(self):
+        r = self.run_cores("frobnicate")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("usage:", r.stderr)
 
 
 if __name__ == "__main__":

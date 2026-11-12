@@ -1,0 +1,215 @@
+From 0000000000000000000000000000000000000098 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Tue, 11 Nov 2026 10:40:00 +0000
+Subject: [PATCH] dsv41: TF_DS_ENGRAM_STRICT=1 refuses the Engram tables the FP8
+ decode would read wrong
+
+Three silent-wrong-answer paths closed, with the refusal behind a switch so an A/B can show the replies are the
+same on a good checkpoint:
+
+- a tensor whose dtype is wider than a byte (BF16, F16, F32): Tables.openWith takes any 1/2/4-byte dtype and
+  computes row_w from it, but engram.decodeRow always reads the row as FP8 E4M3 and the scale as E8M0. With the
+  switch it is refused (UnsupportedDType); without it, one warning at start and the old path.
+- a scale row shorter than decodeRow reads (row_s * 32 < row_w): decodeRow indexes s[i / 32] over the whole row,
+  so a short scale row reads into the next row's scales with no word said. checkTables refuses it before any
+  collective, naming the layer and the bytes it needs.
+- an id past the token map: comp() indexed map[id] unchecked, so a tokenizer the map was not made from read past
+  the array. It now blocks the n-gram as an image's id does. This one is not gated: it is a no-op for every id the
+  map was made for, so the bits cannot change.
+
+The engine's own tables (256 weight bytes, 8 scale bytes, F8_E4M3 / F8_E8M0) pass both refusals.
+
+Tests: engram_io.zig (a BF16 toy is refused with the switch and opens with row_w doubled without it), prompt.zig
+(the switch's values and scalesCover's edges, including a toy one byte short), engram.zig (comp past the map, and
+a chunk whose 4-gram reaches past it keeps every id in range). Not run on a pair.
+
+---
+diff --git a/zig/src/families/dsv41/engram.zig b/zig/src/families/dsv41/engram.zig
+index 19ace85..9fe907b 100644
+--- a/zig/src/families/dsv41/engram.zig
++++ b/zig/src/families/dsv41/engram.zig
+@@ -154,7 +154,11 @@ pub const Hasher = struct {
+     }
+ 
+     fn comp(h: Hasher, id: i32) i64 {
+-        return if (id < 0) -1 else h.map[@intCast(id)];
++        if (id < 0) return -1;
++        const u: usize = @intCast(id);
++        // an id past the map (a tokenizer the map was not made from) blocks the n-gram, as an image's does, instead of
++        // reading past the map
++        return if (u < h.map.len) h.map[u] else -1;
+     }
+ };
+ 
+@@ -273,6 +277,23 @@ test "Mod: the reciprocal division is @mod for every prime and value" {
+     }
+ }
+ 
++test "an id past the token map blocks its n-gram instead of reading past the map" {
++    var why: @import("config.zig").Why = .{};
++    var c = try @import("config.zig").parse(std.testing.allocator, @import("config.zig").test_config, &why);
++    c.engram_vocab = 10;
++    c.engram_heads = 1;
++    c.engram_pad = 0;
++    const map = [_]i32{ 7, 1, 2, 3, 4, 5 };
++    const h = Hasher.init(c, &map, .{ .{ 3, 5, 7, 9 }, .{ 11, 13, 15, 17 } });
++    try std.testing.expectEqual(@as(i64, 5), h.comp(5));
++    try std.testing.expectEqual(@as(i64, -1), h.comp(6));
++    try std.testing.expectEqual(@as(i64, -1), h.comp(-1));
++    // and a position whose 4-gram reaches past the map is padded, not read past it
++    var out: [2 * 2 * 3]i64 = undefined;
++    h.hashes(&.{ 1, 2, 6 }, 2, 1, &out);
++    for (out[0 .. 2 * 3]) |id| try std.testing.expect(id >= 0 and id < h.rowsNeeded(1));
++}
++
+ test "primes are drawn upward from the vocabulary size and never repeat" {
+     try std.testing.expect(isPrime(2) and isPrime(16000057) and !isPrime(16000000) and !isPrime(1));
+     var why: @import("config.zig").Why = .{};
+diff --git a/zig/src/families/dsv41/engram_io.zig b/zig/src/families/dsv41/engram_io.zig
+index b8c3e4a..ad87d6b 100644
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -17,8 +17,9 @@ pub const Table = struct { fd_w: std.c.fd_t, base_w: u64, row_w: usize, fd_s: st
+ /// How `openWith` opens the tables: `trim` opens their files for writing, so `prompt.trimTables` can give back the blocks
+ /// of the rows this rank never reads (TF_DS_ENGRAM_TRIM; a read-only mount or file system falls back to a read-only open).
+ /// `map_scales` maps each layer's scale tensor read-only (TF_DS_ENGRAM_SCALES=map), so a row's E8M0 scales come from the
+-/// page cache instead of a second random 4 KiB read.
+-pub const OpenOptions = struct { trim: bool = false, map_scales: bool = false };
++/// page cache instead of a second random 4 KiB read. `strict` refuses a tensor whose dtype is not one byte (the rows are
++/// decoded as FP8 E4M3 and the scales as E8M0; a BF16 or F32 table would decode wrong without a word).
++pub const OpenOptions = struct { trim: bool = false, map_scales: bool = false, strict: bool = false };
+ 
+ pub const Tables = struct {
+     gpa: std.mem.Allocator,
+@@ -59,12 +60,22 @@ pub const Tables = struct {
+             var opened: ?std.c.fd_t = null;
+             var direct: std.c.fd_t = -1;
+             var writable = false;
++            var warned = false;
+             var names = h.object.iterator();
+             while (names.next()) |kv| {
+                 const name = kv.key_ptr.*;
+                 const which: usize = if (std.mem.endsWith(u8, name, "engram.embed.weight")) 0 else if (std.mem.endsWith(u8, name, "engram.embed.scale")) 1 else continue;
+                 const layer = try layerOf(name);
+                 const en = try entry(kv.value_ptr.*);
++                if (en.size != 1) {
++                    // the rows are decoded as FP8 E4M3 and their scales as E8M0 (one byte a value): a wider source would
++                    // read the wrong bytes with no word said
++                    if (o.strict) return error.UnsupportedDType;
++                    if (!warned) {
++                        std.log.warn("dsv41: Engram: {s} holds {s} with {d} bytes a value, but the rows are decoded as FP8 E4M3 (TF_DS_ENGRAM_STRICT=1 refuses it)", .{ e.name, name, en.size });
++                        warned = true;
++                    }
++                }
+                 if (opened == null) {
+                     try t.fds.ensureUnusedCapacity(gpa, 2); // (an fd opened below always has its slot: none leaks)
+                     var fd: std.c.fd_t = -1;
+@@ -435,6 +446,30 @@ pub const DecodePool = struct {
+     }
+ };
+ 
++test "TF_DS_ENGRAM_STRICT: a two-byte row is refused, and accepted with a warning without it" {
++    const a = std.testing.allocator;
++    const io = std.testing.io;
++    var tmp = std.testing.tmpDir(.{ .iterate = true });
++    defer tmp.cleanup();
++    // a BF16 [6, 4] weight table (8 bytes a row) and its [6, 1] U8 scales
++    const json = "{\"layers.14.engram.embed.weight\":{\"dtype\":\"BF16\",\"shape\":[6,4],\"data_offsets\":[0,48]}," ++
++        "\"layers.14.engram.embed.scale\":{\"dtype\":\"U8\",\"shape\":[6,1],\"data_offsets\":[48,54]}}";
++    var file: std.ArrayList(u8) = .empty;
++    defer file.deinit(a);
++    var len: [8]u8 = undefined;
++    std.mem.writeInt(u64, &len, json.len, .little);
++    try file.appendSlice(a, &len);
++    try file.appendSlice(a, json);
++    for (0..54) |i| try file.append(a, @intCast(i));
++    try tmp.dir.writeFile(io, .{ .sub_path = "engram.safetensors", .data = file.items });
++    const dir = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
++    defer a.free(dir);
++    try std.testing.expectError(error.UnsupportedDType, Tables.openWith(a, io, dir, .{ .strict = true }));
++    var t = try Tables.openWith(a, io, dir, .{});
++    defer t.close();
++    try std.testing.expectEqual(@as(usize, 8), t.layers.get(14).?.row_w);
++}
++
+ test "punchHole: the blocks go, the bytes read as zeros and the file keeps its size" {
+     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+     const a = std.testing.allocator;
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 05bc4d7..ca4fb16 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -464,10 +464,13 @@ pub const Model = struct {
+             for (ej.multipliers, 0..) |row, l| for (row, 0..) |v, k| {
+                 mult[l][k] = v;
+             };
+-            // TF_DS_ENGRAM_TRIM=1 opens the tables for writing (prompt.trimTables); TF_DS_ENGRAM_SCALES=map maps their scales
++            // TF_DS_ENGRAM_TRIM=1 opens the tables for writing (prompt.trimTables); TF_DS_ENGRAM_SCALES=map maps their scales;
++            // TF_DS_ENGRAM_STRICT=1 refuses a dtype the FP8 decode would read wrong
++            const strict = prompt.strictEnabled(if (std.c.getenv("TF_DS_ENGRAM_STRICT")) |v| std.mem.span(v) else null);
+             m.tables = try engram_io.Tables.openWith(gpa, io, edir, .{
+                 .trim = prompt.trimEnabled(if (std.c.getenv("TF_DS_ENGRAM_TRIM")) |v| std.mem.span(v) else null),
+                 .map_scales = prompt.scalesMapped(if (std.c.getenv("TF_DS_ENGRAM_SCALES")) |v| std.mem.span(v) else null),
++                .strict = strict,
+             });
+             m.epool = try engram_io.Pool.init(gpa, io, 64);
+             const fast = prompt.fastEnabled(if (std.c.getenv("TF_DS_ENGRAM_FAST")) |v| std.mem.span(v) else null);
+@@ -479,6 +482,8 @@ pub const Model = struct {
+                 m.edpool = try engram_io.DecodePool.init(gpa, io, 8);
+                 m.eh.?.dpool = m.edpool;
+             }
++            // TF_DS_ENGRAM_STRICT=1: a scale row shorter than decodeRow reads is refused before any collective
++            if (strict) try prompt.checkTables(&m.eh.?, c);
+             // TF_DS_ENGRAM_TRIM=1: give back the blocks of the rows this rank never reads (the other rank's hash columns)
+             if (prompt.trimEnabled(if (std.c.getenv("TF_DS_ENGRAM_TRIM")) |v| std.mem.span(v) else null)) prompt.trimTables(&m.eh.?, c, io);
+             // TF_DS_ENGRAM_METRICS (on; 0 turns it off): every table read timed for /metrics (the clock; --profile's p_* split stays off)
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index e467359..cd2981e 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1610,6 +1610,29 @@ pub const EngramHost = struct {
+     }
+ };
+ 
++/// TF_DS_ENGRAM_STRICT=1 refuses the tables that today would be read wrong (see checkTables, and Tables.openWith's dtype
++/// refusal); without it they are warned about and read as before.
++pub fn strictEnabled(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse "0", "1");
++}
++
++/// decodeRow reads one E8M0 scale a 32 values, so a row's scale row must hold at least ceil(row_w / 32) bytes: with fewer,
++/// it reads into the next row's scales with no word said.
++pub fn scalesCover(row_w: usize, row_s: usize) bool {
++    return row_s * 32 >= row_w;
++}
++
++/// TF_DS_ENGRAM_STRICT=1: refuse a table whose scale row is shorter than decodeRow reads.
++pub fn checkTables(eh: *EngramHost, c: *const Config) !void {
++    for (c.engram_layers.slice()) |id| {
++        const t = eh.tables.layers.get(@intCast(id)) orelse return error.MissingEngramTable;
++        if (!scalesCover(t.row_w, t.row_s)) {
++            std.log.err("dsv41: Engram layer {d}: {d} scale bytes for {d} values; decodeRow reads {d}", .{ id, t.row_s, t.row_w, (t.row_w + 31) / 32 });
++            return error.BadEngramTable;
++        }
++    }
++}
++
+ /// TF_DS_ENGRAM_FAST=1 turns the host-side economies on (all bit-identical): the reciprocal modulo the hasher's columns,
+ /// a chunk's decode on the host's decode threads instead of a spawn a call, the fallback path's hashes kept for the second
+ /// layer, and TF_DS_ENGRAM_AIO_SLOTS over the prompt ring's slots.
+@@ -1897,6 +1920,15 @@ test "unreadRows: each rank's dead range is the other rank's buckets" {
+     try std.testing.expectEqual(rows, (r0[1][0] - r0[0][1]) + (r1[1][0] - r1[0][1]));
+ }
+ 
++test "TF_DS_ENGRAM_STRICT: the switch, and the scale row decodeRow needs" {
++    try std.testing.expect(strictEnabled("1"));
++    for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!strictEnabled(v));
++    try std.testing.expect(scalesCover(256, 8)); // the engine's own tables
++    try std.testing.expect(scalesCover(32, 1));
++    try std.testing.expect(!scalesCover(64, 1));
++    try std.testing.expect(!scalesCover(100, 3)); // (an earlier toy's: one byte short of the 4 its tail needs)
++}
++
+ test "TF_DS_ENGRAM_FAST: only 1 turns the host-side economies on" {
+     try std.testing.expect(fastEnabled("1"));
+     for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!fastEnabled(v));

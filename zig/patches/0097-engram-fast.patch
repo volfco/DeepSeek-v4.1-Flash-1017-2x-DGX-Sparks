@@ -1,0 +1,453 @@
+From 0000000000000000000000000000000000000097 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Tue, 11 Nov 2026 10:30:00 +0000
+Subject: [PATCH] dsv41: TF_DS_ENGRAM_FAST=1 takes the host-side economies off
+ the Engram path
+
+Four host-side costs a chunk paid for, all of them bit-identical, behind one switch for an A/B:
+
+- the hash's modulo by a reciprocal (Granlund-Montgomery) instead of a 64-bit divide a column: 48 divisions
+  a position become a multiply-high and a conditional subtract. `Mod` is tested against @mod for every prime
+  and 5,000 values each, minInt and maxInt included;
+- a chunk's rows decoded on 8 decode threads of the host's (engram_io.DecodePool) instead of
+  engram.decodeRows spawning 8 threads a call (two calls a chunk, ~16 spawns);
+- the fallback path's hashes kept for the chunk's second layer instead of hashed twice, keyed by the chunk and
+  the sequence and forgotten wherever someone else writes the buffer (a round's engramAhead, every pass's
+  resetEngramAhead);
+- TF_DS_ENGRAM_AIO_SLOTS over the prompt ring's slots (64..65,536; unset: 4,096), for an A/B of its depth.
+
+Each is what the profile said was left in the host's part of a chunk; the read-ahead hides the I/O, so these are
+the CPU and the hash's start latency, not the read. Expect under 1 % of a chunk each, and the switch exists to
+measure them rather than to claim them.
+
+Tests: engram.zig (Mod against @mod, every prime, 5,000 random values and the edges), prompt.zig (the switch's
+values), and the decode pool is exercised by the dedupe test's chunk when the switch is on. Not run on a pair;
+`TF_DS_ENGRAM_FAST=0` is the engine unchanged.
+
+---
+diff --git a/zig/src/families/dsv41/engram.zig b/zig/src/families/dsv41/engram.zig
+index 589b665..19ace85 100644
+--- a/zig/src/families/dsv41/engram.zig
++++ b/zig/src/families/dsv41/engram.zig
+@@ -62,6 +62,29 @@ pub fn primes(c: Config, out: *[max_layers][max_cols]i64) void {
+     }
+ }
+ 
++/// A bucket prime's division by a reciprocal (Granlund-Montgomery): M = floor((2^64 - 1) / p), so mulhi(u, M) is u / p's
++/// true quotient or one less and one conditional subtract is exact; `s` = 2^64 mod p folds a negative rolling value back
++/// in (an i64 bit-cast to u64 is a + 2^64). The same result as @mod for every input (tested).
++pub const Mod = struct {
++    m: u64,
++    p: u64,
++    s: u64,
++
++    pub fn init(p: u64) Mod {
++        const m = (~@as(u64, 0)) / p;
++        return .{ .m = m, .p = p, .s = 0 -% (m *% p) };
++    }
++
++    pub fn of(self: Mod, a: i64) u64 {
++        const u: u64 = @bitCast(a);
++        const q: u64 = @intCast((@as(u128, u) * self.m) >> 64);
++        var r = u - q * self.p; // q <= u / p: no wrap, and r < 2p
++        if (r >= self.p) r -= self.p;
++        if (a < 0) r = if (r >= self.s) r - self.s else r + self.p - self.s;
++        return r;
++    }
++};
++
+ /// Row ids of positions [start, start + n) of a sequence, as the served engine reads Engram tables.
+ pub const Hasher = struct {
+     layers: usize,
+@@ -69,6 +92,9 @@ pub const Hasher = struct {
+     heads: usize,
+     primes: [max_layers][max_cols]i64 = undefined,
+     offsets: [max_layers][max_cols]i64 = undefined,
++    mods: [max_layers][max_cols]Mod = undefined,
++    /// TF_DS_ENGRAM_FAST: the hash's modulo by `mods` instead of a divide a column (same ids, tested).
++    fast: bool = false,
+     mult: [max_layers][max_ngram]i64,
+     /// Token id -> compressed id (the tokenizer-normalized classes engram.py builds; the lane caches them as JSON).
+     map: []const i32,
+@@ -83,6 +109,7 @@ pub const Hasher = struct {
+             for (0..h.cols()) |k| {
+                 h.offsets[l][k] = acc;
+                 acc += h.primes[l][k];
++                h.mods[l][k] = Mod.init(@intCast(h.primes[l][k]));
+             }
+         }
+         return h;
+@@ -118,7 +145,8 @@ pub const Hasher = struct {
+                     rolling ^= toks[i] *% h.mult[l][i];
+                     for (0..h.heads) |k| {
+                         const c = (i - 1) * h.heads + k;
+-                        out[(r * h.layers + l) * nc + c] = @mod(rolling, h.primes[l][c]) + h.offsets[l][c];
++                        const v = if (h.fast) h.mods[l][c].of(rolling) else @as(u64, @intCast(@mod(rolling, h.primes[l][c])));
++                        out[(r * h.layers + l) * nc + c] = @as(i64, @intCast(v)) + h.offsets[l][c];
+                     }
+                 }
+             }
+@@ -227,6 +255,24 @@ test "the table decode is the per-value decode for every byte and scale" {
+     try std.testing.expectEqualSlices(u16, &a, &b2);
+ }
+ 
++test "Mod: the reciprocal division is @mod for every prime and value" {
++    var why: @import("config.zig").Why = .{};
++    const c = try @import("config.zig").parse(std.testing.allocator, @import("config.zig").test_config, &why);
++    var ps: [max_layers][max_cols]i64 = undefined;
++    primes(c, &ps);
++    for (ps[0]) |pv| {
++        const m = Mod.init(@intCast(pv));
++        for ([_]i64{ std.math.minInt(i64), std.math.maxInt(i64), -1, 0, 1, pv - 1, pv, pv + 1, -pv, -pv - 1 }) |a|
++            try std.testing.expectEqual(@mod(a, pv), @as(i64, @intCast(m.of(a))));
++        var x: u64 = 0x1234_5678_9abc_def0;
++        for (0..5000) |_| {
++            x = x *% 6364136223846793005 +% 1442695040888963407;
++            const a: i64 = @bitCast(x);
++            try std.testing.expectEqual(@mod(a, pv), @as(i64, @intCast(m.of(a))));
++        }
++    }
++}
++
+ test "primes are drawn upward from the vocabulary size and never repeat" {
+     try std.testing.expect(isPrime(2) and isPrime(16000057) and !isPrime(16000000) and !isPrime(1));
+     var why: @import("config.zig").Why = .{};
+diff --git a/zig/src/families/dsv41/engram_io.zig b/zig/src/families/dsv41/engram_io.zig
+index 3d3dc4a..b8c3e4a 100644
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -6,6 +6,7 @@
+ const std = @import("std");
+ const builtin = @import("builtin");
+ const dio = @import("core").direct_io;
++const engram = @import("engram.zig");
+ 
+ /// One layer's table: [rows, row_w] FP8 weights and [rows, row_s] E8M0 scales, by file and offset; fd_wd / fd_sd the same
+ /// files through O_DIRECT (-1 where the file system refuses it: the buffered ones serve). `writable`: the file was opened
+@@ -326,6 +327,114 @@ pub const Pool = struct {
+     }
+ };
+ 
++/// Threads that decode a chunk's FP8 rows (engram.decodeRow) without a spawn a call: TF_DS_ENGRAM_FAST's rows decode here
++/// on 8 threads of the host's, where engram.decodeRows spawns them per chunk. One job at a time: the callers serialize it
++/// (the read-ahead or TF_DS_ENGRAM_LEAD's reader is joined before a chunk's layers, and a round decodes row by row).
++pub const DecodePool = struct {
++    io: std.Io,
++    threads: []std.Thread,
++    mutex: std.Io.Mutex = .init,
++    cond: std.Io.Condition = .init,
++    done_cond: std.Io.Condition = .init,
++    gen: u64 = 0,
++    stop: bool = false,
++    job: ?*Job = null,
++    /// Threads inside work() on the current job: decode() returns only once they are out.
++    active: usize = 0,
++
++    const Job = struct {
++        w: []const u8,
++        s: []const u8,
++        out: []u16,
++        m: usize,
++        row_w: usize,
++        row_s: usize,
++        next: std.atomic.Value(usize) = .init(0),
++        finished: std.atomic.Value(usize) = .init(0),
++    };
++
++    pub fn init(gpa: std.mem.Allocator, io: std.Io, n: usize) !*DecodePool {
++        const threads = try gpa.alloc(std.Thread, n);
++        errdefer gpa.free(threads);
++        const p = try gpa.create(DecodePool);
++        errdefer gpa.destroy(p);
++        p.* = .{ .io = io, .threads = threads };
++        var started: usize = 0;
++        errdefer {
++            p.shutdown(started);
++            gpa.free(p.threads);
++            gpa.destroy(p);
++        }
++        for (p.threads) |*th| {
++            th.* = try std.Thread.spawn(.{}, loop, .{p});
++            started += 1;
++        }
++        return p;
++    }
++
++    fn shutdown(p: *DecodePool, n: usize) void {
++        p.mutex.lockUncancelable(p.io);
++        p.stop = true;
++        p.cond.broadcast(p.io);
++        p.mutex.unlock(p.io);
++        for (p.threads[0..n]) |th| th.join();
++    }
++
++    pub fn deinit(p: *DecodePool, gpa: std.mem.Allocator) void {
++        p.shutdown(p.threads.len);
++        gpa.free(p.threads);
++        gpa.destroy(p);
++    }
++
++    fn loop(p: *DecodePool) void {
++        var seen: u64 = 0;
++        while (true) {
++            p.mutex.lockUncancelable(p.io);
++            while (p.gen == seen and !p.stop) p.cond.waitUncancelable(p.io, &p.mutex);
++            if (p.stop) {
++                p.mutex.unlock(p.io);
++                return;
++            }
++            seen = p.gen;
++            const job = p.job;
++            if (job != null) p.active += 1;
++            p.mutex.unlock(p.io);
++            if (job) |j| {
++                p.work(j);
++                p.mutex.lockUncancelable(p.io);
++                p.active -= 1;
++                p.done_cond.broadcast(p.io);
++                p.mutex.unlock(p.io);
++            }
++        }
++    }
++
++    fn work(j: *Job) void {
++        while (true) {
++            const i = j.next.fetchAdd(1, .monotonic);
++            if (i >= j.m) return;
++            engram.decodeRow(j.w[i * j.row_w ..][0..j.row_w], j.s[i * j.row_s ..][0..j.row_s], j.out[i * j.row_w ..][0..j.row_w]);
++            _ = j.finished.fetchAdd(1, .acq_rel);
++        }
++    }
++
++    /// Rows `m` of w / s decoded into out ([m, row_w]); this thread decodes too and it returns once every thread is out.
++    pub fn decode(p: *DecodePool, w: []const u8, s: []const u8, out: []u16, m: usize, row_w: usize, row_s: usize) void {
++        if (m == 0) return;
++        var job: Job = .{ .w = w, .s = s, .out = out, .m = m, .row_w = row_w, .row_s = row_s };
++        p.mutex.lockUncancelable(p.io);
++        p.job = &job;
++        p.gen += 1;
++        p.cond.broadcast(p.io);
++        p.mutex.unlock(p.io);
++        work(&job);
++        p.mutex.lockUncancelable(p.io);
++        while (job.finished.load(.acquire) < m or p.active > 0) p.done_cond.waitUncancelable(p.io, &p.mutex);
++        p.job = null;
++        p.mutex.unlock(p.io);
++    }
++};
++
+ test "punchHole: the blocks go, the bytes read as zeros and the file keeps its size" {
+     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+     const a = std.testing.allocator;
+diff --git a/zig/src/families/dsv41/engram_lead.zig b/zig/src/families/dsv41/engram_lead.zig
+index 7064791..c34d710 100644
+--- a/zig/src/families/dsv41/engram_lead.zig
++++ b/zig/src/families/dsv41/engram_lead.zig
+@@ -102,7 +102,7 @@ fn read1(eh: *EngramHost, c: *const Config, seq: []const i32, start: usize, n: u
+     const t0 = if (timed) prompt.readStamp(eh) else 0;
+     try prompt.engramReadRows(eh, ring, t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], true);
+     if (timed) eh.reads.observe(prompt.readStamp(eh) - t0);
+-    engram.decodeRows(eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], eh.ahead_rows[j][0 .. m * t.row_w], m, t.row_w, t.row_s, 8);
++    eh.decode(eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], eh.ahead_rows[j][0 .. m * t.row_w], m, t.row_w, t.row_s);
+     eh.lead_ready[j] = true;
+ }
+ 
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index cea879c..05bc4d7 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -173,6 +173,7 @@ pub const Model = struct {
+     dr: ?draft.Drafter = null,
+     tables: ?engram_io.Tables = null,
+     epool: ?*engram_io.Pool = null,
++    edpool: ?*engram_io.DecodePool = null, // TF_DS_ENGRAM_FAST: the rows' decode threads (else a spawn a call)
+     aio: ?*engram_aio.Aio = null,
+     paio: ?*engram_aio.Aio = null, // the prompt chunks' Engram reads, on a ring of their own
+     paio2: ?*engram_aio.Aio = null, // TF_DS_ENGRAM_LEAD: the second Engram layer's prompt reads, on a ring of their own
+@@ -263,6 +264,7 @@ pub const Model = struct {
+         m.dr = null;
+         m.tables = null;
+         m.epool = null;
++        m.edpool = null;
+         m.aio = null;
+         m.paio = null;
+         m.paio2 = null;
+@@ -446,6 +448,7 @@ pub const Model = struct {
+         // whatever the Engram setup below has made goes if the open fails after it (close() only runs for an open model);
+         // registered here, not inside the block, so a later failure runs them too
+         errdefer if (m.tables) |*t| t.close();
++        errdefer if (m.edpool) |p| p.deinit(gpa);
+         errdefer if (m.epool) |p| p.deinit(gpa);
+         errdefer if (m.aio) |x| x.deinit();
+         errdefer if (m.paio) |x| x.deinit();
+@@ -467,7 +470,15 @@ pub const Model = struct {
+                 .map_scales = prompt.scalesMapped(if (std.c.getenv("TF_DS_ENGRAM_SCALES")) |v| std.mem.span(v) else null),
+             });
+             m.epool = try engram_io.Pool.init(gpa, io, 64);
+-            m.eh = try prompt.EngramHost.init(a, c, engram.Hasher.init(c.*, map, mult), &m.tables.?, m.epool.?, sp.rank, sp.world, chunk_rows);
++            const fast = prompt.fastEnabled(if (std.c.getenv("TF_DS_ENGRAM_FAST")) |v| std.mem.span(v) else null);
++            var hasher = engram.Hasher.init(c.*, map, mult);
++            hasher.fast = fast; // TF_DS_ENGRAM_FAST: the reciprocal modulo, same ids
++            m.eh = try prompt.EngramHost.init(a, c, hasher, &m.tables.?, m.epool.?, sp.rank, sp.world, chunk_rows);
++            if (fast) {
++                // the rows' decode on threads of their own, not a spawn a chunk
++                m.edpool = try engram_io.DecodePool.init(gpa, io, 8);
++                m.eh.?.dpool = m.edpool;
++            }
+             // TF_DS_ENGRAM_TRIM=1: give back the blocks of the rows this rank never reads (the other rank's hash columns)
+             if (prompt.trimEnabled(if (std.c.getenv("TF_DS_ENGRAM_TRIM")) |v| std.mem.span(v) else null)) prompt.trimTables(&m.eh.?, c, io);
+             // TF_DS_ENGRAM_METRICS (on; 0 turns it off): every table read timed for /metrics (the clock; --profile's p_* split stays off)
+@@ -483,7 +494,13 @@ pub const Model = struct {
+                 m.aio = try engram_aio.Aio.init(gpa, io, 1024 * ((o.round_rows + 15) / 16));
+                 m.eh.?.aio = m.aio;
+                 // a prompt chunk's reads (2 x 12 x 2,048 at most): a ring of 4,096 slots (32 MiB), 1,024 rows a batch
+-                m.paio = try engram_aio.Aio.init(gpa, io, 4096);
++                // (TF_DS_ENGRAM_FAST: TF_DS_ENGRAM_AIO_SLOTS over it, 64 .. 65,536, for an A/B of the ring's depth)
++                const slots: usize = if (fast) slots: {
++                    const v = std.c.getenv("TF_DS_ENGRAM_AIO_SLOTS") orelse break :slots 4096;
++                    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch break :slots 4096;
++                    break :slots if (n >= 64 and n <= 65536) n else 4096;
++                } else 4096;
++                m.paio = try engram_aio.Aio.init(gpa, io, slots);
+                 m.eh.?.paio = m.paio;
+                 m.ahead_apart = true;
+             }
+@@ -671,6 +688,7 @@ pub const Model = struct {
+         if (m.aio) |x| x.deinit();
+         if (m.paio) |x| x.deinit();
+         if (m.paio2) |x| x.deinit();
++        if (m.edpool) |p| p.deinit(m.gpa);
+         if (m.epool) |p| p.deinit(m.gpa);
+         if (m.tables) |*t| t.close();
+         if (m.rdma_rings) |*r| r.close(m.gpa);
+@@ -1084,6 +1102,7 @@ pub const Model = struct {
+             eh.ahead_start = std.math.maxInt(usize);
+             eh.ahead_ready = .{ false, false };
+             eh.chunk_hashed = false;
++            prompt.forgetHashes(eh);
+             eh.ahead_n = 0;
+             eh.ahead_err = null;
+             if (eh.lead_on) m.lead.reset(eh);
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 3388b3f..e467359 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1471,6 +1471,14 @@ pub const EngramHost = struct {
+     d_vals: []u32 = &.{},
+     d_row_w: usize = 0,
+     d_row_s: usize = 0,
++    // TF_DS_ENGRAM_FAST: the rows' decode on the host's decode threads (null: engram.decodeRows' spawn a call)
++    dpool: ?*engram_io.DecodePool = null,
++    // TF_DS_ENGRAM_FAST: the chunk `hashes` holds for the fallback path's second layer, and the sequence it was hashed
++    // from (forgetHashes clears it: a round's engramAhead writes the same buffer, and every pass resets it)
++    hash_start: usize = std.math.maxInt(usize),
++    hash_n: usize = 0,
++    hash_seq: [*]const i32 = undefined,
++    hash_seq_len: usize = 0,
+     t_hash: u64 = 0,
+     t_read: u64 = 0,
+     t_decode: u64 = 0,
+@@ -1550,6 +1558,25 @@ pub const EngramHost = struct {
+         };
+     }
+ 
++    /// TF_DS_ENGRAM_FAST: the rows' FP8 -> bf16 decode, on the host's decode threads when it has them (else the spawn a
++    /// call engram.decodeRows does). Only one caller decodes at a time (a chunk's reader is joined before its layers).
++    pub fn decode(eh: *EngramHost, w: []const u8, s: []const u8, out: []u16, m: usize, row_w: usize, row_s: usize) void {
++        if (eh.dpool) |dp| return dp.decode(w, s, out, m, row_w, row_s);
++        engram.decodeRows(w, s, out, m, row_w, row_s, 8);
++    }
++
++    /// The fallback path's hashes: once for both layers, reused at the second layer of the same chunk and sequence
++    /// (TF_DS_ENGRAM_FAST). forgetHashes clears it wherever `hashes` is written by someone else.
++    fn hashesFor(eh: *EngramHost, seq: []const i32, start: usize, n: usize) void {
++        const cols = eh.hasher.cols();
++        if (eh.hasher.fast and eh.hash_start == start and eh.hash_n == n and eh.hash_seq == seq.ptr and eh.hash_seq_len == seq.len) return;
++        eh.hasher.hashes(seq, start, n, eh.hashes[0 .. n * eh.hasher.layers * cols]);
++        eh.hash_start = start;
++        eh.hash_n = n;
++        eh.hash_seq = seq.ptr;
++        eh.hash_seq_len = seq.len;
++    }
++
+     /// TF_DS_ENGRAM_DEDUPE: the buffers a prompt chunk's distinct rows are read into (the largest layer's row widths), and
+     /// the open-addressing map from a row id to its row in them (twice the chunk's ids, a power of two).
+     pub fn useDedupe(eh: *EngramHost, gpa: std.mem.Allocator, c: *const Config, cap: usize) !void {
+@@ -1583,6 +1610,13 @@ pub const EngramHost = struct {
+     }
+ };
+ 
++/// TF_DS_ENGRAM_FAST=1 turns the host-side economies on (all bit-identical): the reciprocal modulo the hasher's columns,
++/// a chunk's decode on the host's decode threads instead of a spawn a call, the fallback path's hashes kept for the second
++/// layer, and TF_DS_ENGRAM_AIO_SLOTS over the prompt ring's slots.
++pub fn fastEnabled(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse "0", "1");
++}
++
+ /// TF_DS_ENGRAM_DEDUPE=1 turns the prompt chunks' row dedupe on (off by default; the bytes are the same either way).
+ pub fn dedupeEnabled(v: ?[]const u8) bool {
+     return std.mem.eql(u8, v orelse "0", "1");
+@@ -1683,6 +1717,12 @@ pub fn trimTables(eh: *EngramHost, c: *const Config, io: std.Io) void {
+     std.log.info("dsv41: Engram trim: punched {d} MiB this rank never reads (columns {d}..{d})", .{ freed >> 20, eh.lo, eh.hi });
+ }
+ 
++/// TF_DS_ENGRAM_FAST's hash cache: forget the chunk `hashes` holds (a round's engramAhead wrote it, or a new pass started).
++pub fn forgetHashes(eh: *EngramHost) void {
++    eh.hash_start = std.math.maxInt(usize);
++    eh.hash_seq_len = 0;
++}
++
+ /// Rows `ids` of table `t` into out_w / out_s: on the AIO ring when given, else the pool's preads. With `dedupe` and the
+ /// switch on, the distinct ids are read once and their rows copied to the repeats (exact: the same id is the same bytes),
+ /// so the n-grams a prompt repeats cost one read instead of one each.
+@@ -1743,7 +1783,7 @@ fn engramAhead1(eh: *EngramHost, c: *const Config, seq: []const i32, start: usiz
+     const t0 = if (timed) readStamp(eh) else 0;
+     try engramReadRows(eh, eh.paio, t, eh.ahead_flat[j][0..m], eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], true);
+     if (timed) eh.reads.observe(readStamp(eh) - t0);
+-    engram.decodeRows(eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], eh.ahead_rows[j][0 .. m * t.row_w], m, t.row_w, t.row_s, 8);
++    eh.decode(eh.ahead_w[j][0 .. m * t.row_w], eh.ahead_s[j][0 .. m * t.row_s], eh.ahead_rows[j][0 .. m * t.row_w], m, t.row_w, t.row_s);
+     eh.ahead_ready[j] = true;
+ }
+ 
+@@ -1857,6 +1897,11 @@ test "unreadRows: each rank's dead range is the other rank's buckets" {
+     try std.testing.expectEqual(rows, (r0[1][0] - r0[0][1]) + (r1[1][0] - r1[0][1]));
+ }
+ 
++test "TF_DS_ENGRAM_FAST: only 1 turns the host-side economies on" {
++    try std.testing.expect(fastEnabled("1"));
++    for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!fastEnabled(v));
++}
++
+ test "TF_DS_ENGRAM_SCALES: map, or everything else reads the scales" {
+     try std.testing.expect(scalesMapped("map"));
+     for ([_]?[]const u8{ null, "", "io", "0", "1", "MAP", " map" }) |v| try std.testing.expect(!scalesMapped(v));
+@@ -1897,7 +1942,7 @@ pub fn engramRows(eh: *EngramHost, l: usize, t: engram_io.Table, seq: []const i3
+         eh.ahead_ready[l] = false;
+         return eh.ahead_rows[l];
+     }
+-    eh.hasher.hashes(seq, start, n, eh.hashes[0 .. n * eh.hasher.layers * cols]);
++    eh.hashesFor(seq, start, n);
+     for (0..n) |r| {
+         for (0..k) |j| eh.flat[r * k + j] = eh.hashes[(r * eh.hasher.layers + l) * cols + eh.lo + j];
+     }
+@@ -1908,7 +1953,7 @@ pub fn engramRows(eh: *EngramHost, l: usize, t: engram_io.Table, seq: []const i3
+     const read = engramReadRows(eh, ring, t, eh.flat[0..m], eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s], true);
+     if (timed) eh.reads.observe(readStamp(eh) - t0);
+     read catch |err| return rankFault(err);
+-    engram.decodeRows(eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s], eh.rows[0 .. m * t.row_w], m, t.row_w, t.row_s, 8); // the rows on 8 threads
++    eh.decode(eh.w[0 .. m * t.row_w], eh.s[0 .. m * t.row_s], eh.rows[0 .. m * t.row_w], m, t.row_w, t.row_s); // the rows on the decode threads
+     return eh.rows[0 .. m * t.row_w];
+ }
+ 
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 2b2c7ca..6407003 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1696,6 +1696,7 @@ fn engramAhead(e: *const Engine, eh: *prompt.EngramHost, seq: []const i32, rows:
+         }
+         if (eh.aio) |aio| ah.ids[j] = try aio.start(tbl, eh.flat[f0..][0 .. R * k], eh.w[f0 * tbl.row_w ..][0 .. R * k * tbl.row_w], eh.s[f0 * tbl.row_s ..][0 .. R * k * tbl.row_s]);
+     }
++    prompt.forgetHashes(eh); // the round's hashes went into the same buffer the fallback path keeps a chunk's in
+     if (eh.io != null) eh.t_hash += stamp(eh) - t0;
+ }
+ 
