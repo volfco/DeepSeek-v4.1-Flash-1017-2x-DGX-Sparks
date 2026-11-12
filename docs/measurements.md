@@ -14,7 +14,8 @@ What was checked on a pair of Sparks, and how it was measured. The headline deco
   `STRICT`) are host-tested only: the series applies to `fbbc971` and `zig build test` passes (632 tests, 619 without
   them), including the reciprocal modulo against `@mod`, the deduped and mapped gathers against the plain ones, and a
   punched file read back as zeros. **None was run on a pair yet**, so their speed is unmeasured; `FAST`'s items are
-  expected under 1 % of a chunk each, and `TRIM` changes disk, not time.
+  expected under 1 % of a chunk each, and `TRIM` changes disk, not time. The flags to run and what to record are in
+  [`to-benchmark.md`](../to-benchmark.md).
 - `zig/Dockerfile` builds (the image of 29 October 2026, `tensorfold-dsv41:exl3-tp2-7d71dcdf7f2f`, 24.9 GB, about 6 minutes of Zig compiling on a
   Spark): `tensorfold-native`, `tf-dsv41-lanes`, `tf-dsv41-rank-cache` and the three inputs' scripts are in it.
 - On the pair, with that image (29 October 2026, engine `fbbc971` and the 33 patches, `TF_FILL_CHUNKS=4 TF_FILL_FIRST=4

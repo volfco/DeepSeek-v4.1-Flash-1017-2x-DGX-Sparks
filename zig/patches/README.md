@@ -73,6 +73,9 @@ them there the same way.
 | `0098-engram-strict.patch` | `TF_DS_ENGRAM_STRICT=1` (both ranks) | off | refuses the tables the FP8 decode would read wrong: a tensor wider than a byte (the rows are always decoded as FP8 E4M3 and the scales as E8M0, so a BF16/F16/F32 table would read the wrong bytes) and a scale row shorter than `decodeRow` reads (`row_s * 32 < row_w` reads into the next row's scales). Without the switch both are warned about and read as before. An id past the token map now blocks its n-gram as an image's does instead of reading past the array; that one is not gated (a no-op for every id the map has). Host tests: a BF16 toy refused, `scalesCover`'s edges, `comp` past the map |
 
 
+The five Engram switches above (`0094`-`0098`) are host-tested only; what to measure before keeping any of them, with the
+commands and the flags, is in [`to-benchmark.md`](../../to-benchmark.md).
+
 **Rebase onto `fbbc971` (28-oct-2026, eleata).** The pin moved from `629c524` to `fbbc971` (the `deepseek-v41-zig` tip of
 2026-10-23). `0002` is gone: the engine's `TF_DS_ENGRAM_LEAD=1` (`9673a5e`) reads each Engram layer's prompt rows a chunk
 ahead on a reader of its own, the same idea on the same `paio2` ring. `0006` is gone: upstream's `3de79d8` keeps and
