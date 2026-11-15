@@ -1,0 +1,762 @@
+From a6e662295885a383f8b35d724367297bd144d855 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Sat, 14 Nov 2026 20:34:16 -0800
+Subject: [PATCH] lanes: TF_DS_SCORE=1 scores a recorded continuation through
+ the forced-window path (/v1/completions' tensorfold_score, off by default)
+
+The quality set is undefined and nothing reports a probability: the server refuses `logprobs`
+(server/fields.zig:276-284), so the `0053` expert prune and cap and EAQ v1 against v1.1 have no numeric gate, and
+tools/ had no scoring harness. Baseten's `score` (crates/engine/src/bin/run.rs:253-305) prefills a prompt, feeds a
+recorded continuation through the decode forward, and reports mean NLL with its standard error, perplexity and the
+argmax match rate. This builds the same thing on the round the engine already runs.
+
+A non-standard `tensorfold_score: [id, id, ...]` field on /v1/completions, with `prompt` as token ids, asks for that
+instead of generating. It is refused with a 400 unless TF_DS_SCORE=1 (`1` or `on`; unset, `0`, `off` or anything else
+leave it off), the engine reports api.Info.score (dsv41's `teacher_forced`: only its lanes backend copies a round's
+logits to the host), n is 1 (as for every request), stream is false, temperature is 0, and the list is non-empty with
+every id inside the vocabulary; on /v1/chat/completions it is refused too. With the switch off nothing else changes:
+the field is refused, no other reply carries a `score` block, and the base reply is byte for byte what it was.
+
+The engine side rides the forced-window machinery. A score stream's force list is its recorded continuation
+(Stream.score, filled at Stream.init): the prompt pass pops the first token as the stream's own first, and each round's
+plan takes the next five into a `Kind.forced` window whose sixth is popped at the keep, so a round feeds and scores six
+recorded ids. engine.conclude already accepts every forced row whatever the target picked, so no new decision exists on
+the wire: rank 1 runs the same rows from the verify frame's ids (writeWin) and the keep is rank 0's alone. A score
+stream drafts nothing (drafts false: no head pass, no copy window, no graft, no held rows) and takes the family round
+whatever TF_DS_GPU_TOKENS says; its rounds set sampling.RoundRules.logits, so the round takes the host_draw path and
+every row's fp32 logits reach the host (m.roundLogits). The first recorded token is scored from the prompt pass's head
+(m.promptLogitsHost: the row the pass draws from), and each round row records logit[recorded] - logsumexp(row) in
+float64 and whether the row's argmax was the recorded token (lanes/score.zig, whose summary gives the mean, its
+standard error, the perplexity and the share). The reply's `tensorfold` block gains
+`score: {tokens, nll_sum, nll_mean, nll_se, ppl, argmax_match}`; `usage` and `choices` are unchanged, the reply's text
+being the recorded continuation decoded.
+
+Forcing host_draw changes how every stream in that round gets its tokens (logits copied to the host instead of the
+device argmax). It should not change a greedy stream's token, and that is the thing to prove: a score request waits
+for the lane (error.ContextFull, the lane host's requeue) and so starts alone, and a stream arriving later can still
+share its rounds. tools/validate.py's concurrent check is the gate before that is relied on; until then PARALLEL=1
+gives the solo case. Rank 1 needs nothing new, so there is no cross-rank switch agreement to compare (unlike 0051,
+0054 and 0111).
+
+tools/score.py mirrors tools/exact.py's client and record shape: `record --in set.jsonl --out base.json` scores a
+JSONL set of {id, prompt_ids, continuation_ids} one item at a time and stores the reply's score block per item with
+the set's digest, `compare A.json B.json` gives the paired per-item difference of the mean negative log-likelihood
+with its standard error (a lossless arm must give 0), and `--self-test` checks the statistics on synthetic rows. The
+sets themselves (tools/score_sets/) are not generated in this pass.
+
+Tests: zig build test passes, including the new host tests in lanes/score.zig (a toy row's hand-computed
+log-probability, the log-sum-exp staying finite where an unshifted exp overflows, a summary's mean, standard error,
+perplexity and argmax share) and in engine_test.zig (a score stream's windows: five forced ids a round and a six-row
+window, a short last round, a continuation of length one and no round; a score request waiting for the lane, and an
+empty score list generating as ever); zig/tests/server/zig_test.sh passes, including the switch's parse and the
+field's refusals and ids. Not run on a pair: no smoke, no validate.py, no benchmark. Per-token NLLs are left out of
+the reply. (Patch 0120 of the series, plan item 2.)
+---
+ zig/src/core/engine_api.zig         |  10 +++
+ zig/src/core/lane_host.zig          |   3 +-
+ zig/src/core/lanes/engine.zig       |   9 ++-
+ zig/src/core/lanes/engine_test.zig  |  84 ++++++++++++++++++++-
+ zig/src/core/lanes/fake.zig         |   3 +
+ zig/src/core/lanes/lanes.zig        |   1 +
+ zig/src/core/lanes/score.zig        | 111 ++++++++++++++++++++++++++++
+ zig/src/core/lanes/stream.zig       |  12 +++
+ zig/src/core/lanes/windows.zig      |   3 +-
+ zig/src/families/dsv41/lanes.zig    |  17 +++++
+ zig/src/families/dsv41/native.zig   |   3 +
+ zig/src/families/dsv41/sampling.zig |   8 ++
+ zig/src/native/cuda.zig             |   2 +-
+ zig/src/server/chat.zig             |  22 ++++++
+ zig/src/server/fields.zig           |  56 ++++++++++++++
+ zig/src/server/openai.zig           |   5 +-
+ zig/src/server/server.zig           |   3 +
+ 17 files changed, 344 insertions(+), 8 deletions(-)
+ create mode 100644 zig/src/core/lanes/score.zig
+
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index ce92d33..f07141a 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -91,6 +91,9 @@ pub const Request = struct {
+     structure: ?Structure = null,
+     /// Stop a short exact cycle while the think block is open.
+     loop_guard: bool = false,
++    /// TF_DS_SCORE: the recorded continuation to score, teacher-forced (empty: the reply generates its tokens). Its
++    /// length is the reply's token budget, and its first token is scored from the prompt pass's last row.
++    score: []const u32 = &.{},
+ 
+     /// What the prompt cache matches and keeps under: `cache_key`, or the prompt when it has none.
+     pub fn cacheKey(r: *const Request) []const u32 {
+@@ -119,8 +122,13 @@ pub const Stats = struct {
+     /// frame, so these bracket its delta exactly); null when the backend has no rank pair.
+     round_from: ?u64 = null,
+     round_to: ?u64 = null,
++    /// TF_DS_SCORE: the recorded continuation's figures (null: a reply that generated its tokens).
++    score: ?Score = null,
+ };
+ 
++/// TF_DS_SCORE's figures for a scored reply (lanes/score.zig's Summary).
++pub const Score = lanes.score.Summary;
++
+ pub const Event = union(enum) {
+     /// The prompt is in the cache: ``cached`` of its tokens came from a kept prefix.
+     prefilled: u32,
+@@ -153,6 +161,8 @@ pub const Info = struct {
+     structures: bool = false,
+     /// The engine keeps prompt states between requests, so a reply's `prefilled` counts the tokens it restored.
+     prompt_cache: bool = false,
++    /// TF_DS_SCORE: the engine scores a recorded continuation (a stream's forced rows' logits on the host).
++    score: bool = false,
+     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
+     prefill_step: u32 = 0,
+     /// A line the server prints once at startup (the engine's memory plan); empty: none.
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index e848132..f92692d 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -504,7 +504,7 @@ pub const LaneHost = struct {
+         h.gpa.free(job.shared);
+         h.gpa.free(job.lineage);
+         const s = &job.stream;
+-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null, .round_from = job.ordinal0, .round_to = h.core.backend.ordinal() } else .{};
++        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null, .round_from = job.ordinal0, .round_to = h.core.backend.ordinal(), .score = if (s.score) |sc| sc.summary() else null } else .{};
+         emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
+         if (job.started) {
+             s.deinit(h.gpa);
+@@ -690,6 +690,7 @@ pub const LaneHost = struct {
+             .chunks = r.chunks,
+             .reuse = reuse,
+             .images = r.images,
++            .score = r.score,
+         }) catch {
+             job.proposer.deinit();
+             return h.drop(job, "out of memory");
+diff --git a/zig/src/core/lanes/engine.zig b/zig/src/core/lanes/engine.zig
+index b695338..7abee08 100644
+--- a/zig/src/core/lanes/engine.zig
++++ b/zig/src/core/lanes/engine.zig
+@@ -95,6 +95,9 @@ pub const Engine = struct {
+     pub fn addStream(e: *Engine, s: *Stream) !void {
+         _ = e.arena.reset(.retain_capacity);
+         try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
++        // a score stream forces the round's logits onto the host, which changes how every stream in that round gets
++        // its tokens: it waits for the lane to be free (error.ContextFull, the lane host's requeue) and runs alone
++        if (s.score != null and (e.activeCount() > 0 or e.filling != null)) return error.ContextFull;
+         if (e.filling != null) {
+             const at = @min(@as(usize, s.reuse.at), s.prompt_len);
+             if (!e.cutsIn(s.prompt_len - at, picturesPast(s.images, at))) return error.FillBusy;
+@@ -181,7 +184,7 @@ pub const Engine = struct {
+             try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = d }});
+             s.dropHeld(e.gpa);
+             s.next = .{ .count = d };
+-        } else if (e.cfg.pipelined) {
++        } else if (e.cfg.pipelined and s.score == null) {
+             try e.queueNext(s, feed);
+         }
+         const value = try e.readFeed(feed);
+@@ -252,7 +255,7 @@ pub const Engine = struct {
+             try e.roundStreams(chosen);
+         } else {
+             for (live.items) |s| {
+-                const r = if ((e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined) try e.familyRound(s, null) else try e.pipelinedRound(s);
++                const r = if (s.score != null or (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined) try e.familyRound(s, null) else try e.pipelinedRound(s);
+                 s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
+             }
+         }
+@@ -292,7 +295,7 @@ pub const Engine = struct {
+         var rows: u64 = 0;
+         for (order) |i| {
+             const s = live[i];
+-            const need: u64 = if (s.drafts) @min(@min(e.cfg.base_width, e.cfg.batch_rows), 1 + s.force.items.len) else 1;
++            const need: u64 = if (s.score != null or s.drafts) @min(@min(e.cfg.base_width, e.cfg.batch_rows), 1 + s.force.items.len) else 1;
+             if (chosen.items.len == e.cfg.batch_streams or (chosen.items.len > 0 and rows + need > e.cfg.batch_rows)) break;
+             try chosen.append(a, i);
+             rows += need;
+diff --git a/zig/src/core/lanes/engine_test.zig b/zig/src/core/lanes/engine_test.zig
+index 6c33ca3..5589210 100644
+--- a/zig/src/core/lanes/engine_test.zig
++++ b/zig/src/core/lanes/engine_test.zig
+@@ -15,6 +15,7 @@ const Case = struct {
+     sampling: ?Sampling = null,
+     drafts: bool = true,
+     think_budget: u32 = 0,
++    score: []const u32 = &.{},
+ };
+ 
+ fn model() !Config {
+@@ -38,7 +39,7 @@ fn run(cases: []const Case) ![][]u32 {
+     defer gpa.free(proposers);
+     for (cases, streams, proposers) |c, *s, *p| {
+         p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+-        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91 });
++        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .score = c.score });
+     }
+     defer for (streams, proposers) |*s, *p| {
+         s.deinit(gpa);
+@@ -190,3 +191,84 @@ test "a cut-in needs picture rows only for a picture ending past its resume poin
+     try std.testing.expect(Engine.picturesPast(&img, 0)); // a fresh pass
+     try std.testing.expect(!Engine.picturesPast(&.{}, 0));
+ }
++
++/// The served engine's window width (dsv41's window_rows: six rows), so a score stream's forced windows are five
++/// recorded ids and the round's pending row.
++fn scoreModel() !Config {
++    var costs: [6]@import("config.zig").Cost = undefined;
++    for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
++    return Config.init(gpa, .{ .exact_width = 6, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
++}
++
++const ScoreRun = struct { emitted: []u32, windows: []usize };
++
++/// One score stream alone on the fake target, its windows' rows in order; eos empty as the server sends a score
++/// request (every recorded token is fed, none ends the scoring).
++fn runScore(prompt: []const u32, ids: []const u32) !ScoreRun {
++    var cfg = try scoreModel();
++    defer cfg.deinit(gpa);
++    var target: fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var clock: fake.FixedClock = .{};
++    var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
++    defer engine.deinit();
++    var s = try sm.Stream.init(gpa, .{ .id = "score", .prompt = prompt, .max_new = @intCast(ids.len), .eos = &.{}, .drafts = false, .score = ids });
++    defer s.deinit(gpa);
++    try engine.addStream(&s);
++    while (engine.activeCount() > 0) try engine.step();
++    return .{ .emitted = try gpa.dupe(u32, s.emitted()), .windows = try gpa.dupe(usize, target.windows.items) };
++}
++
++fn freeScore(r: ScoreRun) void {
++    gpa.free(r.emitted);
++    gpa.free(r.windows);
++}
++
++test "a score stream's windows are its recorded continuation: five forced ids a round, a short last round, a length of one" {
++    const prompt = [_]u32{ 1, 2, 3, 4, 5 };
++    // twelve recorded ids: two full windows of the pending row and five forced ones
++    const long = [_]u32{ 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22 };
++    const two = try runScore(&prompt, &long);
++    defer freeScore(two);
++    try std.testing.expectEqualSlices(u32, &long, two.emitted);
++    try std.testing.expectEqualSlices(usize, &.{ 6, 6 }, two.windows);
++    // eight: the first window as ever, the last round only the pending row and the one id left
++    const eight = long[0..8];
++    const short = try runScore(&prompt, eight);
++    defer freeScore(short);
++    try std.testing.expectEqualSlices(u32, eight, short.emitted);
++    try std.testing.expectEqualSlices(usize, &.{ 6, 2 }, short.windows);
++    // one: the prompt pass's own row scores it, and no round runs
++    const one = try runScore(&prompt, &.{42});
++    defer freeScore(one);
++    try std.testing.expectEqualSlices(u32, &.{42}, one.emitted);
++    try std.testing.expectEqual(@as(usize, 0), one.windows.len);
++}
++
++test "a score stream waits for the lane, and an empty score list is an ordinary stream" {
++    var cfg = try model();
++    defer cfg.deinit(gpa);
++    var target: fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var clock: fake.FixedClock = .{};
++    var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
++    defer engine.deinit();
++    var other = try sm.Stream.init(gpa, .{ .id = "other", .prompt = &.{ 1, 2, 3, 4 }, .max_new = 4, .eos = &.{96} });
++    defer other.deinit(gpa);
++    var s = try sm.Stream.init(gpa, .{ .id = "score", .prompt = &.{ 5, 6, 7 }, .max_new = 2, .eos = &.{}, .drafts = false, .score = &.{ 7, 8 } });
++    defer s.deinit(gpa);
++    try engine.addStream(&other);
++    // the lane host requeues a ContextFull score request until the lane is free
++    try std.testing.expectError(error.ContextFull, engine.addStream(&s));
++    while (engine.activeCount() > 0) try engine.step();
++    try engine.addStream(&s);
++    while (engine.activeCount() > 0) try engine.step();
++    try std.testing.expectEqualSlices(u32, &.{ 7, 8 }, s.emitted());
++
++    // a stream with an empty score list generates as it always did
++    const plain = try run(&.{.{ .prompt = &.{ 1, 2, 3, 4, 5 }, .max_new = 6, .drafts = false }});
++    defer free(plain);
++    const empty = try run(&.{.{ .prompt = &.{ 1, 2, 3, 4, 5 }, .max_new = 6, .drafts = false, .score = &.{} }});
++    defer free(empty);
++    try std.testing.expectEqualSlices(u32, plain[0], empty[0]);
++}
+diff --git a/zig/src/core/lanes/fake.zig b/zig/src/core/lanes/fake.zig
+index 714c58b..91f9968 100644
+--- a/zig/src/core/lanes/fake.zig
++++ b/zig/src/core/lanes/fake.zig
+@@ -30,6 +30,7 @@ pub const Fake = struct {
+     gpa: Allocator,
+     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
+     drawn: std.ArrayList(u32) = .empty, // handle -> token
++    windows: std.ArrayList(usize) = .empty, // each verify window's rows, in order (the round's shapes for tests)
+     rounds: u64 = 0,
+     cycle_after: ?usize = null,
+     probe_prompt: usize = 0,
+@@ -51,6 +52,7 @@ pub const Fake = struct {
+         while (it.next()) |l| freeLane(x.gpa, l);
+         x.lanes.deinit(x.gpa);
+         x.drawn.deinit(x.gpa);
++        x.windows.deinit(x.gpa);
+     }
+ 
+     fn freeLane(gpa: Allocator, l: *Lane) void {
+@@ -200,6 +202,7 @@ pub const Fake = struct {
+         x.rounds += 1;
+         for (windows, out) |w, o| {
+             const l = x.lane(w.stream);
++            try x.windows.append(x.gpa, w.rows());
+             l.base = l.history.items.len;
+             l.rows.clearRetainingCapacity();
+             try l.rows.append(x.gpa, w.pending);
+diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
+index f07d04e..1b32dad 100644
+--- a/zig/src/core/lanes/lanes.zig
++++ b/zig/src/core/lanes/lanes.zig
+@@ -6,6 +6,7 @@ pub const allocate = @import("allocate.zig");
+ pub const accept = @import("accept.zig");
+ pub const proposer = @import("proposer.zig");
+ pub const sampling = @import("sampling.zig");
++pub const score = @import("score.zig");
+ pub const fill = @import("fill.zig");
+ pub const shape = @import("shape.zig");
+ pub const plan_lanes = @import("plan_lanes.zig");
+diff --git a/zig/src/core/lanes/score.zig b/zig/src/core/lanes/score.zig
+new file mode 100644
+index 0000000..680c067
+--- /dev/null
++++ b/zig/src/core/lanes/score.zig
+@@ -0,0 +1,111 @@
++//! TF_DS_SCORE's teacher-forced scoring (Baseten's `run.rs` score): a recorded continuation's mean negative
++//! log-likelihood under the model, its standard error, its perplexity and how often the model's argmax was the
++//! recorded token. The rows are the backend's fp32 logits; the arithmetic is float64 here.
++const std = @import("std");
++
++/// A row's log-sum-exp in float64, shifted by the row's largest logit so the exponentials stay in range.
++pub fn logsumexp(row: []const f32) f64 {
++    var top: f64 = -std.math.inf(f64);
++    for (row) |v| top = @max(top, @as(f64, v));
++    if (top == -std.math.inf(f64)) return top; // every logit -inf: no mass
++    var sum: f64 = 0.0;
++    for (row) |v| sum += @exp(@as(f64, v) - top);
++    return top + @log(sum);
++}
++
++/// The recorded token's negative log-likelihood under a row of logits: logit[recorded] - logsumexp(row).
++pub fn nll(row: []const f32, recorded: u32) !f64 {
++    if (recorded >= row.len) return error.RecordedOutOfRange;
++    return @as(f64, row[recorded]) - logsumexp(row);
++}
++
++/// A scored stream's running figures: the recorded continuation and how many of its tokens have been scored, the
++/// negative log-likelihoods' sum and sum of squares (float64), and the rows whose argmax was the recorded token.
++pub const Score = struct {
++    ids: []const u32, // the recorded continuation (the request's)
++    next: usize = 0, // tokens scored so far: ids[next] is the next one to score
++    nll_sum: f64 = 0,
++    nll_sq: f64 = 0,
++    hits: u32 = 0,
++
++    /// One row: the token the model was asked for, its negative log-likelihood and whether the row's argmax was it.
++    pub fn add(s: *Score, nll_value: f64, argmax_hit: bool) void {
++        s.next += 1;
++        s.nll_sum += nll_value;
++        s.nll_sq += nll_value * nll_value;
++        s.hits += @intFromBool(argmax_hit);
++    }
++
++    /// The score's figures: the mean over the scored tokens, its standard error, the perplexity and the share of rows
++    /// whose argmax was the recorded token.
++    pub fn summary(s: Score) Summary {
++        const n: f64 = @floatFromInt(s.next);
++        const mean = s.nll_sum / n;
++        // shortcut: the sum of squares gives the standard error in one pass over the rows (cancellation is at the
++        // 1e-16 level for negative log-likelihoods of a few nats); upgrade if one token's dwarfs the set's mean
++        const variance = if (s.next > 1) @max(0.0, (s.nll_sq - n * mean * mean) / (n - 1.0)) else 0.0;
++        return .{
++            .tokens = @intCast(s.next),
++            .nll_sum = s.nll_sum,
++            .nll_mean = mean,
++            .nll_se = if (s.next > 1) @sqrt(variance / n) else 0.0,
++            .ppl = if (mean < 709.0) @exp(mean) else std.math.inf(f64),
++            .argmax_match = @as(f64, @floatFromInt(s.hits)) / n,
++        };
++    }
++};
++
++/// What a score stream's reply reports (engine_api's Stats.score, the tensorfold block's score).
++pub const Summary = struct {
++    tokens: u32,
++    nll_sum: f64,
++    nll_mean: f64,
++    nll_se: f64,
++    ppl: f64,
++    argmax_match: f64,
++};
++
++test "a toy row's negative log-likelihood is its hand-computed log-probability" {
++    // log(1 + e + e^2 + e^-1) = 2.4401896985611953
++    const row = [_]f32{ 0.0, 1.0, 2.0, -1.0 };
++    try std.testing.expectApproxEqAbs(@as(f64, 2.4401896985611953), logsumexp(&row), 1e-12);
++    try std.testing.expectApproxEqAbs(@as(f64, -0.4401896985611953), try nll(&row, 2), 1e-12);
++    try std.testing.expectApproxEqAbs(@as(f64, -3.4401896985611953), try nll(&row, 3), 1e-12);
++    // 97 equal logits: every token's probability is 1/97
++    const flat: [97]f32 = @splat(0.0);
++    try std.testing.expectApproxEqAbs(@as(f64, -4.574710978503383), try nll(&flat, 0), 1e-12);
++    try std.testing.expectError(error.RecordedOutOfRange, nll(&row, 4));
++}
++
++test "the log-sum-exp stays finite for large logits" {
++    // unshifted, e^1001 overflows float64
++    try std.testing.expect(std.math.isInf(@exp(@as(f64, 1001.0))));
++    const row = [_]f32{ 1000.0, 1001.0 };
++    try std.testing.expectApproxEqAbs(@as(f64, 1001.3132616875182), logsumexp(&row), 1e-9);
++    try std.testing.expectApproxEqAbs(@as(f64, -1.3132616875182228), try nll(&row, 0), 1e-9);
++    // a row of -inf logits has no mass
++    const dead = [_]f32{ -std.math.inf(f32), -std.math.inf(f32) };
++    try std.testing.expectEqual(-std.math.inf(f64), logsumexp(&dead));
++}
++
++test "a score's summary is its mean, its standard error and its argmax share" {
++    var s: Score = .{ .ids = &.{ 5, 6, 7 } };
++    s.add(1.0, true);
++    s.add(2.0, false);
++    s.add(3.0, true);
++    const out = s.summary();
++    try std.testing.expectEqual(@as(u32, 3), out.tokens);
++    try std.testing.expectEqual(@as(f64, 6.0), out.nll_sum);
++    try std.testing.expectEqual(@as(f64, 2.0), out.nll_mean);
++    // ((1-2)^2 + 0 + (3-2)^2) / 2 = 1; sqrt(1 / 3)
++    try std.testing.expectApproxEqAbs(@as(f64, 0.5773502691896257), out.nll_se, 1e-12);
++    try std.testing.expectApproxEqAbs(@as(f64, 7.38905609893065), out.ppl, 1e-12);
++    try std.testing.expectApproxEqAbs(@as(f64, 2.0 / 3.0), out.argmax_match, 1e-12);
++    // one token: no spread, and its own perplexity
++    var one: Score = .{ .ids = &.{5} };
++    one.add(0.0, true);
++    const single = one.summary();
++    try std.testing.expectEqual(@as(f64, 0.0), single.nll_se);
++    try std.testing.expectEqual(@as(f64, 1.0), single.ppl);
++    try std.testing.expectEqual(@as(f64, 1.0), single.argmax_match);
++}
+diff --git a/zig/src/core/lanes/stream.zig b/zig/src/core/lanes/stream.zig
+index a38edbc..43186f6 100644
+--- a/zig/src/core/lanes/stream.zig
++++ b/zig/src/core/lanes/stream.zig
+@@ -6,6 +6,7 @@ const plan_lanes = @import("plan_lanes.zig");
+ const Allocator = std.mem.Allocator;
+ const Proposer = @import("proposer.zig").Proposer;
+ const Sampling = @import("sampling.zig").Sampling;
++const Score = @import("score.zig").Score;
+ const State = @import("depth.zig").State;
+ 
+ pub const Reason = enum {
+@@ -140,6 +141,8 @@ pub const Spec = struct {
+     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
+     reuse: Reuse = .{},
+     images: []const Image = &.{}, // in prompt order; the caller's until the stream is released
++    /// TF_DS_SCORE: the recorded continuation to score (empty: a stream that generates).
++    score: []const u32 = &.{},
+     /// tool_choice required: the answer must open a call (null: the model may answer in text).
+     call: ?struct {
+         opener: u32,
+@@ -179,6 +182,9 @@ pub const Stream = struct {
+     chunks: []const u32,
+     reuse: Reuse = .{},
+     images: []const Image = &.{},
++    /// TF_DS_SCORE: a teacher-forced stream's recorded continuation and its running figures (null: a stream that
++    /// generates). Its force list carries the continuation, so its windows are forced rows the round accepts whole.
++    score: ?Score = null,
+     /// Prefill interleave (TF_PREFILL_INTERLEAVE_MS): the host's decode rounds for the OTHER live streams, which a
+     /// backend may call between two of this stream's prompt chunks; null: the pass runs whole, as before.
+     between: ?Between = null,
+@@ -252,6 +258,12 @@ pub const Stream = struct {
+         if (spec.call) |c| {
+             s.gate = call_gate.Gate.afterPrompt(spec.prompt, c.opener, c.think_open, c.think_end, c.lex, c.lead, c.names, c.tail);
+         }
++        if (spec.score.len > 0) {
++            // the recorded continuation is the stream's force list: one token as the first, five a window (the plan
++            // takes the rest), the sixth popped at the round's keep, so a round feeds and scores six a pass
++            s.score = .{ .ids = spec.score };
++            try s.force.appendSlice(gpa, spec.score);
++        }
+         try s.context.appendSlice(gpa, spec.prompt);
+         return s;
+     }
+diff --git a/zig/src/core/lanes/windows.zig b/zig/src/core/lanes/windows.zig
+index 6e6464e..e92e154 100644
+--- a/zig/src/core/lanes/windows.zig
++++ b/zig/src/core/lanes/windows.zig
+@@ -44,7 +44,8 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?[]const u32) !Plan {
+         if (q.parents) |parents| e.gpa.free(parents);
+     };
+     if (s.force.items.len > 0) {
+-        const width: usize = if (s.drafts) @min(e.cfg.base_width, e.cfg.batch_rows) else 1;
++        // a score stream's forced rows fill the widest window the gates allow, whatever its drafts
++        const width: usize = if (s.drafts or s.score != null) @min(e.cfg.base_width, e.cfg.batch_rows) else 1;
+         const take = @min(width - 1, s.force.items.len);
+         const forced = try a.dupe(u32, s.force.items[0..take]);
+         s.force.replaceRangeAssumeCapacity(0, take, &.{});
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 0b0f367..c9b1f8e 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -939,6 +939,9 @@ pub const Lanes = struct {
+         // a state read back from disk: the drafter's rings were rebuilt by the replay before the first draft
+         if (self.spill != null and m.drafting() and done.restored) try m.spillCheckResumed(done.slot, done.len);
+         const logits = try m.promptLogitsHost();
++        // TF_DS_SCORE: the recorded continuation's first token is scored from the prompt's last row, which also gives
++        // the row's argmax for the match count; the pass's own draw is dropped (the stream's first token is recorded)
++        if (s.score) |*sc| sc.add(try lanes.score.nll(logits, sc.ids[0]), sampling.argmax(logits) == sc.ids[0]);
+         if (logits_sha) {
+             var dg: [32]u8 = undefined;
+             std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(logits), &dg, .{});
+@@ -1216,6 +1219,10 @@ pub const Lanes = struct {
+         // TF_DS_T27_DEVICE_DRAW on: the device's draw (R tokens back); else the logits for the host's draws
+         var rules: sampling.RoundRules = .{};
+         for (windows) |w| if (w.stream.sampling) |sm| rules.add(sm.temperature, sm.top_k);
++        // a score stream's rows need every logit on the host
++        for (windows) |w| {
++            if (w.stream.score != null) rules.logits = true;
++        }
+         const path = rules.path(m.ops.draw_rows != null);
+         const n_rows = rows.ids.len;
+         var draw_tab: [round.max_rows]ops.DrawRow = undefined;
+@@ -1248,6 +1255,16 @@ pub const Lanes = struct {
+             const row0 = self.built.wins[k].row;
+             for (0..w.rows()) |r| o.sampled[r] = if (path != .host_draw) tokens[row0 + r] else try draw(logits[(row0 + r) * V ..][0..V], w.positions[r], w.stream.sampling);
+             const l = self.streams.getPtr(w.stream).?;
++            if (w.stream.score) |*sc| {
++                // the recorded continuation's next tokens: row r's logits score the token after it, which is the
++                // recorded one while the window's rows are the stream's force list (a short last round stops here)
++                for (0..w.rows()) |r| {
++                    if (sc.next >= sc.ids.len) break;
++                    const recorded = sc.ids[sc.next];
++                    const row = logits[(row0 + r) * V ..][0..V];
++                    sc.add(try lanes.score.nll(row, recorded), sampling.argmax(row) == recorded);
++                }
++            }
+             @memcpy(o.drafts[0..w.held], l.held[0..w.held]);
+             @memcpy(o.drafts[w.held..][0..w.tokens.len], w.tokens);
+             l.nheld = 0;
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 34b6866..d0da660 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -101,6 +101,9 @@ const comm = @import("comm.zig");
+ const rdma = @import("rdma.zig");
+ 
+ pub const model_type = "deepseek_v41";
++/// TF_DS_SCORE: this engine scores a recorded continuation (the lanes backend copies a score stream's window rows'
++/// logits to the host and records their negative log-likelihoods: lanes.zig's verifyFn).
++pub const teacher_forced = true;
+ pub const formats: []const []const u8 = &.{"exl3-mul1"};
+ /// The Python lane's default window; the server's --context moves it up to the model's 1,048,576.
+ pub const default_context: i64 = 262144;
+diff --git a/zig/src/families/dsv41/sampling.zig b/zig/src/families/dsv41/sampling.zig
+index 8ff2c18..2aebcf5 100644
+--- a/zig/src/families/dsv41/sampling.zig
++++ b/zig/src/families/dsv41/sampling.zig
+@@ -164,6 +164,7 @@ pub const RoundPath = enum { greedy, device_draw, host_draw };
+ pub const RoundRules = struct {
+     sampled: bool = false,
+     drawable: bool = true,
++    logits: bool = false, // a score stream's window needs every row's logits on the host
+ 
+     pub fn add(r: *RoundRules, temperature: f64, top_k: usize) void {
+         if (temperature > 0) r.sampled = true;
+@@ -171,6 +172,7 @@ pub const RoundRules = struct {
+     }
+ 
+     pub fn path(r: RoundRules, device_draw: bool) RoundPath {
++        if (r.logits) return .host_draw;
+         if (!r.sampled) return .greedy;
+         return if (device_draw and r.drawable) .device_draw else .host_draw;
+     }
+@@ -306,4 +308,10 @@ test "the device draw takes a round only when every sampled row is one it reprod
+     const row = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+     try std.testing.expectError(error.NotPortedYet, sampleRow(&row, 0, .{ .seed = 1, .top_k = 0 }));
+     try std.testing.expect(!deviceDrawable(1.0, 0));
++    // a score stream's window takes the logits to the host whatever its rows' rules
++    var s: T = .{};
++    s.add(0.0, 0);
++    s.logits = true;
++    try std.testing.expectEqual(RoundPath.host_draw, s.path(true));
++    try std.testing.expectEqual(RoundPath.host_draw, s.path(false));
+ }
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index b7f2160..dd4b77d 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -482,7 +482,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+     };
+     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
+     const vision: ?api.Vision = if (@hasField(@TypeOf(loaded), "vision")) loaded.vision else null;
+-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(served), .startup = h.startup, .efforts = familyEfforts(F), .vision = vision, .call_gates = true, .prompt_cache = h.cache != null }, .{ .ctx = loaded.ctx, .text = F.explain });
++    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(served), .startup = h.startup, .efforts = familyEfforts(F), .vision = vision, .call_gates = true, .prompt_cache = h.cache != null, .score = @hasDecl(F, "teacher_forced") }, .{ .ctx = loaded.ctx, .text = F.explain });
+     opened = true;
+     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+ }
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index d6a6aa5..1a293c3 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -37,6 +37,8 @@ pub const Input = struct {
+     token_ids: bool = false,
+     /// The image parts' bytes in prompt order (their placeholders in the messages' text), for an engine with vision.
+     images: []const []const u8 = &.{},
++    /// TF_DS_SCORE: the recorded continuation to score instead of generating (empty: generate).
++    score: []const u32 = &.{},
+ };
+ 
+ /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls). ``call`` says whether the
+@@ -170,6 +172,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+     const f = input.fields;
+     const stops_opt = try fields_mod.stopOptions(cx, f);
+     var limit: i64 = @max(1, if (input.max_tokens) |m| (if (m != 0) m else srv.config.default_max_tokens) else srv.config.default_max_tokens);
++    // TF_DS_SCORE: the recorded continuation is the whole reply, so its length is the budget
++    if (input.score.len > 0) limit = @intCast(input.score.len);
+     const priority = f.get("priority");
+     const background = prompt_mod.isTitle(input.messages, input.tools.len > 0) or
+         (priority != null and priority.? == .string and std.mem.eql(u8, priority.?.string, "background"));
+@@ -218,6 +222,14 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
+     };
+     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
++    if (input.score.len > 0) {
++        // TF_DS_SCORE: every recorded token is fed (no EOS ends the scoring short), greedily, and nothing drafts:
++        // a score stream's windows are its force list alone
++        request.score = input.score;
++        request.sampling = null;
++        request.eos = &.{};
++        request.drafts = false;
++    }
+     if (thinking) {
+         const budget_field = f.get("thinking_budget");
+         const budget: i64 = if (budget_field != null and budget_field.?.truthy()) budget_field.?.int64() orelse 0 else srv.config.thinking_budget;
+@@ -692,6 +704,16 @@ const Generation = struct {
+             for (g.collected.items, got) |t, *slot| slot.* = try json.intValue(a, t);
+             try runtime.put(a, "token_ids", .{ .array = got });
+         }
++        if (m.stats.score) |sc| {
++            const block = try json.newObject(a);
++            try block.put(a, "tokens", try json.intValue(a, sc.tokens));
++            try block.put(a, "nll_sum", .{ .float = sc.nll_sum });
++            try block.put(a, "nll_mean", .{ .float = sc.nll_mean });
++            try block.put(a, "nll_se", .{ .float = sc.nll_se });
++            try block.put(a, "ppl", .{ .float = sc.ppl });
++            try block.put(a, "argmax_match", .{ .float = sc.argmax_match });
++            try runtime.put(a, "score", .{ .object = block });
++        }
+         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
+         if (m.stats.loop_period) |period| {
+             const loop_field = try json.newObject(a);
+diff --git a/zig/src/server/fields.zig b/zig/src/server/fields.zig
+index 7d7e8fd..833bb52 100644
+--- a/zig/src/server/fields.zig
++++ b/zig/src/server/fields.zig
+@@ -286,6 +286,62 @@ pub fn probabilityOptions(cx: *Cx, body: Value) errors.Refused!void {
+     if (enabled != null and enabled.?.bool) return cx.refuse("logprobs are not supported by this model or backend");
+ }
+ 
++/// TF_DS_SCORE: `1` or `on` turns it on; unset, `0`, `off` or anything else leave it off. Rank 0's switch: the score
++/// stream rides the forced-window machinery rank 1 already runs from the verify frame's ids.
++pub fn scoreSwitch(v: ?[]const u8) bool {
++    const s = v orelse return false;
++    return std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "on");
++}
++
++/// ``tensorfold_score``: a recorded continuation to score on /v1/completions, with the prompt as token ids. Refused
++/// unless TF_DS_SCORE is on, the engine scores, the reply is not streamed and temperature is 0 (n is 1 already:
++/// ``probability_options`` refuses any other).
++pub fn scoreIds(cx: *Cx, body: Value, completions: bool, on: bool, engine: bool, stream: bool, temperature: f64, vocab: u32) errors.Refused!?[]const u32 {
++    const field = body.field("tensorfold_score") orelse return null;
++    if (!completions) return cx.refuse("tensorfold_score is only on /v1/completions");
++    if (!on) return cx.refuse("tensorfold_score needs TF_DS_SCORE=1 on the server (rank 0)");
++    if (!engine) return cx.refuse("tensorfold_score is not supported by this engine");
++    const items = field.items() orelse return cx.refuse("tensorfold_score must be an array of token ids");
++    if (items.len == 0) return cx.refuse("tensorfold_score must have at least one token id");
++    const ids = try cx.a.alloc(u32, items.len);
++    for (items, ids) |v, *slot| {
++        const n = if (v == .int) v.int64() else null;
++        if (n == null or n.? < 0 or n.? >= vocab) return cx.fail(.request, "tensorfold_score token ids must be integers in the valid range 0 to {d}", .{@as(i64, vocab) - 1});
++        slot.* = @intCast(n.?);
++    }
++    if (stream) return cx.refuse("tensorfold_score needs stream false");
++    if (temperature != 0) return cx.refuse("tensorfold_score needs temperature 0");
++    return ids;
++}
++
++test "TF_DS_SCORE: 1 and on turn it on, everything else leaves it off" {
++    try std.testing.expect(scoreSwitch("1"));
++    try std.testing.expect(scoreSwitch("on"));
++    for ([_]?[]const u8{ null, "", "0", "off", "true", "ON" }) |v| try std.testing.expect(!scoreSwitch(v));
++}
++
++test "tensorfold_score: off refuses the field, on takes token ids under the scoring conditions" {
++    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var cx: Cx = .{ .a = a };
++    const body = (try json.parse(a, "{\"tensorfold_score\":[1,2,3]}")).ok;
++    // a body without the field asks for nothing, whatever the switches
++    try std.testing.expect((try scoreIds(&cx, (try json.parse(a, "{\"prompt\":[1]}")).ok, true, false, false, false, 0.7, 129280)) == null);
++    // the switch off, an engine that cannot score, /v1/chat/completions, a stream, a temperature
++    try std.testing.expectError(error.Refused, scoreIds(&cx, body, true, false, true, false, 0, 129280));
++    try std.testing.expect(std.mem.indexOf(u8, cx.message, "TF_DS_SCORE") != null);
++    try std.testing.expectError(error.Refused, scoreIds(&cx, body, true, true, false, false, 0, 129280));
++    try std.testing.expectError(error.Refused, scoreIds(&cx, body, false, true, true, false, 0, 129280));
++    try std.testing.expectError(error.Refused, scoreIds(&cx, body, true, true, true, true, 0, 129280));
++    try std.testing.expectError(error.Refused, scoreIds(&cx, body, true, true, true, false, 0.7, 129280));
++    // on: the ids, checked against the vocabulary
++    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, (try scoreIds(&cx, body, true, true, true, false, 0, 129280)).?);
++    for ([_][]const u8{ "{\"tensorfold_score\":[]}", "{\"tensorfold_score\":[1,129280]}", "{\"tensorfold_score\":\"x\"}" }) |text| {
++        try std.testing.expectError(error.Refused, scoreIds(&cx, (try json.parse(a, text)).ok, true, true, true, false, 0, 129280));
++    }
++}
++
+ const media = [_][]const u8{ "image", "images", "image_url", "input_image", "audio", "input_audio", "video", "video_url" };
+ 
+ /// ``validate_modalities``: text in, text out.
+diff --git a/zig/src/server/openai.zig b/zig/src/server/openai.zig
+index f9baed3..43bb836 100644
+--- a/zig/src/server/openai.zig
++++ b/zig/src/server/openai.zig
+@@ -153,6 +153,9 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
+     if (body.get("temperature")) |t| if (t.truthy()) {
+         input.temperature = if (t == .float) t.float else std.fmt.parseFloat(f64, t.int) catch 0;
+     };
++    const streaming = if (body.get("stream")) |s| s.truthy() else false;
++    // TF_DS_SCORE's recorded continuation: /v1/completions, non-streamed, greedy, with the switch on
++    if (try fields.scoreIds(cx, body, !is_chat, srv.score, srv.info.score, streaming, input.temperature, srv.text.vocabSize())) |score_ids| input.score = score_ids;
+     const sampling = try json.newObject(cx.a);
+     for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "seed", "priority", "draft", "thinking_budget", "ignore_eos", "stop" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
+     try grammar.refusal(cx, body);
+@@ -169,7 +172,7 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
+     const options = body.get("stream_options");
+     return .{
+         .input = input,
+-        .stream = if (body.get("stream")) |s| s.truthy() else false,
++        .stream = streaming,
+         .separate_usage = options != null and options.? == .object and json.truthyField(options.?, "include_usage"),
+         .policy = policy,
+         .named = replyModel(srv, body),
+diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
+index b1b0926..5c1f451 100644
+--- a/zig/src/server/server.zig
++++ b/zig/src/server/server.zig
+@@ -95,6 +95,8 @@ pub const Server = struct {
+     gate: prepare_gate.Gate = .{},
+     /// TF_DS_ENERGY (off by default): the GPU's cumulative counter around each request (energy.zig).
+     energy: api.energy.Reader = .{},
++    /// TF_DS_SCORE (off by default, rank 0's): a request may score a recorded continuation (fields.scoreIds).
++    score: bool = false,
+     arena: std.heap.ArenaAllocator,
+ 
+     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
+@@ -103,6 +105,7 @@ pub const Server = struct {
+         srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .gate = .init(config.prepare_floor_gib), .arena = .init(gpa) };
+         srv.energy = api.energy.Reader.open(api.energy.enabled(if (std.c.getenv("TF_DS_ENERGY")) |v| std.mem.span(v) else null));
+         srv.metrics.energy_on = srv.energy.on;
++        srv.score = fields.scoreSwitch(if (std.c.getenv("TF_DS_SCORE")) |v| std.mem.span(v) else null);
+         if (config.keep_warm_s > 0) if (engine.keepaliveTarget()) |target| {
+             srv.keepalive = api.keepalive.Keepalive.start(gpa, io, target, @as(i64, config.keep_warm_s) * std.time.ns_per_s) catch |e| blk: {
+                 log.line("idle keepalive off: {s}", .{@errorName(e)});
+-- 
+2.56.0
+

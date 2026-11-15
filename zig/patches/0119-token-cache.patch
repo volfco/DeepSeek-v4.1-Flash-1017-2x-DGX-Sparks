@@ -1,0 +1,687 @@
+From 9a9494794fbeecefb8e4e6320cd8c2174b16fd4c Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Sat, 14 Nov 2026 20:18:51 -0800
+Subject: [PATCH] server: TENSORFOLD_TOKEN_CACHE_MB (rank 0 only, off by
+ default) caches the tokenizer's plain pieces between the added-token split
+ and the encoder, and the done line carries render_s and encode_s
+
+Step 0 of docs/baseten-ultrafast-plan.md item 1, in the same patch: a request's
+template render and encode are timed and printed on its done line as render_s
+and encode_s, after every existing field (0070's timings, then 0117's energy
+suffix), so parsers of the old line still match. Unconditional, three monotonic
+clock reads per request (render start, render end, encode end); a completion
+prompt of raw text has render_s 0 and its own encode, a prompt of ids has both
+0. The figures are the request's own, not a rolling average.
+
+The cache: with TENSORFOLD_TOKEN_CACHE_MB=N the server allocates an LRU of N MiB
+and Tokenizer.encodeWith consults it for each plain piece the added-token split
+hands over, keyed on that piece's bytes with 0028's marks kept (a marked and an
+unmarked spelling never share an entry) and holding its ids. Entries cost
+len(text)+4*ids bytes; a piece larger than a quarter of the cap is not cached;
+when the cap would be passed the older half by last use goes. One mutex around
+the map, held for a lookup or an insert only, never during an encode (prepares
+run concurrently under prepare_gate). Unset, blank, 0 or anything that is not a
+count leaves the cache off: no allocation, no map, and HfText.encode calls
+Tokenizer.encode exactly as before. Suggested first value 32.
+
+The switch is rank 0's only: HfText (the tokenizer behind rank 0's HTTP server)
+reads it, and rank 1 runs no tokenizer, so the two ranks have nothing to
+compare at start.
+
+Independence: this tokenizer hands each plain piece to the normalizer,
+pre-tokenizer and BPE on its own (Walk), and splitAdded has already applied an
+added token's lstrip/rstrip to that token's own span, so a piece's ids depend on
+its neighbours only through `first` (Metaspace's "first" scheme, ByteLevel's
+add_prefix_space): the text's first piece is encoded plainly and never cached,
+and every other piece is cached on the bytes it is given. single_word is refused
+at load. No parallel encode of misses; images are expanded after encoding
+(prompt.zig spans), so they need no special case.
+
+Tests: zig build test passes and now runs the tokenizer module's own tests
+(build/cuda.zig adds it to hostTests; before, none of that module's tests ran in
+either test command): cache.zig's switch parse ("32"/" 32 " on; unset, "", 0,
+junk and negatives off), the cap/eviction bound and the quarter-cap skip, and
+tokenizer.zig's cached equals plain encode on a cold and a warm cache over
+prose, every added token, 0028's marks, pieces of exactly 255/256/257 bytes,
+empty pieces, adjacent specials and non-UTF-8 bytes; the first piece not cached
+and a piece after an added token cached; eviction holding the bound with results
+still plain; four threads on the same long text giving the plain ids; and the
+switch off consulting no cache. zig/tests/server/zig_test.sh passes too (186
+server tests, including HfText.encode's cache wiring and its off path). Not run
+on a pair and not benchmarked: this is the implementation only; step 0's numbers
+come from the new render_s/encode_s fields.
+---
+ zig/build/cuda.zig                   |   2 +-
+ zig/src/core/tokenizer/cache.zig     | 150 ++++++++++++++++++++++++
+ zig/src/core/tokenizer/tokenizer.zig | 169 ++++++++++++++++++++++++++-
+ zig/src/server/chat.zig              |  14 ++-
+ zig/src/server/hf_text.zig           |  48 +++++++-
+ zig/src/server/prompt.zig            |  43 +++++--
+ 6 files changed, 407 insertions(+), 19 deletions(-)
+ create mode 100644 zig/src/core/tokenizer/cache.zig
+
+diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
+index 57f7750..fa95008 100644
+--- a/zig/build/cuda.zig
++++ b/zig/build/cuda.zig
+@@ -221,7 +221,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, step: *std.Build.S
+     const cuda = runtime(b, host, .debug, &.{});
+     const mods = family(b, host, .debug, cuda, draft_ids);
+     const eng = engines(b, host, .debug, cuda, mods.lanes, mods.nemotron, mods.core);
+-    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, eng.api, eng.engines, eng.dsv41, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
++    for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.tokenizer, eng.api, eng.engines, eng.dsv41, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
+     cli.addImport("cuda", cuda);
+     cli.addImport("core", mods.core);
+diff --git a/zig/src/core/tokenizer/cache.zig b/zig/src/core/tokenizer/cache.zig
+new file mode 100644
+index 0000000..946262b
+--- /dev/null
++++ b/zig/src/core/tokenizer/cache.zig
+@@ -0,0 +1,150 @@
++//! TENSORFOLD_TOKEN_CACHE_MB (rank 0's server; off by default): an LRU of encoded plain pieces, keyed by the bytes the
++//! added-token split hands the encoder. `Tokenizer.encodeWith` consults it for pieces whose ids cannot depend on their
++//! neighbours; with the switch off there is no cache and the encoder is the one it was.
++const std = @import("std");
++const Allocator = std.mem.Allocator;
++
++/// TENSORFOLD_TOKEN_CACHE_MB: MiB of cap. Unset, blank, `0` or anything that is not a count leave the cache off.
++pub fn cacheMb(v: ?[]const u8) ?usize {
++    const t = std.mem.trim(u8, v orelse return null, " \t\r\n");
++    const n = std.fmt.parseInt(usize, t, 10) catch return null;
++    return if (n == 0) null else n;
++}
++
++/// An LRU from a plain piece's bytes (0028's marks kept, so a marked and an unmarked spelling never share an entry) to
++/// its ids. One mutex, held for a lookup or an insert only, never while a piece is encoded: prepares run concurrently
++/// (server/prepare_gate.zig).
++pub const PieceCache = struct {
++    io: std.Io,
++    gpa: Allocator,
++    limit: usize,
++    used: usize = 0,
++    hits: u64 = 0, // for the tests
++    mutex: std.Io.Mutex = .init,
++    map: std.StringHashMapUnmanaged(*Entry) = .empty,
++    lru: std.DoublyLinkedList = .{},
++
++    const Entry = struct {
++        node: std.DoublyLinkedList.Node = .{},
++        text: []u8,
++        ids: []u32,
++        cost: usize,
++    };
++
++    pub fn init(io: std.Io, gpa: Allocator, limit: usize) PieceCache {
++        return .{ .io = io, .gpa = gpa, .limit = limit };
++    }
++
++    pub fn deinit(c: *PieceCache) void {
++        while (c.lru.popFirst()) |n| freeEntry(c.gpa, @fieldParentPtr("node", n));
++        c.map.deinit(c.gpa);
++        c.* = undefined;
++    }
++
++    /// `text`'s ids, copied into `a`; null on a miss.
++    pub fn get(c: *PieceCache, a: Allocator, text: []const u8) Allocator.Error!?[]const u32 {
++        c.mutex.lockUncancelable(c.io);
++        defer c.mutex.unlock(c.io);
++        const e = c.map.get(text) orelse return null;
++        c.lru.remove(&e.node);
++        c.lru.append(&e.node);
++        c.hits += 1;
++        const ids = try a.dupe(u32, e.ids);
++        return ids;
++    }
++
++    /// `text`'s ids. A piece larger than a quarter of the cap is not cached; when the cap would be passed, the older
++    /// half by last use goes first. A failed allocation drops the entry, never the encode.
++    pub fn put(c: *PieceCache, text: []const u8, ids: []const u32) void {
++        const cost = text.len + 4 * ids.len;
++        if (cost > c.limit / 4) return;
++        c.mutex.lockUncancelable(c.io);
++        defer c.mutex.unlock(c.io);
++        if (c.map.get(text)) |e| { // another prepare stored it while this one encoded
++            c.lru.remove(&e.node);
++            c.lru.append(&e.node);
++            return;
++        }
++        while (c.used + cost > c.limit and c.used > c.limit / 2) {
++            const n = c.lru.popFirst() orelse break;
++            const e: *Entry = @fieldParentPtr("node", n);
++            _ = c.map.remove(e.text);
++            c.used -= e.cost;
++            freeEntry(c.gpa, e);
++        }
++        const e = c.gpa.create(Entry) catch return;
++        e.node = .{};
++        e.text = c.gpa.dupe(u8, text) catch {
++            c.gpa.destroy(e);
++            return;
++        };
++        e.ids = c.gpa.dupe(u32, ids) catch {
++            c.gpa.free(e.text);
++            c.gpa.destroy(e);
++            return;
++        };
++        e.cost = cost;
++        c.map.put(c.gpa, e.text, e) catch {
++            freeEntry(c.gpa, e);
++            return;
++        };
++        c.used += cost;
++        c.lru.append(&e.node);
++    }
++};
++
++fn freeEntry(gpa: Allocator, e: *PieceCache.Entry) void {
++    gpa.free(e.text);
++    gpa.free(e.ids);
++    gpa.destroy(e);
++}
++
++test "TENSORFOLD_TOKEN_CACHE_MB: unset, 0 or unparsable are off" {
++    try std.testing.expectEqual(@as(?usize, null), cacheMb(null));
++    try std.testing.expectEqual(@as(?usize, null), cacheMb(""));
++    try std.testing.expectEqual(@as(?usize, null), cacheMb(" \t\r\n"));
++    try std.testing.expectEqual(@as(?usize, null), cacheMb("0"));
++    try std.testing.expectEqual(@as(?usize, null), cacheMb("lots"));
++    try std.testing.expectEqual(@as(?usize, null), cacheMb("-4"));
++    try std.testing.expectEqual(@as(?usize, 32), cacheMb("32"));
++    try std.testing.expectEqual(@as(?usize, 32), cacheMb(" 32 \n"));
++}
++
++test "the cache keeps its cap, evicts the older half and returns what it stored" {
++    const gpa = std.testing.allocator;
++    var cache = PieceCache.init(std.testing.io, gpa, 64 << 10);
++    defer cache.deinit();
++    var text: [1024]u8 = undefined;
++    var ids: [1024]u32 = undefined;
++    var stored: usize = 0;
++    for (0..200) |i| { // 200 pieces of ~1 KiB: past 64 KiB, so the older half goes
++        const len = 256 + i % 768;
++        @memset(text[0..len], 'a' + @as(u8, @intCast(i % 26)));
++        for (ids[0..len], 0..) |*id, k| id.* = @intCast(i * 4096 + k);
++        cache.put(text[0..len], ids[0..len]);
++        try std.testing.expect(cache.used <= cache.limit);
++        stored += 1;
++    }
++    try std.testing.expect(stored == 200);
++    // the most recent piece is still there, and every entry's ids are the ones put under its text
++    @memset(text[0..200], 'z');
++    for (ids[0..200], 0..) |*id, k| id.* = @intCast(k + 7);
++    cache.put(text[0..200], ids[0..200]);
++    const got = (try cache.get(gpa, text[0..200])).?;
++    defer gpa.free(got);
++    try std.testing.expectEqualSlices(u32, ids[0..200], got);
++    try std.testing.expect(cache.hits == 1);
++}
++
++test "a piece larger than a quarter of the cap is not cached" {
++    const gpa = std.testing.allocator;
++    var cache = PieceCache.init(std.testing.io, gpa, 1 << 10);
++    defer cache.deinit();
++    var text: [256]u8 = undefined;
++    var ids: [256]u32 = undefined;
++    @memset(&text, 'x');
++    for (&ids, 0..) |*id, k| id.* = @intCast(k);
++    cache.put(&text, &ids); // 256 + 1024 bytes, over 1 KiB / 4
++    try std.testing.expectEqual(@as(usize, 0), cache.used);
++    try std.testing.expectEqual(@as(?[]const u32, null), try cache.get(gpa, &text));
++}
+diff --git a/zig/src/core/tokenizer/tokenizer.zig b/zig/src/core/tokenizer/tokenizer.zig
+index a1d3d8a..2f90b85 100644
+--- a/zig/src/core/tokenizer/tokenizer.zig
++++ b/zig/src/core/tokenizer/tokenizer.zig
+@@ -3,10 +3,13 @@ const std = @import("std");
+ const unicode = @import("unicode.zig");
+ const steps = @import("steps.zig");
+ const models = @import("model.zig");
++const piece_cache = @import("cache.zig");
+ const Allocator = std.mem.Allocator;
+ 
+ pub const Kind = models.Kind;
+ pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{UnsupportedAddedToken};
++pub const PieceCache = piece_cache.PieceCache;
++pub const cacheMb = piece_cache.cacheMb;
+ 
+ pub const AddedToken = struct {
+     id: u32,
+@@ -198,9 +201,9 @@ pub const Tokenizer = struct {
+         return t.encodeWith(a, text, .{});
+     }
+ 
+-    /// How encode works: where its scratch comes from, and whether pre-tokenization walks depth first (tests compare
+-    /// the two walks and count the scratch).
+-    pub const EncodeOptions = struct { scratch: Allocator = std.heap.page_allocator, depth_first: bool = true };
++    /// How encode works: where its scratch comes from, whether pre-tokenization walks depth first (tests compare the
++    /// two walks and count the scratch), and the piece cache to consult (null: none).
++    pub const EncodeOptions = struct { scratch: Allocator = std.heap.page_allocator, depth_first: bool = true, cache: ?*PieceCache = null };
+ 
+     pub fn encodeWith(t: *const Tokenizer, a: Allocator, text: []const u8, o: EncodeOptions) Error![]u32 {
+         var arena = std.heap.ArenaAllocator.init(o.scratch);
+@@ -217,7 +220,24 @@ pub const Tokenizer = struct {
+         }
+         var ids: std.ArrayList(u32) = .empty;
+         for (try t.splitAdded(&ctx, &t.raw, valid)) |seg| {
+-            if (seg.id) |id| try ids.append(ctx.a, id) else if (seg.end > seg.start) try t.encodeText(&ctx, &walk, valid[seg.start..seg.end], seg.start == 0, &ids);
++            if (seg.id) |id| {
++                try ids.append(ctx.a, id);
++                continue;
++            }
++            if (seg.end == seg.start) continue;
++            const piece = valid[seg.start..seg.end];
++            // A piece's ids depend on its neighbours only through `first` (Metaspace's "first" scheme and ByteLevel's
++            // add_prefix_space): the split applies lstrip/rstrip to the special's own span before handing the piece
++            // over, and pre-tokenization walks one piece at a time (Walk). So the text's first piece is the only
++            // context-dependent one; every other piece is cached on the bytes it is given, marks included.
++            const cacheable = o.cache != null and seg.start > 0;
++            if (cacheable) if (try o.cache.?.get(ctx.a, piece)) |hit| {
++                try ids.appendSlice(ctx.a, hit);
++                continue;
++            };
++            const before = ids.items.len;
++            try t.encodeText(&ctx, &walk, piece, seg.start == 0, &ids);
++            if (cacheable) o.cache.?.put(piece, ids.items[before..]);
+         }
+         return a.dupe(u32, ids.items);
+     }
+@@ -528,13 +548,17 @@ const Counting = struct {
+ };
+ 
+ /// A byte-level BPE tokenizer with DeepSeek-V3/V4's pre-tokenizer (digits, CJK runs, the word regex, ByteLevel), every
+-/// byte in the vocabulary and merges that join each of `words` (with and without its leading space) left to right.
++/// byte in the vocabulary, merges that join each of `words` (with and without its leading space) left to right, and
++/// added tokens: a special without strip flags, a special with them, and a plain added token.
+ fn deepseekLike(a: Allocator, words: []const []const u8) !Tokenizer {
+     var out: std.Io.Writer.Allocating = .init(a);
+     defer out.deinit();
+     const w = &out.writer;
+     try w.writeAll(
+-        \\{"added_tokens":[{"id":0,"content":"<｜User｜>","special":true,"lstrip":false,"rstrip":false,"normalized":false,"single_word":false}],
++        \\{"added_tokens":[
++        \\ {"id":0,"content":"<｜User｜>","special":true,"lstrip":false,"rstrip":false,"normalized":false,"single_word":false},
++        \\ {"id":1,"content":"<|assistant|>","special":true,"lstrip":true,"rstrip":true,"normalized":false,"single_word":false},
++        \\ {"id":2,"content":"<x>","special":false,"lstrip":false,"rstrip":false,"normalized":false,"single_word":false}],
+         \\ "normalizer":null,
+         \\ "pre_tokenizer":{"type":"Sequence","pretokenizers":[
+         \\  {"type":"Split","pattern":{"Regex":"\\p{N}{1,3}"},"behavior":"Isolated","invert":false},
+@@ -648,3 +672,136 @@ test "encode's ids are the breadth-first walk's, and it keeps no scratch in the
+     try std.testing.expect(deep.peak * 4 < wide.peak);
+     try std.testing.expect(deep.peak < 40 * text.len);
+ }
++
++/// The cache tests' texts: prose, every added token (adjacent and spaced), 0028's marks, pieces of exactly 255, 256 and
++/// 257 bytes (as a middle piece and as the text's first), empty pieces and bytes that are not UTF-8.
++fn cacheCorpus(a: Allocator) ![]const []const u8 {
++    var out: std.ArrayList([]const u8) = .empty;
++    try out.append(a, try longText(a, &test_words, 4096));
++    try out.append(a, try a.dupe(u8, "<｜User｜><|assistant|><x><｜User｜>"));
++    try out.append(a, try a.dupe(u8, "one <|assistant|>  two <x> three <｜User｜> four"));
++    try out.append(a, try a.dupe(u8, "a<" ++ Tokenizer.plain_mark ++ "x>a"));
++    try out.append(a, try a.dupe(u8, "ab" ++ Tokenizer.plain_mark ++ "cd <|assistant|>" ++ Tokenizer.plain_mark ++ " tail"));
++    for ([_]usize{ 255, 256, 257 }) |n| {
++        const piece = try a.alloc(u8, n);
++        @memset(piece, 'q');
++        defer a.free(piece);
++        try out.append(a, try std.mem.concat(a, u8, &.{ "<｜User｜>", piece, "<｜User｜>" }));
++        try out.append(a, try std.mem.concat(a, u8, &.{ piece, "<｜User｜>" }));
++    }
++    try out.append(a, try a.dupe(u8, ""));
++    try out.append(a, try a.dupe(u8, "a\xff\xfe broken \xc3 and 日本語"));
++    try out.append(a, try a.dupe(u8, " "));
++    return try out.toOwnedSlice(a);
++}
++
++test "cached encode equals plain encode on a cold and a warm cache" {
++    const gpa = std.testing.allocator;
++    var t = try deepseekLike(gpa, &test_words);
++    defer t.deinit();
++    var cache = PieceCache.init(std.testing.io, gpa, 1 << 20);
++    defer cache.deinit();
++    const corpus = try cacheCorpus(gpa);
++    defer {
++        for (corpus) |s| gpa.free(s);
++        gpa.free(corpus);
++    }
++    for (corpus) |s| {
++        const plain = try t.encode(gpa, s);
++        defer gpa.free(plain);
++        const cold = try t.encodeWith(gpa, s, .{ .cache = &cache });
++        defer gpa.free(cold);
++        try std.testing.expectEqualSlices(u32, plain, cold);
++        const warm = try t.encodeWith(gpa, s, .{ .cache = &cache });
++        defer gpa.free(warm);
++        try std.testing.expectEqualSlices(u32, plain, warm);
++    }
++    try std.testing.expect(cache.hits > 0); // the warm pass hit on the pieces the split handed over
++    try std.testing.expect(cache.used > 0);
++}
++
++test "a text's first piece is not cached; a piece after an added token is" {
++    const gpa = std.testing.allocator;
++    var t = try deepseekLike(gpa, &test_words);
++    defer t.deinit();
++    var cache = PieceCache.init(std.testing.io, gpa, 1 << 20);
++    defer cache.deinit();
++    const leading = try t.encodeWith(gpa, "the model reads a long prompt", .{ .cache = &cache });
++    defer gpa.free(leading);
++    try std.testing.expectEqual(@as(usize, 0), cache.used);
++    try std.testing.expectEqual(@as(u64, 0), cache.hits);
++    const after = try t.encodeWith(gpa, "<｜User｜> the model reads a long prompt", .{ .cache = &cache });
++    defer gpa.free(after);
++    try std.testing.expect(cache.used > 0);
++}
++
++test "eviction holds the bound and cached results stay the plain ones" {
++    const gpa = std.testing.allocator;
++    var t = try deepseekLike(gpa, &test_words);
++    defer t.deinit();
++    var cache = PieceCache.init(std.testing.io, gpa, 64 << 10);
++    defer cache.deinit();
++    const filler = "the model reads a long prompt of many tokens and keeps its state while another conversation resumes from memory ";
++    for (0..2) |round| {
++        for (0..60) |i| {
++            const text = try std.fmt.allocPrint(gpa, "<｜User｜>{d} {s}<｜User｜>tail {d} {s}", .{ i, filler, i, filler });
++            defer gpa.free(text);
++            const plain = try t.encode(gpa, text);
++            defer gpa.free(plain);
++            const cached = try t.encodeWith(gpa, text, .{ .cache = &cache });
++            defer gpa.free(cached);
++            try std.testing.expectEqualSlices(u32, plain, cached);
++            try std.testing.expect(cache.used <= cache.limit);
++            if (round == 1) try std.testing.expect(cache.hits > 0);
++        }
++    }
++}
++
++const EncodeJob = struct {
++    t: *const Tokenizer,
++    cache: *PieceCache,
++    text: []const u8,
++    out: ?[]u32 = null,
++
++    fn run(j: *EncodeJob) void {
++        j.out = j.t.encodeWith(std.testing.allocator, j.text, .{ .cache = j.cache }) catch null;
++    }
++};
++
++test "two threads encoding the same texts get the plain result" {
++    const gpa = std.testing.allocator;
++    var t = try deepseekLike(gpa, &test_words);
++    defer t.deinit();
++    var cache = PieceCache.init(std.testing.io, gpa, 1 << 20);
++    defer cache.deinit();
++    const text = try longText(gpa, &test_words, 16 << 10);
++    defer gpa.free(text);
++    const plain = try t.encode(gpa, text);
++    defer gpa.free(plain);
++    var jobs: [4]EncodeJob = undefined;
++    var threads: [4]std.Thread = undefined;
++    for (&jobs) |*j| j.* = .{ .t = &t, .cache = &cache, .text = text };
++    for (&jobs, &threads) |*j, *th| th.* = try std.Thread.spawn(.{}, EncodeJob.run, .{j});
++    for (&threads) |*th| th.join();
++    for (&jobs) |*j| {
++        try std.testing.expectEqualSlices(u32, plain, j.out.?);
++        gpa.free(j.out.?);
++    }
++}
++
++test "the switch off is the plain encoder and consults no cache" {
++    const gpa = std.testing.allocator;
++    var t = try deepseekLike(gpa, &test_words);
++    defer t.deinit();
++    var cache = PieceCache.init(std.testing.io, gpa, 1 << 20);
++    defer cache.deinit();
++    const text = "<｜User｜> the model reads a long prompt <x> and keeps its state";
++    const plain = try t.encode(gpa, text);
++    defer gpa.free(plain);
++    const off = try t.encodeWith(gpa, text, .{}); // no cache: the path HfText takes with the switch off
++    defer gpa.free(off);
++    try std.testing.expectEqualSlices(u32, plain, off);
++    try std.testing.expectEqual(@as(usize, 0), cache.used);
++    try std.testing.expectEqual(@as(u64, 0), cache.hits);
++    try std.testing.expectEqual(@as(?usize, null), cacheMb(null));
++}
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index 644c181..d6a6aa5 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -156,6 +156,9 @@ pub const Prepared = struct {
+     preparing: bool,
+     /// TF_DS_ENERGY: the GPU's counter at the request's arrival (empty with the switch off).
+     energy: api.energy.Window = .{},
++    /// The request's own template render and encode times (zero where it had none).
++    render_s: f64 = 0,
++    encode_s: f64 = 0,
+ };
+ 
+ /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
+@@ -225,7 +228,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+             request.think_end = srv.think_close_end;
+         }
+     }
+-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing, .energy = energy };
++    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing, .energy = energy, .render_s = rendered.render_s, .encode_s = rendered.encode_s };
+ }
+ 
+ /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
+@@ -264,7 +267,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
+     };
+     release(srv, preparing); // a background request waits only while a foreground one prepares
+     preparing = false;
+-    var gen: Generation = .{ .last_out_ns = submitted, .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = input.token_ids, .energy = prepared.energy };
++    var gen: Generation = .{ .last_out_ns = submitted, .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = input.token_ids, .energy = prepared.energy, .render_s = prepared.render_s, .encode_s = prepared.encode_s };
+     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, gen.energy_mj);
+     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
+     const result: Failure!Reply = blk: {
+@@ -374,6 +377,9 @@ const Generation = struct {
+     /// TF_DS_ENERGY: the GPU's counter at the request's arrival, and its own window's delta at the finish.
+     energy: api.energy.Window = .{},
+     energy_mj: ?u64 = null,
++    /// The request's own template render and encode times, for its done line.
++    render_s: f64 = 0,
++    encode_s: f64 = 0,
+     consumed: usize = 0,
+     chunk_index: usize = 0,
+ 
+@@ -731,6 +737,8 @@ const Generation = struct {
+         var b_tok_s: [24]u8 = undefined;
+         var b_accept: [24]u8 = undefined;
+         var b_tpr: [24]u8 = undefined;
++        var b_render: [24]u8 = undefined;
++        var b_encode: [24]u8 = undefined;
+         const accept = if (avg.accept_pct) |pct| std.fmt.bufPrint(&b_accept, "{d:.1}%", .{pct}) catch "-" else "-";
+         // TF_DS_ENERGY: the request's own window and the ordinals rank 1's per-frame line joins by. Empty with the
+         // switch off, so the line is byte for byte the base one.
+@@ -741,7 +749,7 @@ const Generation = struct {
+             g.energy_mj = readings.gross_mj;
+             energy_fields = api.energy.suffix(&energy_buf, readings, s.round_from, s.round_to);
+         }
+-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} prefill_s={s} ttft_s={s} decode_s={s} s_per_token={s} tok_per_s={s} accept={s} tokens_per_round={s}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, fmtNum(&b_prefill, "{d:.1}", s.prefill_seconds), fmtNum(&b_ttft, "{d:.1}", avg.ttft_s), fmtNum(&b_decode, "{d:.1}", avg.decode_s), fmtNum(&b_tpot, "{d:.4}", avg.s_per_token), fmtNum(&b_tok_s, "{d:.1}", avg.tok_per_s), accept, fmtNum(&b_tpr, "{d:.1}", avg.tokens_per_round), energy_fields });
++        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} prefill_s={s} ttft_s={s} decode_s={s} s_per_token={s} tok_per_s={s} accept={s} tokens_per_round={s}{s} render_s={s} encode_s={s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, fmtNum(&b_prefill, "{d:.1}", s.prefill_seconds), fmtNum(&b_ttft, "{d:.1}", avg.ttft_s), fmtNum(&b_decode, "{d:.1}", avg.decode_s), fmtNum(&b_tpot, "{d:.4}", avg.s_per_token), fmtNum(&b_tok_s, "{d:.1}", avg.tok_per_s), accept, fmtNum(&b_tpr, "{d:.1}", avg.tokens_per_round), energy_fields, fmtNum(&b_render, "{d:.3}", g.render_s), fmtNum(&b_encode, "{d:.3}", g.encode_s) });
+         return reply;
+     }
+ };
+diff --git a/zig/src/server/hf_text.zig b/zig/src/server/hf_text.zig
+index 63b6938..ac74ff3 100644
+--- a/zig/src/server/hf_text.zig
++++ b/zig/src/server/hf_text.zig
+@@ -19,6 +19,9 @@ pub const HfText = struct {
+     eos: []const u32 = &.{},
+     prefix: []const u32 = &.{}, // the post-processor's tokens before a text (add_special_tokens)
+     suffix: []const u32 = &.{},
++    /// TENSORFOLD_TOKEN_CACHE_MB: the encode's piece cache (null: off, the encoder as before). This struct is rank 0's
++    /// server only, so the switch is read here and nowhere else.
++    cache: ?*tokenizer.PieceCache = null,
+ 
+     /// Loads ``dir``'s tokenizer.json, chat template, special tokens and end-of-sequence ids; a failure's reason in `problem` (from `pa`).
+     pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, pa: Allocator, problem: *[]const u8) !*HfText {
+@@ -45,10 +48,19 @@ pub const HfText = struct {
+             };
+         }
+         if (t.tool_source.len > 0) t.tool_compiled = template.compile(gpa, t.tool_source, null) catch null;
++        if (tokenizer.cacheMb(std.c.getenv("TENSORFOLD_TOKEN_CACHE_MB"))) |mb| {
++            const c = try gpa.create(tokenizer.PieceCache);
++            c.* = tokenizer.PieceCache.init(io, gpa, mb <<| 20);
++            t.cache = c;
++        }
+         return t;
+     }
+ 
+     pub fn deinit(t: *HfText) void {
++        if (t.cache) |c| {
++            c.deinit();
++            t.gpa.destroy(c);
++        }
+         if (t.compiled) |*c| c.deinit();
+         if (t.tool_compiled) |*c| c.deinit();
+         t.tok.deinit();
+@@ -221,7 +233,8 @@ pub const HfText = struct {
+ 
+     fn encodeFn(ctx: *anyopaque, a: Allocator, s: []const u8, add_special: bool) model_text.Error![]u32 {
+         const t = self(ctx);
+-        const ids = t.tok.encode(a, s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
++        const encoded = if (t.cache) |c| t.tok.encodeWith(a, s, .{ .cache = c }) else t.tok.encode(a, s);
++        const ids = encoded catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
+         if (!add_special or (t.prefix.len == 0 and t.suffix.len == 0)) return ids;
+         return std.mem.concat(a, u32, &.{ t.prefix, ids, t.suffix });
+     }
+@@ -318,3 +331,36 @@ pub fn toStd(a: Allocator, v: Value) Allocator.Error!std.json.Value {
+         },
+     };
+ }
++
++test "TENSORFOLD_TOKEN_CACHE_MB: off is the plain encoder; with a cache the encode is the same ids" {
++    const gpa = std.testing.allocator;
++    const tokenizer_json =
++        \\{"added_tokens":[{"id":4,"content":"<x>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],
++        \\ "normalizer":{"type":"NFC"},
++        \\ "pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":" ?\\S+|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false}]},
++        \\ "decoder":{"type":"ByteLevel"},
++        \\ "model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,"byte_fallback":false,"ignore_merges":false,
++        \\  "vocab":{"a":0,"b":1,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"c":6},"merges":[["Ġ","a"],"a b","Ġa b"]}}
++    ;
++    var t: HfText = .{ .gpa = gpa, .arena = .init(gpa), .tok = try tokenizer.parse(gpa, tokenizer_json) };
++    defer {
++        t.tok.deinit();
++        t.arena.deinit();
++    }
++    const text = t.text();
++    const plain = try text.encode(gpa, "ab ab<x>c ab", false);
++    defer gpa.free(plain);
++    const off = try text.encode(gpa, "ab ab<x>c ab", false);
++    defer gpa.free(off);
++    try std.testing.expectEqualSlices(u32, plain, off);
++    var cache = tokenizer.PieceCache.init(std.testing.io, gpa, 1 << 20);
++    defer cache.deinit();
++    t.cache = &cache; // HfText.load's switch on; the stack cache stands in for the one it allocates
++    const on = try text.encode(gpa, "ab ab<x>c ab", false);
++    defer gpa.free(on);
++    try std.testing.expectEqualSlices(u32, plain, on);
++    const warm = try text.encode(gpa, "ab ab<x>c ab", false);
++    defer gpa.free(warm);
++    try std.testing.expectEqualSlices(u32, plain, warm);
++    try std.testing.expect(cache.hits > 0);
++}
+diff --git a/zig/src/server/prompt.zig b/zig/src/server/prompt.zig
+index 7e1a8a2..87535ae 100644
+--- a/zig/src/server/prompt.zig
++++ b/zig/src/server/prompt.zig
+@@ -4,6 +4,7 @@ const json = @import("json.zig");
+ const errors = @import("errors.zig");
+ const messages_mod = @import("messages.zig");
+ const model_text = @import("model_text.zig");
++const clock = @import("clock.zig");
+ const chat = @import("chat.zig");
+ const Server = @import("server.zig").Server;
+ const api = @import("engine_api");
+@@ -13,12 +14,21 @@ const Cx = errors.Cx;
+ /// With images, `cache_key` is what the prompt cache matches: the ids with each image span spelled by its digest.
+ /// `media`: with it, each image's span and full payload digest (the durable tier's identity of it; the key's ids derive
+ /// from the digest, prompt_cache.pictureId).
+-pub const Rendered = struct { ids: []const u32, history_len: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{}, media: []const api.prompt_cache.Media = &.{} };
++pub const Rendered = struct { ids: []const u32, history_len: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{}, media: []const api.prompt_cache.Media = &.{}, render_s: f64 = 0, encode_s: f64 = 0 };
++
++/// The request's own tokenization figures for its done line: the template render and the encode, in seconds (zero where
++/// the request had no template or no encode: a completion prompt of ids).
++pub const Timing = struct { render_s: f64 = 0, encode_s: f64 = 0 };
+ 
+ pub const isTitle = messages_mod.isTitleRequest;
+ 
+ /// ``render_prompt_ids``: messages normalized for this template, rendered, and a dangling ``<think>`` closed.
+ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool) errors.Refused![]const u32 {
++    return renderIdsTimed(srv, cx, messages, tools, thinking, effort, generation, null);
++}
++
++/// ``renderIds``, with the template render's and the encode's own times in ``timing`` when it is given.
++fn renderIdsTimed(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, timing: ?*Timing) errors.Refused![]const u32 {
+     var normalized = try messages_mod.toolArguments(cx, try messages_mod.normalize(cx, messages, srv.late_system, srv.needs_user_after_tool));
+     if (srv.config.drop_reasoning_history) normalized = try messages_mod.dropReasoning(cx, normalized);
+     var problem: []const u8 = "";
+@@ -29,10 +39,20 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
+         .reasoning_effort = if (thinking) effort else null,
+         .reasoning_effort_value = if (thinking) srv.effortValue(effort) else null,
+     };
+-    var ids = srv.text.renderIds(cx.a, normalized, options, &problem) catch |e| switch (e) {
++    const started = clock.nowNs(srv.io);
++    const text = srv.text.render(cx.a, normalized, options, &problem) catch |e| switch (e) {
++        error.OutOfMemory => return error.OutOfMemory,
++        error.Template => return cx.fail(.server, "{s}", .{problem}),
++    };
++    const rendered = clock.nowNs(srv.io);
++    var ids = srv.text.encode(cx.a, text, false) catch |e| switch (e) {
+         error.OutOfMemory => return error.OutOfMemory,
+         error.Template => return cx.fail(.server, "{s}", .{problem}),
+     };
++    if (timing) |tm| {
++        tm.render_s = clock.seconds(rendered - started);
++        tm.encode_s = clock.seconds(clock.nowNs(srv.io) - rendered);
++    }
+     if (!thinking and generation and ids.len > 0) {
+         const last = try srv.text.decode(cx.a, ids[ids.len - 1 ..]);
+         if (std.mem.eql(u8, @import("reply_text.zig").pyStrip(last), "<think>")) {
+@@ -49,19 +69,26 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
+ /// A request's prompt: raw text or ids for a completion, else the chat template's, with its history length.
+ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort: ?[]const u8) errors.Refused!Rendered {
+     if (input.prompt) |p| switch (p) {
+-        .text => |t| return .{ .ids = srv.text.encode(cx.a, t, true) catch |e| switch (e) {
+-            error.OutOfMemory => return error.OutOfMemory,
+-            error.Template => return cx.fail(.server, "the tokenizer cannot encode this prompt", .{}),
+-        } },
++        .text => |t| {
++            const started = clock.nowNs(srv.io);
++            const ids = srv.text.encode(cx.a, t, true) catch |e| switch (e) {
++                error.OutOfMemory => return error.OutOfMemory,
++                error.Template => return cx.fail(.server, "the tokenizer cannot encode this prompt", .{}),
++            };
++            return .{ .ids = ids, .encode_s = clock.seconds(clock.nowNs(srv.io) - started) };
++        },
+         .ids => |ids| return .{ .ids = ids },
+     };
+-    const prompt = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, true);
++    var timing: Timing = .{};
++    const prompt = try renderIdsTimed(srv, cx, input.messages, input.tools, thinking, effort, true, &timing);
+     const history = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, false);
+     var history_len: usize = 0;
+     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
+     if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix
+     if (input.images.len > 0) {
+         var r = try spans(srv, cx, prompt, history_len, input.images);
++        r.render_s = timing.render_s;
++        r.encode_s = timing.encode_s;
+         // TF_DS_IMAGE_CACHE=0: pictures keep nothing and resume nothing (no key: LaneHost.cacheable refuses the request)
+         if (!api.prompt_cache.imageCacheOn(if (std.c.getenv("TF_DS_IMAGE_CACHE")) |v| std.mem.span(v) else null)) {
+             r.cache_key = &.{};
+@@ -70,7 +97,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
+         }
+         return r;
+     }
+-    return .{ .ids = prompt, .history_len = history_len };
++    return .{ .ids = prompt, .history_len = history_len, .render_s = timing.render_s, .encode_s = timing.encode_s };
+ }
+ 
+ /// Each image placeholder of the rendered prompt as its image's span (the vision family's prepare: the span's length and
+-- 
+2.56.0
+

@@ -1,0 +1,852 @@
+From a3c2c225b449319f8fe053aa9ba2adbdf49645df Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Sat, 14 Nov 2026 21:58:34 -0800
+Subject: [PATCH] lanes: TF_DS_SPEC_SAMPLE (off by default) gives a sampled
+ stream speculative sampling - the accept rule over the target's served p and
+ the drafter's proposal q, with q's normaliser Zq read from the noise kernel
+
+A sampled stream's drafted window is drawn row by row with the stream's key, so its drafts are only ever held for
+their confidence: the round keeps a draft only when the target's own sample at its parent row happens to equal it.
+Speculative sampling makes the drafter pay for itself: the draft x is accepted when a tagged uniform falls under
+min(1, p(x)/q(x)) over the target's served distribution p and the drafter's proposal q, and on the first rejection the
+row takes a draw from the residual max(p - q, 0) and the path stops there - so a sampled stream's tokens are p's
+whatever the drafts did. The seam is verifyFn's per-row loop: rewriting `o.sampled[r]` is enough, because the core's
+acceptPath keeps the longest prefix of rows whose tokens match the target's picks. No core, engine, window or wire
+change beyond the pass frame's keys.
+
+q is the drafter's softmax(logit / T) over the full vocabulary at the stream's temperature: the draft is the argmax of
+logit + T * gumbel, exactly a draw from q, which is what TF_DS_T26_KEYED_DRAFT's kernel already computes. The accept
+ratio needs q's normaliser, so `tf_ds_keyed_noise_kernel` now also writes each row's sum of exp(logit / T) - read
+while the row is still clean - into a double buffer (block reduction, one atomicAdd a block, zeroed in the pass, so a
+captured graph replays it); the Markov loop's per-step gather also gathers those sums from the peer and the pass reads
+them once, so Zq is both ranks' columns. A drafted row's q(y) for the target's candidate set comes from a new
+`tf_ds_gather_cols_kernel` against the step's logits row (each rank its own columns, -1 elsewhere, the two ranks'
+small results exchanged by the same gather), with the keyed Gumbel the kernel added removed on the host - so only
+top_k + MARGIN + 1 ids a drafted row cross the link, and only while the switch is on. p is the served distribution
+renormalised over what top_p and min_p keep (sampling.zig's candidate and mask arithmetic, now shared with sampleRow,
+whose bits are unchanged), and a sampled round with the switch on reads its logits on the host; its greedy streams'
+argmax is the same token.
+
+The drafter's, the acceptance test's and the residual draw's keys are three tags mixed into the stream's seed
+(sampling.draft_tag, accept_tag, residual_tag), so all three are independent of the sampler's own key and the reply
+stays a function of the seed, the position and the token id. TF_DS_SPEC_SAMPLE parses as the series' switches do
+(`1` or `on`; unset, `0`, `off` or anything else off) and is refused at start with TF_DS_T26_KEYED_DRAFT (the noise
+kernel is shared, the two paths' seeds are not); the flag is in the fingerprint's features (`spec_sample=1;`, named
+only when on) so a mismatched pair refuses to run. Off: no new allocation, no new frame bytes, every reply byte for
+byte the base one.
+
+LOSSY, twice. A sampled stream's drafted reply no longer equals its undrafted reply for the same seed: it is the same
+distribution (p, per row, and the same for the block), not the same tokens - the drafts it accepts are the drafter's,
+and the residual draws its own keys. And a sampled reply is no longer reproducible from its seed alone: the drafts'
+depth follows the round loop's allocation, so a load change changes which tokens a seed emits (the distribution does
+not). Greedy streams are untouched: no drafts, no speculation, the same argmax.
+
+Tests: the accept rule and the residual on toy p and q (q(x) = 0 accepts, p(x) = 0 rejects and takes the residual,
+p == q accepts, a draft off p's support takes the residual from p, disjoint supports), the emitted token's histogram
+against p over 200K seeds (chi-square, df 3, under the 1% critical value) for one row and for a three-draft block with
+the second and third tokens conditioned on the first, the three keys' independence from the sampler's and from each
+other, the switch's parse and the T26 refusal, and the features string with spec_sample on. `zig build test` passes.
+Not run on a pair: tools/samp_test.py (one prompt, max_tokens 1 then 3, 5000 seeds, DRAFTS=0 against the switch on,
+chi-square of the first and the conditioned second and third tokens) is the first live gate.
+
+    The loop covers the drafter's held drafts only (`1 + w.held`): a window that also carries host tokens (a forced or
+    copied plan) keeps those rows on the target's own draws, the pre-existing rule for them, and never reads a step's
+    logits row past the pass's steps.
+---
+ zig/kernels/cuda/dsv41_ops.cu            |  28 ++-
+ zig/src/families/dsv41/draft.zig         |  45 ++++-
+ zig/src/families/dsv41/lanes.zig         |  90 ++++++++-
+ zig/src/families/dsv41/native.zig        |   4 +-
+ zig/src/families/dsv41/ops.zig           |  60 +++++-
+ zig/src/families/dsv41/prompt.zig        |   5 +
+ zig/src/families/dsv41/rank_identity.zig |   8 +-
+ zig/src/families/dsv41/sampling.zig      | 235 +++++++++++++++++++++--
+ 8 files changed, 445 insertions(+), 30 deletions(-)
+
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index be76fe9..5e86af1 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -679,20 +679,46 @@ __device__ __forceinline__ uint64_t tf_ds_mix64(uint64_t x) {
+ }
+ 
+ // grid (ceil(width / blockDim), streams); the row table is device memory so a captured graph reads each pass's seeds.
++// TF_DS_SPEC_SAMPLE: `zq` (when non-null) takes each row's sum of exp(logit / T) over the full vocabulary, the drafter's
++// proposal normaliser Zq, read before the noise is added: block-level reduction, one atomicAdd per block.
+ extern "C" __global__ void tf_ds_keyed_noise_kernel(float* logits, uint64_t l_row, uint32_t width, uint64_t col0,
+-                                                    const TfDsKeyedRow* rows, uint32_t step) {
++                                                    const TfDsKeyedRow* rows, uint32_t step, double* zq,
++                                                    uint32_t zq_stride) {
+     const TfDsKeyedRow k = rows[blockIdx.y];
+     if (!(k.temp > 0.0)) return;
+     const double t = fmax(k.temp, 1e-6);
+     const uint64_t pos = uint64_t(k.pos) + step;
+     float* row = logits + uint64_t(blockIdx.y) * l_row;
++    double sum = 0.0;
+     for (uint32_t v = blockIdx.x * blockDim.x + threadIdx.x; v < width; v += gridDim.x * blockDim.x) {
++        const double l = double(row[v]);
++        if (zq != nullptr) sum += exp(l / t);
+         uint64_t x = tf_ds_mix64(k.seed + 0x9E3779B97F4A7C15ull);
+         x = tf_ds_mix64(x ^ (pos * 0xD1B54A32D192ED03ull));
+         x = tf_ds_mix64(x ^ (col0 + v));
+         const double u = double(x >> 11) * 0x1p-53 + 0x1p-54;
+         row[v] += float(t * -log(-log(u)));
+     }
++    if (zq == nullptr) return;
++    __shared__ double acc[256];
++    acc[threadIdx.x] = sum;
++    __syncthreads();
++    for (int off = 128; off > 0; off >>= 1) {
++        if (threadIdx.x < off) acc[threadIdx.x] += acc[threadIdx.x + off];
++        __syncthreads();
++    }
++    if (threadIdx.x == 0) atomicAdd(&zq[uint64_t(step) * zq_stride + blockIdx.y], acc[0]);
++}
++
++// TF_DS_SPEC_SAMPLE: out[i] = the logits row's column ids[i] (a rank-local column of the drafter's own vocabulary
++// part; -1: -inf, this rank does not score it). One thread an id.
++extern "C" __global__ void tf_ds_gather_cols_kernel(const float* logits, unsigned long long ld, const long long* ids,
++                                                    long long n, float* out) {
++    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= n) return;
++    (void)ld;
++    const long long c = ids[i];
++    out[i] = c < 0 ? -INFINITY : logits[c];
+ }
+ 
+ // TF_DS_T27_DEVICE_DRAW: a sampled row's token on the device, sampling.zig's sampleRow. One block (1024 threads) a row
+diff --git a/zig/src/families/dsv41/draft.zig b/zig/src/families/dsv41/draft.zig
+index 32d427d..8269ddf 100644
+--- a/zig/src/families/dsv41/draft.zig
++++ b/zig/src/families/dsv41/draft.zig
+@@ -25,6 +25,7 @@ const exl3_experts = @import("exl3_experts.zig");
+ const markov_tokens = @import("markov_tokens.zig");
+ const draft2d = @import("draft2d.zig");
+ const lora = @import("lora.zig");
++const sampling = @import("sampling.zig");
+ 
+ const ops_mod = @import("ops.zig");
+ 
+@@ -116,18 +117,27 @@ const NoiseTap = struct {
+         const x: *NoiseTap = @ptrCast(@alignCast(ctx));
+         const mk = x.dr.mk;
+         const lw = mk.rowCols();
+-        try x.e.ops.keyedNoise(x.e.s, x.dr.local + 4 * step * lw, x.dr.n * lw, lw, mk.col0(), x.dr.nz, step, x.n);
++        try x.e.ops.keyedNoise(x.e.s, x.dr.local + 4 * step * lw, x.dr.n * lw, lw, mk.col0(), x.dr.nz, step, x.n, x.dr.zq, max_streams);
+     }
+ };
+ 
+-/// The per-step gather of the Markov loop's bests: [world, rows, 4] fp32 into dst.
++/// The per-step gather of the Markov loop's bests: [world, rows, 4] fp32 into dst, and with TF_DS_SPEC_SAMPLE this
++/// rank's proposal normalisers (Zq) for the step gathered into the peer's slots.
+ const MarkovGather = struct {
+     e: *const Engine,
++    dr: *const Drafter,
+     dst: u64,
++    n: usize,
++    step: usize = 0,
+ 
+     fn run(ctx: *anyopaque, send: u64, rows: usize) anyerror!u64 {
+         const g: *MarkovGather = @ptrCast(@alignCast(ctx));
+         try g.e.gatherF32(send, g.dst, rows * 4);
++        if (g.dr.zq != 0) {
++            const at = 8 * g.step * max_streams;
++            try g.e.gatherF64(g.dr.zq + at, g.dr.zqp + 8 * g.step * g.e.world * max_streams, g.n);
++            g.step += 1;
++        }
+         return g.dst;
+     }
+ };
+@@ -233,6 +243,16 @@ pub const Drafter = struct {
+     mg: u64, // fp32 [world, max_streams, 4]: a step's gathered bests
+     out: u64, // int64 [max_streams, n + 1]: each stream's last token, then its drafts
+     nz: u64 = 0, // ops.KeyedRow [max_streams] (TF_DS_T26_KEYED_DRAFT; 0: off): each stream's seed, temperature and first draft position
++    // TF_DS_SPEC_SAMPLE (0: off): the drafter's proposal normalisers Zq a step (this rank's sum over its columns of
++    // exp(logit / T), the peer's gathered) and the small id gather a verify round makes against a step's logits row
++    zq: u64 = 0, // double [max_block * max_streams], step-major: this rank's sums
++    zqp: u64 = 0, // double [max_block * world * max_streams]: the ranks' sums, gathered
++    gids: u64 = 0, // i64 [max_candidates + 1]: the ids a verify gathers
++    gout: u64 = 0, // f32 [max_candidates + 1]
++    gpeer: u64 = 0, // f32 [world * (max_candidates + 4)]
++    spec_seeds: [max_streams]u64 = @splat(0), // their drafter seeds (the sampler's, tagged)
++    spec_pos: [max_streams]i64 = @splat(0), // their step-0 draft position
++    spec_zq: [max_streams][max_block]f64 = undefined, // the last pass's Zq a stream and step, every rank summed
+     // the confidence head
+     embs: u64, // bf16 [max_rows, rank]: the Markov embedding rows of the tokens each step read
+     xcf: u64, // fp32 [max_rows, D]
+@@ -362,6 +382,13 @@ pub const Drafter = struct {
+         dr.mg = try a.take(dr.mk.world * max_streams * 4 * 4);
+         dr.out = try a.take(max_streams * (max_block + 1) * 8);
+         dr.nz = if (e.ops.keyed_noise != null) try a.take(max_streams * @sizeOf(ops_mod.KeyedRow)) else 0;
++        if (e.ops.spec) {
++            dr.zq = try a.take(max_block * max_streams * 8);
++            dr.zqp = try a.take(max_block * e.world * max_streams * 8);
++            dr.gids = try a.take((sampling.max_candidates + 1) * 8);
++            dr.gout = try a.take((sampling.max_candidates + 1) * 4);
++            dr.gpeer = try a.take(e.world * (sampling.max_candidates + 4) * 4);
++        }
+         // the confidence head
+         const rank = c.markov_rank;
+         dr.embs = try a.take(R * rank * 2);
+@@ -517,6 +544,17 @@ pub const Drafter = struct {
+             dr.drafts[i][j] = ho[i * ts + 1 + j];
+             dr.confs[i][j] = hc[i * steps + j];
+         };
++        // TF_DS_SPEC_SAMPLE: the pass's Zq a stream and step, every rank's sum (the gathered table holds each rank's
++        // slice at rank * max_streams; world is 2 or 4)
++        if (dr.zq != 0) {
++            var hz: [max_block * 4 * max_streams]f64 = undefined;
++            try e.d.check(e.d.api.cuMemcpyDtoH_v2(&hz, dr.zqp, steps * e.world * max_streams * 8), "cuMemcpyDtoH");
++            for (0..N) |i| for (0..steps) |j| {
++                var z: f64 = 0;
++                for (0..e.world) |r| z += hz[j * e.world * max_streams + r * max_streams + i];
++                dr.spec_zq[i][j] = z;
++            };
++        }
+         dr.streams = N;
+         dr.steps = steps;
+     }
+@@ -566,7 +604,8 @@ pub const Drafter = struct {
+         try Probe.check(probe, .local, S, dr.local);
+         // the Markov loop: out [N, steps + 1], each stream's last token first
+         const ts = steps + 1;
+-        var g: MarkovGather = .{ .e = e, .dst = dr.mg };
++        if (dr.zq != 0) try e.d.check(e.d.api.cuMemsetD8Async(dr.zq, 0, max_block * max_streams * 8, e.s.handle), "cuMemsetD8Async");
++        var g: MarkovGather = .{ .e = e, .dr = dr, .dst = dr.mg, .n = N };
+         var nt: NoiseTap = .{ .e = e, .dr = dr, .n = N };
+         const noise: ?tri_markov.Tap = if (noisy) .{ .ctx = &nt, .run = NoiseTap.run } else null;
+         try dr.mk.stepsWith(t, dr.local, dr.out, ts, N, n, steps, dr.msc, .{ .ctx = &g, .run = MarkovGather.run }, noise);
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index d579010..c75886a 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -21,6 +21,7 @@ const round = @import("round.zig");
+ const draft = @import("draft.zig");
+ const ops = @import("ops.zig");
+ const sampling = @import("sampling.zig");
++const prompt = @import("prompt.zig");
+ const link = @import("link.zig");
+ const cuda = @import("cuda");
+ const spill_tier = @import("spill_tier.zig");
+@@ -435,6 +436,7 @@ const Lane = struct {
+     held: [draft.max_block]u32 = undefined,
+     confs: [draft.max_block]f32 = undefined,
+     nheld: usize = 0,
++    dgen: u64 = 0, // TF_DS_SPEC_SAMPLE: the drafter pass `held` came from (a stale pass is not speculated)
+ };
+ 
+ extern "c" fn exp(x: f64) f64;
+@@ -520,6 +522,11 @@ pub const Lanes = struct {
+     step: u64 = 0,
+     wire: Wire = .{},
+     streams: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
++    // TF_DS_SPEC_SAMPLE: the last drafter pass's streams in its row order and its number (a lane's held drafts carry
++    // the pass they came from: a stale one is not speculated)
++    spec_gen: u64 = 0,
++    spec_ids: [max_streams]?*const lanes.Stream = @splat(null),
++    spec_n: usize = 0,
+     wc: [window_rows]lanes.config.Cost = undefined, // the window costs (init)
+     sc: [max_rows]lanes.config.Cost = undefined, // the shared forwards' costs (init)
+     used: [max_streams]bool = @splat(false),
+@@ -1252,7 +1259,8 @@ fn chunkRows(start: usize, len: usize) usize {
+         for (windows) |w| {
+             if (w.stream.score != null) rules.logits = true;
+         }
+-        const path = rules.path(m.ops.draw_rows != null);
++        // TF_DS_SPEC_SAMPLE: a sampled round reads its logits on the host (the drafted rows' p), whatever the draw switch
++        const path = if (m.ops.spec and rules.sampled) .host_draw else rules.path(m.ops.draw_rows != null);
+         const n_rows = rows.ids.len;
+         var draw_tab: [round.max_rows]ops.DrawRow = undefined;
+         if (path == .device_draw) {
+@@ -1296,10 +1304,79 @@ fn chunkRows(start: usize, len: usize) usize {
+             }
+             @memcpy(o.drafts[0..w.held], l.held[0..w.held]);
+             @memcpy(o.drafts[w.held..][0..w.tokens.len], w.tokens);
++            if (m.ops.spec and path == .host_draw) try self.speculate(w, o, l, logits, row0, V);
+             l.nheld = 0;
+         }
+     }
+ 
++    /// TF_DS_SPEC_SAMPLE: a sampled stream's drafted rows by the speculative accept rule over the target's served
++    /// distribution p (row q - 1's logits) and the drafter's proposal q (step q - 1's logits and the pass's Zq): accept
++    /// draft x when a tagged uniform at the row's position falls under min(1, p(x)/q(x)), else draw from the residual
++    /// max(p - q, 0) and stop. The rows past the first rejection keep the target's own draws (the path stops before
++    /// them). Both ranks run the same launches and hold the same numbers, so they decide alike.
++    fn speculate(self: *Lanes, w: be.Window, o: *be.Verified, l: *const Lane, logits: []const f32, row0: usize, V: usize) !void {
++        const m = self.m;
++        const d = &m.dr.?;
++        if (d.zq == 0 or l.dgen != self.spec_gen or w.held == 0) return;
++        const sm = w.stream.sampling orelse return;
++        if (sm.temperature <= 0) return;
++        var at: ?usize = null;
++        for (self.spec_ids[0..self.spec_n], 0..) |id, i| if (id != null and id.? == w.stream) {
++            at = i;
++            break;
++        };
++        const i = at orelse return;
++        const s = sampling.Sampling{ .seed = sm.seed, .temperature = sm.temperature, .top_k = @intCast(sm.top_k), .top_p = sm.top_p, .min_p = sm.min_p };
++        const lw = d.mk.rowCols();
++        const col0: i64 = @intCast(d.mk.col0());
++        const lwi: i64 = @intCast(lw);
++        // only the drafter's held drafts are proposed: the host's tokens (a forced or copied window) keep the old rule
++        for (1..1 + w.held) |q| {
++            const x: i64 = o.drafts[q - 1];
++            const pos = w.positions[q - 1];
++            const p = try sampling.servedDist(logits[(row0 + q - 1) * V ..][0..V], s);
++            // the drafter's proposal at the candidate set and at x: each rank gathers its own columns, -1 elsewhere
++            var ids: [sampling.max_candidates + 1]i64 = undefined;
++            var gid: [sampling.max_candidates + 1]i64 = undefined;
++            var n: usize = 0;
++            for (p.ids[0..p.n]) |id| {
++                const c = id - col0;
++                ids[n] = if (c >= 0 and c < lwi) c else -1;
++                gid[n] = id;
++                n += 1;
++            }
++            ids[n] = if (x - col0 >= 0 and x - col0 < lwi) x - col0 else -1;
++            gid[n] = x;
++            n += 1;
++            try prompt.upload(&m.eng, d.gids, &ids, n * 8);
++            try m.ops.gatherCols(m.eng.s, d.local + 4 * (i * d.n + (q - 1)) * lw, lw, d.gids, n, d.gout);
++            const wide = (n + 3) / 4 * 4;
++            try m.eng.gatherF32(d.gout, d.gpeer, wide);
++            try m.eng.s.synchronize();
++            var got: [4 * (sampling.max_candidates + 4)]f32 = undefined;
++            try m.eng.d.check(m.eng.d.api.cuMemcpyDtoH_v2(&got, d.gpeer, m.eng.world * wide * 4), "cuMemcpyDtoH");
++            var qs: [sampling.max_candidates + 1]f64 = @splat(0.0);
++            const zq = d.spec_zq[i][q - 1];
++            const seed = d.spec_seeds[i];
++            for (0..n) |j| {
++                var v: f32 = -std.math.inf(f32);
++                for (0..m.eng.world) |r| v = @max(v, got[r * wide + j]);
++                if (v == -std.math.inf(f32) or zq <= 0) continue;
++                const g = sampling.gumbel(seed, pos, @bitCast(gid[j]));
++                qs[j] = sampling.expDiv(@as(f64, v) / sm.temperature - g, zq);
++            }
++            const y = sampling.speculateRow(sm.seed, pos, x, p, qs[0..p.n], qs[p.n]) orelse {
++                o.sampled[q - 1] = @intCast(x);
++                continue;
++            };
++            o.sampled[q - 1] = @intCast(y);
++            // the residual draw landed on the draft: it is accepted, and the rows past it were drafted along the path
++            // the target's own draws no longer follow, so the path stops there
++            if (y == x and q + 1 < w.rows()) o.sampled[q] = if (o.drafts[q] == 0) 1 else 0;
++            break;
++        }
++    }
++
+     /// verifyFn's windows as both ranks build them (each stream's Lane: slot, extent, part, generation; its pending
+     /// row, held drafts and host drafts), then the planner's round (kvRound: its frames go out before the verify's).
+     fn roundWins(self: *Lanes, windows: []const be.Window, ids: *[max_streams][max_rows]i32, wins: *[max_streams]Win) !void {
+@@ -1359,16 +1436,24 @@ fn chunkRows(start: usize, len: usize) usize {
+             seeds[n] = 0;
+             temps[n] = 0;
+             if (r.stream.sampling) |sm| if (sm.temperature > 0) {
+-                seeds[n] = sm.seed;
++                // TF_DS_SPEC_SAMPLE: the drafter's own key, tagged, independent of the sampler's
++                seeds[n] = if (m.ops.spec) sampling.tagged(sm.seed, sampling.draft_tag) else sm.seed;
+                 temps[n] = sm.temperature;
+                 sampled = true;
+             };
++            if (m.ops.spec) {
++                self.spec_ids[n] = r.stream;
++                m.dr.?.spec_seeds[n] = seeds[n];
++                m.dr.?.spec_pos[n] = q0[n] + 1;
++            }
+             depths[n] = @min(r.depth, block);
+             asked[n] = l;
+             steps = @max(steps, depths[n]);
+             n += 1;
+         }
+         if (n == 0) return;
++        self.spec_n = n;
++        self.spec_gen += 1;
+         // the sampler's keys go to the pass only with TF_DS_T26_KEYED_DRAFT (the drafter's kernel loaded) and a sampled stream
+         const keyed = sampled and m.dr.?.nz != 0;
+         if (try self.begin(if (keyed) .pass_keyed else .pass)) {
+@@ -1399,6 +1484,7 @@ fn chunkRows(start: usize, len: usize) usize {
+                 l.confs[j] = d.confs[i][j];
+             }
+             l.nheld = k;
++            l.dgen = self.spec_gen;
+         }
+     }
+ 
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 3be0141..42e51ad 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -98,6 +98,7 @@ const shard = @import("shard.zig");
+ const kv_lanes = @import("kv_lanes.zig");
+ const api = @import("engine_api");
+ const comm = @import("comm.zig");
++const ops_mod = @import("ops.zig");
+ const rdma = @import("rdma.zig");
+ 
+ pub const model_type = "deepseek_v41";
+@@ -504,10 +505,11 @@ pub fn rankExchange(gpa: std.mem.Allocator, io: std.Io, mo: model.Options, m: *m
+     const edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")); // (the marks gate: the fingerprint's reading)
+     const keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")); // (the victim order gate: the fingerprint's reading)
+     const exact_resume = api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")); // (the off-grid states' gate: the fingerprint's reading)
++    const spec_sample = try ops_mod.specSample(getenv(ops_mod.spec_env), getenv(ops_mod.keyed_env)); // TF_DS_SPEC_SAMPLE (T26 refused with it)
+     // TF_DS_KV_SHARD's switches every rank's planner takes (carry, twins) and its part size: agreed in `features`
+     const kvs: kv_lanes.Settings = if (m.kvs != null) try kv_lanes.Settings.fromEnv(getenvFn) else .{ .carry = false, .twins = false };
+     const part_rows: u64 = if (m.caches.shard) |x| x.part else 0;
+-    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .keep_protect = keep_protect, .exact_resume = exact_resume, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
++    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .keep_protect = keep_protect, .exact_resume = exact_resume, .spec_sample = spec_sample, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
+     var pbuf: [model.Model.spill.StateLayout.max_encoded]u8 = undefined;
+     const lp = try rank_identity.layoutPart(layout, m.world, &pbuf);
+     var arena = std.heap.ArenaAllocator.init(gpa);
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index e5cfadf..cc75134 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -25,6 +25,27 @@ fn envOn(name: [:0]const u8) bool {
+     return std.mem.eql(u8, std.mem.span(v), "1");
+ }
+ 
++/// The switch for speculative sampling of a sampled stream (lanes.zig's accept rule, tf_ds_keyed_noise_kernel's Zq and
++/// tf_ds_gather_cols_kernel); read at load on every rank.
++pub const spec_env = "TF_DS_SPEC_SAMPLE";
++
++fn onValue(v: ?[]const u8) bool {
++    const s = v orelse return false;
++    return std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "on");
++}
++
++/// The series' switch parse (unset, "0", "off", "" or anything else: off), and the one combination refused: the
++/// drafter's keyed noise (TF_DS_T26_KEYED_DRAFT) and this one both on.
++pub fn specSample(v: ?[]const u8, keyed: ?[]const u8) !bool {
++    const on = onValue(v);
++    if (on and onValue(keyed)) return error.SpecAndKeyedDraft;
++    return on;
++}
++
++fn specOn() bool {
++    return onValue(std.c.getenv(spec_env));
++}
++
+ /// The switch for the device draw of sampled rows (tf_ds_draw_rows_kernel); read at load on every rank.
+ pub const draw_env = "TF_DS_T27_DEVICE_DRAW";
+ 
+@@ -67,7 +88,9 @@ pub const Ops = struct {
+     gpu_clock: cuda.Function,
+     prune: ?expert_prune.Mode = null, // TF_DS_T13_EXPERT_PRUNE and _EXPERT_CAP, read at load
+     prune_fn: ?cuda.Function = null, // looked up only when the switch is on
+-    keyed_noise: ?cuda.Function = null, // TF_DS_T26_KEYED_DRAFT, looked up only when on
++    keyed_noise: ?cuda.Function = null, // TF_DS_T26_KEYED_DRAFT or TF_DS_SPEC_SAMPLE, looked up only when on
++    gather_cols: ?cuda.Function = null, // TF_DS_SPEC_SAMPLE, looked up only when on
++    spec: bool = false, // TF_DS_SPEC_SAMPLE
+     draw_rows: ?cuda.Function = null, // TF_DS_T27_DEVICE_DRAW, looked up only when on
+     lora_add: ?cuda.Function = null, // TF_DS_LORA: the adapter epilogue's add, looked up only when on
+ 
+@@ -80,6 +103,7 @@ pub const Ops = struct {
+         var fm = try cuda.Module.load(d, family);
+         errdefer fm.unload();
+         const prune = try expert_prune.fromEnv();
++        const spec = try specSample(std.c.getenv(spec_env), std.c.getenv(keyed_env));
+         return .{
+             .pointwise = pw,
+             .movement = mv,
+@@ -104,7 +128,9 @@ pub const Ops = struct {
+             .gpu_clock = try fm.function("tf_ds_clock_kernel"),
+             .prune = prune,
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
+-            .keyed_noise = if (envOn(keyed_env)) try fm.function("tf_ds_keyed_noise_kernel") else null,
++            .keyed_noise = if (envOn(keyed_env) or spec) try fm.function("tf_ds_keyed_noise_kernel") else null,
++            .gather_cols = if (spec) try fm.function("tf_ds_gather_cols_kernel") else null,
++            .spec = spec,
+             .draw_rows = if (envOn(draw_env)) try fm.function("tf_ds_draw_rows_kernel") else null,
+             .lora_add = if (loraOn()) try fm.function("tf_ds_add_bf16_kernel") else null,
+         };
+@@ -370,8 +396,10 @@ pub const Ops = struct {
+     }
+ 
+     /// Adds T * gumbel(seed, pos + step, col0 + v) to column v of each of `rows` streams' logits row (fp32, rows `l_row`
+-    /// floats apart, `width` columns; `table` the device KeyedRow of each stream), skipping streams with T <= 0.
+-    pub fn keyedNoise(o: *const Ops, s: cuda.Stream, logits: u64, l_row: usize, width: usize, col0: usize, table: u64, step: usize, rows: usize) !void {
++    /// floats apart, `width` columns; `table` the device KeyedRow of each stream), skipping streams with T <= 0, and with
++    /// `zq` (TF_DS_SPEC_SAMPLE: the drafter's proposal normaliser, double [steps * zq_stride] step-major) each row's
++    /// sum of exp(logit / T) read before the noise is added.
++    pub fn keyedNoise(o: *const Ops, s: cuda.Stream, logits: u64, l_row: usize, width: usize, col0: usize, table: u64, step: usize, rows: usize, zq: u64, zq_stride: usize) !void {
+         const f = o.keyed_noise orelse return error.KeyedDraftOff;
+         if (rows == 0 or width == 0) return;
+         var a: cuda.Args = .{};
+@@ -381,9 +409,24 @@ pub const Ops = struct {
+         a.add(@as(u64, col0));
+         a.add(table);
+         a.add(@as(u32, @intCast(step)));
++        a.add(zq);
++        a.add(@as(u32, @intCast(zq_stride)));
+         try cuda.launch.launch(f, .{ .grid = .{ .x = blocks(width, 256), .y = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
+     }
+ 
++    /// out[i] = the fp32 logits row's column ids[i] (rank-local; -1: -inf), `n` ids.
++    pub fn gatherCols(o: *const Ops, s: cuda.Stream, logits: u64, ld: usize, ids: u64, n: usize, out: u64) !void {
++        const f = o.gather_cols orelse return error.SpecSampleOff;
++        if (n == 0) return;
++        var a: cuda.Args = .{};
++        a.add(logits);
++        a.add(@as(u64, ld));
++        a.add(ids);
++        a.add(@as(i64, @intCast(n)));
++        a.add(out);
++        try go(f, s, blocks(n, 64), 64, &a);
++    }
++
+     /// The GPU clock (ns) into buf[i] when the stream reaches it (a profile).
+     pub fn gpuClock(o: *const Ops, s: cuda.Stream, buf: u64, tag: u32, reset: bool, cap: u32) !void {
+         var a: cuda.Args = .{};
+@@ -430,3 +473,12 @@ test "a draw row is the kernel's TfDsDrawRow" {
+     try std.testing.expectEqual(@as(usize, 32), @offsetOf(DrawRow, "pos"));
+     try std.testing.expectEqual(@as(usize, 40), @offsetOf(DrawRow, "top_k"));
+ }
++
++test "TF_DS_SPEC_SAMPLE parses like the series' switches and refuses TF_DS_T26_KEYED_DRAFT" {
++    try std.testing.expect(try specSample("1", null));
++    try std.testing.expect(try specSample("on", "0"));
++    try std.testing.expect(!try specSample(null, "1"));
++    for ([_][]const u8{ "0", "off", "", "ON", "yes" }) |v| try std.testing.expect(!try specSample(v, null));
++    try std.testing.expectError(error.SpecAndKeyedDraft, specSample("1", "1"));
++    try std.testing.expectError(error.SpecAndKeyedDraft, specSample("on", "on"));
++}
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 250b291..26a989e 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -145,6 +145,11 @@ pub const Engine = struct {
+         return e.comm.allGather(src, dst, count, .f32, e.s);
+     }
+ 
++    /// A decode-size all-gather of `count` fp64 a rank into `dst` (TF_DS_SPEC_SAMPLE's proposal normalisers), NCCL.
++    pub fn gatherF64(e: *const Engine, src: u64, dst: u64, count: usize) !void {
++        return e.comm.allGather(src, dst, count, .f64, e.s);
++    }
++
+     pub fn heads(e: *const Engine) usize {
+         if (e.two) |t| return t.heads;
+         return e.c.heads / e.world;
+diff --git a/zig/src/families/dsv41/rank_identity.zig b/zig/src/families/dsv41/rank_identity.zig
+index ad6e6b0..7184955 100644
+--- a/zig/src/families/dsv41/rank_identity.zig
++++ b/zig/src/families/dsv41/rank_identity.zig
+@@ -133,6 +133,7 @@ pub const Features = struct {
+     edit_mark: bool = false, // TF_DS_EDIT_MARK (named in the string only when on)
+     keep_protect: bool = false, // TF_DS_KEEP_PROTECT (named in the string only when on)
+     exact_resume: bool = false, // TF_DS_EXACT_RESUME (named in the string only when on)
++    spec_sample: bool = false, // TF_DS_SPEC_SAMPLE (named in the string only when on)
+     streams: u32,
+     round_rows: u32,
+     pool: u64,
+@@ -140,7 +141,8 @@ pub const Features = struct {
+ };
+ 
+ /// TF_DS_KV_SHARD adds "part=N;" (the part size: the owner layout's, also in the planes field), TF_DS_EDIT_MARK=1
+-/// "edit_mark=1;", TF_DS_KEEP_PROTECT=1 "keep_protect=1;" and TF_DS_EXACT_RESUME=1 "exact_resume=1;"; with none on, the
++/// "edit_mark=1;", TF_DS_KEEP_PROTECT=1 "keep_protect=1;", TF_DS_EXACT_RESUME=1 "exact_resume=1;" and TF_DS_SPEC_SAMPLE=1
++/// "spec_sample=1;"; with none on, the
+ /// bytes are what they always were.
+ pub fn featureString(buf: []u8, f: Features) ![]const u8 {
+     const head = try std.fmt.bufPrint(buf, "spill={d};spill_min={d};kv_shard={d};kv_carry={d};twins={d};engram_lanes={d};image_cache={d};streams={d};round_rows={d};pool={d};drafts={d};", .{
+@@ -152,6 +154,7 @@ pub fn featureString(buf: []u8, f: Features) ![]const u8 {
+     if (f.edit_mark) n += (try std.fmt.bufPrint(buf[n..], "edit_mark=1;", .{})).len; // named only when on: a mismatch with an off peer is a hello refusal
+     if (f.keep_protect) n += (try std.fmt.bufPrint(buf[n..], "keep_protect=1;", .{})).len;
+     if (f.exact_resume) n += (try std.fmt.bufPrint(buf[n..], "exact_resume=1;", .{})).len; // (a mismatch with an off peer refuses at the hello)
++    if (f.spec_sample) n += (try std.fmt.bufPrint(buf[n..], "spec_sample=1;", .{})).len;
+     return buf[0..n];
+ }
+ 
+@@ -620,6 +623,9 @@ test "TF_DS_EDIT_MARK, TF_DS_KEEP_PROTECT and TF_DS_EXACT_RESUME are named in th
+     var b3: [256]u8 = undefined;
+     const exact = try featureString(&b3, .{ .spill = true, .spill_min_tokens = 8192, .exact_resume = true, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
+     try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;exact_resume=1;", exact);
++    var b4: [256]u8 = undefined;
++    const spec = try featureString(&b4, .{ .spill = true, .spill_min_tokens = 8192, .spec_sample = true, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
++    try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;spec_sample=1;", spec);
+ }
+ 
+ test "TF_DS_KV_SHARD alone: a missing recipe identity reads unset, never a refusal; with the spill tier it is refused" {
+diff --git a/zig/src/families/dsv41/sampling.zig b/zig/src/families/dsv41/sampling.zig
+index 2aebcf5..184e617 100644
+--- a/zig/src/families/dsv41/sampling.zig
++++ b/zig/src/families/dsv41/sampling.zig
+@@ -48,6 +48,16 @@ pub fn uniform(seed: u64, position: u64, id: u64) f64 {
+     return @as(f64, @floatFromInt(keyBits(seed, position, id) >> 11)) * 0x1p-53 + 0x1p-54;
+ }
+ 
++/// The Gumbel draw a keyed uniform gives (sampleRow's score term).
++pub fn gumbel(seed: u64, position: u64, id: u64) f64 {
++    return -log(-log(uniform(seed, position, id)));
++}
++
++/// exp(x) / z: a proposal's probability from its scaled logit and the normaliser.
++pub fn expDiv(x: f64, z: f64) f64 {
++    return exp(x) / z;
++}
++
+ /// numpy's pairwise sum of a contiguous float64 row (umath pairwise_sum, under its 128-element block).
+ pub fn pairwiseSum(a: []const f64) f64 {
+     const n = a.len;
+@@ -102,9 +112,16 @@ pub fn argmax(row: []const f32) usize {
+     return best;
+ }
+ 
+-/// sample_rows for one row of fp32 logits at absolute position `position`: the token.
+-pub fn sampleRow(row: []const f32, position: u64, s: Sampling) !i64 {
+-    if (s.temperature <= 0) return @intCast(argmax(row));
++/// A row's scored candidates and the set top_p and min_p keep (sampleRow's arithmetic, shared with the speculative
++/// sampler's p and its tagged draws).
++const Served = struct {
++    k: usize,
++    ids: [max_candidates]i64,
++    scaled: [max_candidates]f64,
++    keep: [max_candidates]bool,
++};
++
++fn served(row: []const f32, s: Sampling) !Served {
+     if (s.top_k == 0) return error.NotPortedYet; // the nucleus path (top_k off: a model setting only top_p)
+     const count = @min(row.len, s.top_k + margin);
+     if (count > max_candidates) return error.TooManyCandidates;
+@@ -114,18 +131,13 @@ pub fn sampleRow(row: []const f32, position: u64, s: Sampling) !i64 {
+     // choose_rows on the candidates (already in lexsort's order)
+     const k = @max(1, @min(s.top_k, width));
+     const t = @max(s.temperature, 1e-6);
+-    var scaled: [max_candidates]f64 = undefined;
+-    var score: [max_candidates]f64 = undefined;
+-    for (0..k) |j| {
+-        scaled[j] = @as(f64, values[j]) / t;
+-        const u = uniform(s.seed, position, @bitCast(ids[j]));
+-        score[j] = scaled[j] - log(-log(u));
+-    }
++    var out: Served = .{ .k = k, .ids = ids, .scaled = undefined, .keep = @splat(true) };
++    for (0..k) |j| out.scaled[j] = @as(f64, values[j]) / t;
+     if (0.0 < s.top_p and s.top_p < 1.0) {
+-        var mx = scaled[0];
+-        for (scaled[1..k]) |v| mx = @max(mx, v);
++        var mx = out.scaled[0];
++        for (out.scaled[1..k]) |v| mx = @max(mx, v);
+         var probs: [max_candidates]f64 = undefined;
+-        for (0..k) |j| probs[j] = exp(scaled[j] - mx);
++        for (0..k) |j| probs[j] = exp(out.scaled[j] - mx);
+         const sum = pairwiseSum(probs[0..k]);
+         for (0..k) |j| probs[j] /= sum;
+         var acc: f64 = 0.0;
+@@ -135,19 +147,120 @@ pub fn sampleRow(row: []const f32, position: u64, s: Sampling) !i64 {
+             if (acc < s.top_p) below += 1;
+         }
+         const keep = below + 1;
+-        for (keep..k) |j| score[j] = -std.math.inf(f64);
++        for (keep..k) |j| out.keep[j] = false;
+     }
+     if (s.min_p > 0.0) {
+-        const floor = scaled[0] + log(s.min_p);
++        const floor = out.scaled[0] + log(s.min_p);
+         for (0..k) |j| {
+-            if (scaled[j] < floor) score[j] = -std.math.inf(f64);
++            if (out.scaled[j] < floor) out.keep[j] = false;
+         }
+     }
++    return out;
++}
++
++/// sample_rows for one row of fp32 logits at absolute position `position`: the token.
++pub fn sampleRow(row: []const f32, position: u64, s: Sampling) !i64 {
++    if (s.temperature <= 0) return @intCast(argmax(row));
++    const sv = try served(row, s);
++    var score: [max_candidates]f64 = undefined;
++    for (0..sv.k) |j| {
++        const u = uniform(s.seed, position, @bitCast(sv.ids[j]));
++        score[j] = if (sv.keep[j]) sv.scaled[j] - log(-log(u)) else -std.math.inf(f64);
++    }
+     var best: usize = 0;
+-    for (0..k) |j| {
++    for (0..sv.k) |j| {
+         if (score[j] > score[best]) best = j;
+     }
+-    return ids[best];
++    return sv.ids[best];
++}
++
++/// The row's served distribution over what top_p and min_p keep, renormalised over that set: p in the speculative
++/// sampler's accept ratio and residual.
++pub const Dist = struct {
++    n: usize = 0,
++    ids: [max_candidates]i64 = @splat(0),
++    p: [max_candidates]f64 = @splat(0),
++
++    pub fn prob(d: Dist, id: i64) f64 {
++        for (d.ids[0..d.n], d.p[0..d.n]) |x, px| if (x == id) return px;
++        return 0.0;
++    }
++};
++
++pub fn servedDist(row: []const f32, s: Sampling) !Dist {
++    const sv = try served(row, s);
++    var out: Dist = .{};
++    var mx = -std.math.inf(f64);
++    for (0..sv.k) |j| {
++        if (sv.keep[j]) mx = @max(mx, sv.scaled[j]);
++    }
++    var probs: [max_candidates]f64 = @splat(0.0);
++    for (0..sv.k) |j| {
++        if (!sv.keep[j]) continue;
++        probs[out.n] = exp(sv.scaled[j] - mx);
++        out.ids[out.n] = sv.ids[j];
++        out.n += 1;
++    }
++    if (out.n == 0) return out;
++    const sum = pairwiseSum(probs[0..out.n]);
++    for (out.p[0..out.n], probs[0..out.n]) |*p, x| p.* = x / sum;
++    return out;
++}
++
++/// A draw over `ids` with weights w (0: never): the gumbel-max of ln w + gumbel(seed, position, id).
++pub fn sampleWeights(ids: []const i64, w: []const f64, position: u64, seed: u64) ?i64 {
++    var best: ?i64 = null;
++    var best_score = -std.math.inf(f64);
++    for (ids, w) |id, wt| {
++        if (!(wt > 0.0)) continue;
++        const score = log(wt) - log(-log(uniform(seed, position, @bitCast(id))));
++        if (best == null or score > best_score) {
++            best = id;
++            best_score = score;
++        }
++    }
++    return best;
++}
++
++/// The drafter's, the acceptance test's and the residual draw's key tags: mixed into a stream's seed, so a sample's
++/// keys are independent of the sampler's own.
++pub const draft_tag: u64 = 0xD7A61F3B0C2E5B91;
++pub const accept_tag: u64 = 0x1CE49B2D77A03F13;
++pub const residual_tag: u64 = 0x3E7A5C6108D9B4F5;
++
++pub fn tagged(seed: u64, tag: u64) u64 {
++    return mix(seed ^ mix(tag));
++}
++
++/// One drafted row's decision: null when x is accepted (a tagged uniform under min(1, p(x)/q(x)), q(x) = 0 always
++/// accepting), else the residual draw's token over max(p - q, 0).
++pub fn speculateRow(seed: u64, position: u64, x: i64, p: Dist, q: []const f64, qx: f64) ?i64 {
++    const px = p.prob(x);
++    const ratio = if (qx > 0.0) @min(1.0, px / qx) else 1.0;
++    if (uniform(tagged(seed, accept_tag), position, @bitCast(x)) < ratio) return null;
++    var wts: [max_candidates]f64 = undefined;
++    for (0..p.n) |j| wts[j] = @max(p.p[j] - q[j], 0.0);
++    return sampleWeights(p.ids[0..p.n], wts[0..p.n], position, tagged(seed, residual_tag)) orelse p.ids[0];
++}
++
++/// sampleRow with the seed mixed with `tag` and candidate `except_id`'s mass removed (the rest renormalise).
++pub fn sampleRowTagged(row: []const f32, position: u64, s: Sampling, tag: u64, except_id: ?i64) !i64 {
++    if (s.temperature <= 0) return @intCast(argmax(row));
++    const sv = try served(row, s);
++    const seed = tagged(s.seed, tag);
++    var best: usize = 0;
++    var best_score = -std.math.inf(f64);
++    var have = false;
++    for (0..sv.k) |j| {
++        if (!sv.keep[j] or (except_id != null and sv.ids[j] == except_id.?)) continue;
++        const score = sv.scaled[j] - log(-log(uniform(seed, position, @bitCast(sv.ids[j]))));
++        if (!have or score > best_score) {
++            have = true;
++            best = j;
++            best_score = score;
++        }
++    }
++    return sv.ids[best];
+ }
+ 
+ /// A row's rule is one the device draw reproduces: greedy, or top_k in 1..max_candidates - margin (sampleRow's errors
+@@ -315,3 +428,89 @@ test "the device draw takes a round only when every sampled row is one it reprod
+     try std.testing.expectEqual(RoundPath.host_draw, s.path(true));
+     try std.testing.expectEqual(RoundPath.host_draw, s.path(false));
+ }
++
++/// The chi-square statistic of counts against ps (4 bins: 11.34 is df 3's 1% critical value).
++fn chi2(counts: []const usize, n: usize, ps: []const f64) f64 {
++    var x: f64 = 0.0;
++    for (counts, ps) |c, p| {
++        const e = @as(f64, @floatFromInt(n)) * p;
++        const d = @as(f64, @floatFromInt(c)) - e;
++        x += d * d / e;
++    }
++    return x;
++}
++
++test "the accept rule and the residual over toy p and q: q(x) = 0 accepts, p(x) = 0 rejects, p == q accepts, a draft off p's support takes the residual" {
++    const ids = [_]i64{ 10, 20, 30, 40 };
++    var p: Dist = .{ .n = 4 };
++    p.ids[0..4].* = ids;
++    p.p[0..4].* = .{ 0.2, 0.3, 0.25, 0.25 };
++    const q = [_]f64{ 0.4, 0.2, 0.2, 0.2 };
++    // q(x) = 0: accepted
++    try std.testing.expect(speculateRow(3, 11, 10, p, &q, 0.0) == null);
++    // p(x) = 0 (x off p's candidates): rejected, and the residual is a candidate
++    const y = speculateRow(3, 11, 77, p, &q, 0.25);
++    try std.testing.expect(y != null and y.? != 77 and p.prob(y.?) > 0.0);
++    // p == q: every draw accepted
++    var same = p;
++    same.p[0..4].* = q;
++    try std.testing.expect(speculateRow(3, 11, 10, same, &q, 0.4) == null);
++    // disjoint supports: q has no mass on p's candidates, so every draft is rejected and the residual is p
++    var none: Dist = .{ .n = 4 };
++    none.ids[0..4].* = ids;
++    none.p[0..4].* = .{ 0.1, 0.2, 0.3, 0.4 };
++    const zero = [_]f64{ 0.0, 0.0, 0.0, 0.0 };
++    var seen: [4]usize = @splat(0);
++    for (0..1000) |i| seen[@intCast(@divTrunc(speculateRow(i, 12, 55, none, &zero, 1.0).? - 10, 10))] += 1;
++    try std.testing.expect(chi2(&seen, 1000, none.p[0..4]) < 11.34);
++}
++
++test "the emitted token follows p over 200K seeds, one row and a three-draft block" {
++    const ids = [_]i64{ 10, 20, 30, 40 };
++    var p: Dist = .{ .n = 4 };
++    p.ids[0..4].* = ids;
++    p.p[0..4].* = .{ 0.2, 0.3, 0.25, 0.25 };
++    const q = [_]f64{ 0.4, 0.2, 0.2, 0.2 };
++    const n = 200_000;
++    var first: [4]usize = @splat(0);
++    var second: [4]usize = @splat(0);
++    var third: [4]usize = @splat(0);
++    var n2: usize = 0;
++    var n3: usize = 0;
++    for (0..n) |i| {
++        const seed = i * 7 + 1;
++        var t: [3]i64 = @splat(0);
++        var rows: usize = 0;
++        for (0..3) |r| {
++            const x = sampleWeights(&ids, &q, 100 + r, tagged(seed, draft_tag)).?;
++            const y = speculateRow(seed, 100 + r, x, p, &q, q[@intCast(@divTrunc(x - 10, 10))]);
++            t[r] = y orelse x;
++            rows += 1;
++            if (y != null) break;
++        }
++        first[@intCast(@divTrunc(t[0] - 10, 10))] += 1;
++        if (rows > 1) {
++            second[@intCast(@divTrunc(t[1] - 10, 10))] += 1;
++            n2 += 1;
++        }
++        if (rows > 2) {
++            third[@intCast(@divTrunc(t[2] - 10, 10))] += 1;
++            n3 += 1;
++        }
++    }
++    try std.testing.expect(chi2(&first, n, p.p[0..4]) < 11.34);
++    try std.testing.expect(chi2(&second, n2, p.p[0..4]) < 11.34);
++    try std.testing.expect(chi2(&third, n3, p.p[0..4]) < 11.34);
++}
++
++test "the draft, accept and residual keys are independent of the sampler's and of each other" {
++    const seed: u64 = 12345;
++    const pos: u64 = 99;
++    const id: u64 = 7;
++    const d = uniform(tagged(seed, draft_tag), pos, id);
++    const a = uniform(tagged(seed, accept_tag), pos, id);
++    const r = uniform(tagged(seed, residual_tag), pos, id);
++    try std.testing.expect(d != a and a != r and d != r);
++    try std.testing.expect(d != uniform(seed, pos, id));
++    try std.testing.expect(tagged(seed, draft_tag) != tagged(seed, accept_tag));
++}
+-- 
+2.56.0
+

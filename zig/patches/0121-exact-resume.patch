@@ -1,0 +1,915 @@
+From b2a8fd21b26fc5d06910a0e7562b805571ffd48d Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Sat, 14 Nov 2026 21:20:40 -0800
+Subject: [PATCH] dsv41: TF_DS_EXACT_RESUME (off by default) keeps a prompt
+ pass's own end as an off-grid state with the window's decoder-input rows, so
+ the next turn resumes at the exact token; TF_DS_DEBUG_SPLIT=p cuts a cold
+ pass's chunk at p for step 0
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A kept prompt state exists today only at a 2048-row chunk end at or before the prompt's replay (lanes.zig's keep
+hook and snapSaveFn, usable's grid rule), so a turn recomputes its own new text, the previous reply, the 128-row
+window a resume replays and up to 2,047 rows of grid slack. Baseten's engine resumes at the exact token: the
+encoder runs over the new rows and the decoder is replayed over the last 128 rows it kept plus those rows. This
+brings that to this engine for the state a prompt pass computes (phase A: no decode-written rows).
+
+TF_DS_EXACT_RESUME (`1` only; unset, `0`, `off` or anything else leave it off, as the series' switches do) and
+`exact_resume=1;` in the ranks' feature string, so a pair that disagrees refuses at the hello. With it on:
+- replayCut copies the chunk's decoder-input rows (h bf16 and pre fp32) of the pass's last `window` positions into
+  the slot's 128-row tail, a ring by position, appending across chunks (Model.tails; 5.2 MB a slot and rank).
+- after the last chunk and before the first round the pass keeps its own end (the prompt's length rounded down to
+  even) as a state carrying that tail (Snap.tail, tail_start/tail_end); the prompt cache is told it exists (Rules.exact
+  adds the end mark to Store.marks and lets a lookup past the tail/window rule, the family's usable still deciding).
+- usable and snapSaveFn accept an off-grid `at` only when it carries a tail whose rows hold the new replay
+  (tail_start <= len - window, tail_end >= at); snapBytesFn reports the larger state, and the tail is saved and
+  restored inside the existing snap_save/snap_restore handling on both ranks (no new frame kind, no field added).
+- a resumed pass runs its first chunk only to the next 2048-row end, so every later chunk end lands on the grid and
+  the keep hook, shared cuts, edit marks and spill keeps keep firing; replayCut prepends the tail's rows
+  [replay, start) to the chunk's h and pre and to its positions, so the decoder runs on [replay, chunk end) as a cold
+  pass would, with rs.floor = replay as today; the new tail is stashed for the next turn.
+
+Grid keeps are exactly as they were (the hook, last_end, snapSaveFn's rule); the end state is one extra Snap a
+conversation and supersedes the conversation's previous end state. With the switch off no tail is allocated, the
+chunk loop's rows and every frame's bytes are what they were, and the feature string is unchanged.
+
+Phase A resumes at even positions only (a ratio-2 layer refuses an odd chunk start; the end is rounded down to even)
+and keeps off-grid states in memory only: with the switch on, the spill tier (its block store is 2048-token blocks),
+TF_DS_KV_SHARD=1, TF_DS_PREFILL_SLICE and image prompts are refused at start (error.ExactResumeUnsupported, named in
+native.explain). Phase B (keeping the reply's decode-written rows, LOSSY by construction) is not built, and the
+odd-start case is not ported.
+
+TF_DS_DEBUG_SPLIT=p (step 0's identity experiment, even p) cuts the chunk holding p in a cold pass in two at p
+([grid, p) then [p, next grid)), every other chunk as today: the shape an off-grid resume produces, with no Snap
+changes, so `--logits-sha 1` compares a split pass's prompt logits with an unsplit one's (it already printed them).
+
+Tests: zig build test passes, including the new host tests: a tail's prepend and rows (replayCut's `pre`, a tail
+short of the window refused); a pass's tail across chunks (prompts under the window, an exact grid multiple, a last
+window spanning two chunks, a resumed pass's re-stash), a turn's deltas of 1/127/128/129/2048/2049 tokens, and the
+prepend's rows in the position order a cold pass lays out; usable/snapSaveFn's acceptance (an off-grid state with a
+covering tail resumes, a tail that does not hold the replay is refused, a grid state as ever, the pass's end kept
+with its tail and refused without the switch); the chunk loop's rows (as ever from a chunk end, the next one from an
+off-grid resume); the feature string with the switch on and off; Model.open's init list for the new fields (0114's
+bug class); and the switch's parse. tools/resume_exact.py (Sparks repo) runs the pair gate: a conversation of turns
+appending 1..5,000 tokens, each turn's cold reply hash against its warm one, and cached/prefill/TTFT with the switch
+off and on. Not run on hardware: step 0's split-pass logits comparison and the cold-equals-warm reply gate are the
+first live measurements (docs/baseten-ultrafast-plan.md item 3).
+
+    The cache's gate: `liveWhy` skips the native grid rule for a state whose `at` is off the grid when the store's
+    `Rules.exact` is set, since the family's `usable` above it is that state's own gate — without it a store built with
+    a grid (the offline `tf-dsv41-lanes` binary, which sets one) kept the end state and never found it. Test: an
+    off-grid end state is found on a grid store with the switch on and passed over without it.
+---
+ zig/src/core/prompt_cache.zig            |  28 +++-
+ zig/src/core/prompt_cache_test.zig       |  21 +++
+ zig/src/families/dsv41/lanes.zig         | 135 +++++++++++++++-
+ zig/src/families/dsv41/lanes_main.zig    |   2 +-
+ zig/src/families/dsv41/model.zig         |  58 +++++++
+ zig/src/families/dsv41/native.zig        |   8 +-
+ zig/src/families/dsv41/prompt.zig        | 190 ++++++++++++++++++++---
+ zig/src/families/dsv41/rank_identity.zig |  10 +-
+ zig/src/native/cuda.zig                  |   2 +-
+ 9 files changed, 422 insertions(+), 32 deletions(-)
+
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+index 772f5cc..ddd95f5 100644
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -130,6 +130,17 @@ pub fn keepProtect(v: ?[]const u8) bool {
+     return std.mem.eql(u8, v orelse return false, "1");
+ }
+ 
++/// TF_DS_EXACT_RESUME's one reading (dsv41's off-grid end state and the cache's marks alike): on only when it is exactly
++/// "1".
++pub fn exactResume(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse return false, "1");
++}
++
++test exactResume {
++    try std.testing.expect(!exactResume(null) and !exactResume("0") and !exactResume("") and !exactResume("on"));
++    try std.testing.expect(exactResume("1"));
++}
++
+ test keepProtect {
+     try std.testing.expect(!keepProtect(null) and !keepProtect("0") and !keepProtect(""));
+     try std.testing.expect(keepProtect("1"));
+@@ -436,6 +447,9 @@ pub const Rules = struct {
+     /// TF_DS_KEEP_PROTECT=1: a longer state counts as superseding only within its own conversation (`related`), so a
+     /// fork's states never free their branch point first.
+     keep_protect: bool = false,
++    /// TF_DS_EXACT_RESUME=1: a pass keeps its own end as an off-grid state (dsv41: its chunk grid rounded down to even),
++    /// whose tail the family holds the window's rows in; the family's usable is then the only resume gate.
++    exact: bool = false,
+ 
+     /// The native rule (Lanes.usable): 0 < at < len, on the grid, at most len - window, its lookahead inside the prompt.
+     pub fn eligible(r: Rules, at: u32, len: usize) bool {
+@@ -650,6 +664,9 @@ pub const Store = struct {
+     fn liveWhy(s: *const Store, e: *const Entry, len: usize) ?MissCause {
+         if (s.family.vtable.usable) |f| if (!f(s.family.ptr, e.saved, @intCast(@min(len, std.math.maxInt(u32))))) return .stale;
+         if (s.rules.grid == 0 and s.rules.window == 0) return null;
++        // TF_DS_EXACT_RESUME: a pass's own end is off the grid, and the family's usable above is its only resume gate
++        // (Rules.exact): the native grid rule would pass it over on every store built with a grid.
++        if (s.rules.exact and s.rules.grid > 0 and e.at % s.rules.grid != 0) return null;
+         return if (s.rules.eligible(e.at, len)) null else .tail_window;
+     }
+ 
+@@ -674,7 +691,10 @@ pub const Store = struct {
+             if (best != null and e.at <= best.?.at) continue; // (order-independent: the hit is the longest match)
+             const n = e.tokens.len;
+             if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
+-            if (e.at >= prompt.len or @as(usize, e.at) + s.rules.tail > prompt.len or !s.usable(e.at, starts)) {
++            // TF_DS_EXACT_RESUME: a state at a pass's end is nearer than the window and resumes on its tail (the family's
++            // usable decides); without it the tail rule passes it over
++            const tail_ok = s.rules.exact or @as(usize, e.at) + s.rules.tail <= prompt.len;
++            if (e.at >= prompt.len or !tail_ok or !s.usable(e.at, starts)) {
+                 worse(why, .tail_window); // matched, but the tail/window and usable rules pass it over
+                 continue;
+             }
+@@ -1064,6 +1084,12 @@ pub const Store = struct {
+             if (stable > 0 and stable < history_len and keeps) try want.append(a, stable);
+         }
+         try want.appendSlice(a, shared);
++        // TF_DS_EXACT_RESUME: the pass's own end, off the grid (rounded down to even: dsv41's ratio-2 layers refuse an odd
++        // start), which the next turn resumes from on its tail's rows; no gap rule applies to it
++        if (s.rules.exact and prompt.len >= 2) {
++            const end: u32 = @intCast(prompt.len & ~@as(usize, 1));
++            if (end > from and std.mem.indexOfScalar(u32, out.items, end) == null) try out.append(a, end);
++        }
+         for (want.items, 0..) |w, k| {
+             const at = if (s.rules.planned) floorStart(starts, w) else w;
+             if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
+diff --git a/zig/src/core/prompt_cache_test.zig b/zig/src/core/prompt_cache_test.zig
+index a632466..f096102 100644
+--- a/zig/src/core/prompt_cache_test.zig
++++ b/zig/src/core/prompt_cache_test.zig
+@@ -917,3 +917,24 @@ test "TF_DS_CACHE_METRICS=0: the cause splits and the resume depth count nothing
+     try std.testing.expectEqual(@as(u64, 0), s.counts.failed_restore);
+     try std.testing.expectEqual(@as(u64, 0), s.depth.n);
+ }
++
++test "TF_DS_EXACT_RESUME: an off-grid end state is live on a store built with a grid, and only with the switch on" {
++    const gpa = std.testing.allocator;
++    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 }; // the pass's end: off the 2048-row grid
++    const t2 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }; // the next turn, which resumes it
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .grid = 2048, .window = 128, .tail = 128, .min_prompt = 0, .exact = true }, 1 << 20);
++    defer s.deinit();
++    f.sum = fresh(&t1);
++    f.at = 8;
++    try std.testing.expect(s.keep(&t1, 8, null, &.{}));
++    try std.testing.expectEqual(@as(u32, 8), s.find(&t2, &.{}).?.at);
++    // off: the same state is passed over (its position is not on the grid, and the tail rule cannot cover it)
++    var g: Fake = .{ .gpa = gpa };
++    var s2 = Store.init(gpa, g.snapshots(), .{ .grid = 2048, .window = 128, .tail = 128, .min_prompt = 0 }, 1 << 20);
++    defer s2.deinit();
++    g.sum = fresh(&t1);
++    g.at = 8;
++    try std.testing.expect(s2.keep(&t1, 8, null, &.{}));
++    try std.testing.expect(s2.find(&t2, &.{}) == null);
++}
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 0b0f367..b8a74f7 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -456,6 +456,10 @@ pub const Snap = struct {
+     restored: bool = false, // read back from the spill tier
+     part: u8 = 0, // TF_DS_KV_SHARD: the part holding its rows (parts.zig's Kept; a live move changes it)
+     shared: bool = false, // kept at a shared cut (prompt_cache's Snapshots.share): placement's last victim (TF_DS_KEEP_PROTECT=1)
++    // TF_DS_EXACT_RESUME: an off-grid state's tail, the window rows of decoder input before `at` (the ring by position)
++    tail: ?cuda.DeviceBuffer = null,
++    tail_start: usize = 0, // the positions its tail holds, [tail_start, tail_end)
++    tail_end: usize = 0,
+ };
+ 
+ /// Kept states this long or longer say so in the log when they go stale (their prompts then run again from 0).
+@@ -558,6 +562,7 @@ pub const Lanes = struct {
+         self.stopKv();
+         for (self.snaps.items) |sn| {
+             sn.buf.free();
++            if (sn.tail) |*b| b.free();
+             self.gpa.destroy(sn);
+         }
+         self.snaps.deinit(self.gpa);
+@@ -903,7 +908,9 @@ pub const Lanes = struct {
+             const start = f.start;
+             const len = f.len;
+             if (start > 0 and s.isCancelled()) return error.Cancelled;
+-            const n = @min(model.chunk_rows, len - start);
++            const n0 = chunkRows(start, len);
++            // TF_DS_DEBUG_SPLIT=p: the chunk holding p is cut in two at p (step 0's shape experiment; a cold pass)
++            const n = if (m.debug_split) |p| (if (start < p and p < start + n0) p - start else n0) else n0;
+             // TF_DS_KV_SHARD pins the twins for the whole chunk: it runs whole
+             const sliced = m.slice_layers > 0 and self.kv == null and midWanted(s);
+             if (!sliced) if (try self.begin(.fill_chunk)) {
+@@ -934,6 +941,12 @@ pub const Lanes = struct {
+         if (f.start < f.len) return false;
+         const done = f.*;
+         self.fill = null;
++        // TF_DS_EXACT_RESUME: the pass's own end, an even position: the off-grid state a later turn resumes on its
++        // tail's rows (the cache planned it in marks, and the pass's tail holds the window's rows before it)
++        if (self.m.exact_resume and done.len >= 2) if (s.reuse.hook) |k| {
++            const at: usize = done.len & ~@as(usize, 1);
++            if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) k.at(k.ptr, s, @intCast(at));
++        };
+         if (self.prof) |*p| p.prefills += 1;
+         if (!done.head) return error.NoPromptLogits;
+         // a state read back from disk: the drafter's rings were rebuilt by the replay before the first draft
+@@ -949,7 +962,14 @@ pub const Lanes = struct {
+         return true;
+     }
+ 
+-    /// Whether the host would run rounds for other streams inside a chunk (Stream.between, between two layer slices).
++    /// A chunk's rows from `start` to the pass's end: the served chunk from a chunk end, and after a resume off the grid
++/// (TF_DS_EXACT_RESUME) the next chunk end, so every later chunk end lands on the grid and the keep hook and
++/// snapSaveFn keep firing.
++fn chunkRows(start: usize, len: usize) usize {
++    return @min(model.chunk_rows - start % model.chunk_rows, len - start);
++}
++
++/// Whether the host would run rounds for other streams inside a chunk (Stream.between, between two layer slices).
+     fn midWanted(s: *lanes.Stream) bool {
+         const b = s.between orelse return false;
+         if (s.images.len > 0) return false;
+@@ -1014,6 +1034,8 @@ pub const Lanes = struct {
+         const ids = s.prompt();
+         const len = ids.len;
+         if (len == 0) return error.EmptyPrompt;
++        // TF_DS_EXACT_RESUME: a picture's rows are placed by the state's position, which an off-grid resume does not cover
++        if (m.exact_resume and s.images.len > 0) return error.ExactResumeUnsupported;
+         const size = std.mem.alignForward(usize, len + s.max_new + m.eng.round_rows + 2, model.chunk_rows);
+         if (size > m.request_cap) return error.PromptTooLong; // (the pool's, unless TF_DS_POOL or TF_DS_KV_SHARD part it)
+         // TF_DS_KV_SHARD: parts.zig's planner places the extent inside one part (placeParts: part-local placeSoft and
+@@ -1164,6 +1186,13 @@ pub const Lanes = struct {
+                 try m.copyExtent(sn.base, base, sn.at);
+             }
+             try m.snapCopy(slot, sn.buf.ptr, false);
++            // TF_DS_EXACT_RESUME: the tail comes back with the state, and the pass resumes where the state stands
++            if (sn.tail) |tb| {
++                try m.tailCopy(slot, tb.ptr, false);
++                m.tails[slot].start = sn.tail_start;
++                m.tails[slot].end = sn.tail_end;
++                m.tails[slot].resume_at = sn.at;
++            }
+             start = sn.at;
+             s.cached = @intCast(sn.at);
+         }
+@@ -1376,7 +1405,19 @@ pub const Lanes = struct {
+     fn usable(self: *const Lanes, sn: *const Snap, len: usize) bool {
+         if (std.mem.indexOfScalar(*Snap, self.snaps.items, @constCast(sn)) == null) return false;
+         if (self.kv) |k| if (k.planner.keptIndex(sn.id) == null) return false; // (TF_DS_KV_SHARD: its rows the planner holds)
+-        return !sn.stale and !sn.loading and sn.at > 0 and sn.at < len and sn.at % model.chunk_rows == 0 and sn.at <= len -| self.m.cfg.window;
++        if (sn.stale or sn.loading or sn.at == 0 or sn.at >= len) return false;
++        // TF_DS_EXACT_RESUME: an off-grid state nearer the end than the window resumes on its tail's rows
++        if (sn.tail != null) return tailPre(sn, len, self.m.cfg.window) != null;
++        return sn.at % model.chunk_rows == 0 and sn.at <= len -| self.m.cfg.window;
++    }
++
++    /// TF_DS_EXACT_RESUME: the rows a pass resuming from a tail-carrying state at a prompt of `len` tokens takes from
++    /// that tail before the state's position (null: the tail does not hold the replay's rows, so it runs from 0).
++    fn tailPre(sn: *const Snap, len: usize, window: usize) ?usize {
++        if (sn.at == 0 or sn.at >= len) return null;
++        const replay = len -| window;
++        if (sn.tail_start > replay or sn.tail_end < sn.at) return null;
++        return sn.at -| replay;
+     }
+ 
+     /// The first extent that fits around the live streams and the kept states. Kept states give their room oldest
+@@ -1463,7 +1504,18 @@ pub const Lanes = struct {
+     /// The prompt cache's Snapshots functions (native.zig hands them to the CUDA host).
+     pub fn snapBytesFn(ptr: *anyopaque, at: u32) u64 {
+         _ = at;
+-        return of(ptr).m.snapBytes();
++        const m = of(ptr).m;
++        // TF_DS_EXACT_RESUME: a state kept at the pass's end carries its tail (the prompt cache budgets it so)
++        return m.snapBytes() + (if (m.exact_resume) m.tailBytes() else 0);
++    }
++
++    /// TF_DS_EXACT_RESUME: whether a keep at `at` is a chunk end this pass may take (null: refused), and whether it
++    /// carries a tail (the pass's own end).
++    fn keepKind(exact_resume: bool, at: usize, prompt_len: usize, window: usize) ?bool {
++        if (at == 0 or at > prompt_len) return null;
++        if (exact_resume and at + 1 >= prompt_len) return true; // the pass's own end: off-grid, with the tail
++        if (at % model.chunk_rows != 0 or at > prompt_len -| window) return null;
++        return false;
+     }
+ 
+     /// The live state at `at` (the pass stands at that chunk end): the slot's own part copied, the extent's rows kept.
+@@ -1471,11 +1523,22 @@ pub const Lanes = struct {
+         const self = of(ptr);
+         const s: *const lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
+         const l = self.streams.getPtr(s) orelse return error.UnknownStream;
+-        if (at == 0 or at % model.chunk_rows != 0 or at > s.prompt_len -| self.m.cfg.window) return error.NotAChunkEnd;
++        const window = self.m.cfg.window;
++        const tail = keepKind(self.m.exact_resume, at, s.prompt_len, window) orelse return error.NotAChunkEnd;
+         const sn = try self.gpa.create(Snap);
+         errdefer self.gpa.destroy(sn);
+         sn.* = .{ .id = self.next_snap, .at = at, .base = l.base, .end = l.end, .part = l.part, .buf = try cuda.DeviceBuffer.alloc(self.m.ctx.d, self.m.snapBytes()), .slot = @intCast(l.slot) };
+         errdefer sn.buf.free();
++        if (tail) {
++            // the pass's stash: the window rows before `at` (a keep it did not reach refuses)
++            const t = self.m.tails[l.slot];
++            if (t.buf == 0 or t.end < at) return error.NotAChunkEnd;
++            sn.tail = try cuda.DeviceBuffer.alloc(self.m.ctx.d, self.m.tailBytes());
++            errdefer if (sn.tail) |*b| b.free();
++            try self.m.tailCopy(l.slot, sn.tail.?.ptr, true);
++            sn.tail_start = t.start;
++            sn.tail_end = t.end;
++        }
+         try self.snaps.append(self.gpa, sn);
+         self.next_snap += 1;
+         if (try self.begin(.snap_save)) {
+@@ -1516,6 +1579,7 @@ pub const Lanes = struct {
+         // TF_DS_KV_SHARD: the planner's record goes too (deferred while a copy or carry still reads its rows)
+         if (self.kv) |k| k.drop(sn.id) catch |err| std.log.err("dsv41: the parts' planner kept a dropped prompt state: {s}", .{@errorName(err)});
+         sn.buf.free();
++        if (sn.tail) |*b| b.free();
+         self.gpa.destroy(sn);
+     }
+ 
+@@ -1610,6 +1674,7 @@ pub const Lanes = struct {
+         if (self.kv) |k| k.unhold(sn.id) catch |err| std.log.warn("dsv41: a discarded restore kept its part's hold: {s}", .{@errorName(err)});
+         if (std.mem.indexOfScalar(*Snap, self.snaps.items, sn)) |i| _ = self.snaps.orderedRemove(i);
+         sn.buf.free();
++        if (sn.tail) |*b| b.free();
+         self.gpa.destroy(sn);
+     }
+ 
+@@ -2175,12 +2240,14 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+                 const id = try r.int(u64);
+                 const s: usize = try r.int(u32);
+                 if (s >= max_streams) return error.BadSlot;
+-                var b = try cuda.DeviceBuffer.alloc(m.ctx.d, m.snapBytes());
++                // TF_DS_EXACT_RESUME: a state's tail (the window rows of decoder input before its end) rides after it
++                var b = try cuda.DeviceBuffer.alloc(m.ctx.d, m.snapBytes() + (if (m.exact_resume) m.tailBytes() else 0));
+                 m.snapCopy(s, b.ptr, true) catch |err| {
+                     b.free();
+                     refused(err);
+                     continue;
+                 };
++                if (m.exact_resume) m.tailCopy(s, b.ptr + m.snapBytes(), true) catch |err| refused(err);
+                 try kept.put(gpa, id, b);
+             },
+             .snap_restore => {
+@@ -2196,6 +2263,11 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+                     m.copyExtent(from, to, at) catch |err| refused(err);
+                 }
+                 m.snapCopy(s, b.ptr, false) catch |err| refused(err);
++                // TF_DS_EXACT_RESUME: the tail back into the slot's ring, and the pass resumes where the state stands
++                if (m.exact_resume) {
++                    m.tailCopy(s, b.ptr + m.snapBytes(), false) catch |err| refused(err);
++                    m.tails[s].resume_at = at;
++                }
+             },
+             .snap_drop => {
+                 const id = try r.int(u64);
+@@ -2494,6 +2566,57 @@ test "a restore's destination is held back from placement, never a victim and ne
+     try std.testing.expect(ln.spill == null);
+ }
+ 
++test "TF_DS_EXACT_RESUME: an off-grid state with a covering tail resumes, a grid state as ever, neither without its tail" {
++    const c = model.chunk_rows;
++    const gpa = std.testing.allocator;
++    var m: Model = undefined;
++    m.cfg.window = 128;
++    var ln: Lanes = .{ .gpa = gpa, .m = &m, .peer = null };
++    defer ln.snaps.deinit(gpa);
++    // a grid state: as ever (a chunk end before the replay), with the switch on or off
++    var grid: Snap = .{ .id = 1, .at = 2 * c, .base = 0, .end = 4 * c, .buf = undefined };
++    try ln.snaps.append(gpa, &grid);
++    try std.testing.expect(ln.usable(&grid, 3 * c));
++    try std.testing.expect(!ln.usable(&grid, 2 * c + 127)); // nearer than the window
++    try std.testing.expect(!ln.usable(&grid, 2 * c)); // its own position: nothing to run
++    // the pass's end, off the grid: the tail holds the window's rows before it, so a turn of one token resumes
++    var end: Snap = .{ .id = 2, .at = 10_000, .base = 0, .end = 10_000, .buf = undefined, .tail = undefined, .tail_start = 10_000 - 128, .tail_end = 10_000 };
++    try ln.snaps.append(gpa, &end);
++    try std.testing.expect(ln.usable(&end, 10_001));
++    try std.testing.expect(ln.usable(&end, 12_000));
++    try std.testing.expect(!ln.usable(&end, 10_000));
++    try std.testing.expectEqual(@as(?usize, 127), Lanes.tailPre(&end, 10_001, 128)); // the rows [replay, at) come from the tail
++    // a tail that does not hold the new replay is refused (a stash short of the window)
++    end.tail_start = 10_000 - 20;
++    try std.testing.expectEqual(@as(?usize, null), Lanes.tailPre(&end, 10_050, 128)); // replay 9,922 is before 9,980
++    try std.testing.expect(!ln.usable(&end, 10_050));
++    try std.testing.expect(ln.usable(&end, 10_200)); // replay 10,072 is inside it
++}
++
++test "TF_DS_EXACT_RESUME: a chunk's rows are as ever from a chunk end, and reach the next one from an off-grid resume" {
++    const c = model.chunk_rows;
++    try std.testing.expectEqual(c, Lanes.chunkRows(0, 10_000)); // (the served chunks, unchanged)
++    try std.testing.expectEqual(c, Lanes.chunkRows(2 * c, 10_000));
++    try std.testing.expectEqual(@as(usize, 100), Lanes.chunkRows(2 * c, 2 * c + 100));
++    try std.testing.expectEqual(c - 100, Lanes.chunkRows(2 * c + 100, 10_000)); // off the grid: to the next chunk end
++    try std.testing.expectEqual(@as(usize, 20), Lanes.chunkRows(2 * c + 100, 2 * c + 120));
++}
++
++test "TF_DS_EXACT_RESUME: a pass's end is kept off the grid with its tail; grid keeps as ever, nothing without the switch" {
++    const c = model.chunk_rows;
++    // grid keeps: a chunk end before the replay, the same with the switch on or off
++    try std.testing.expectEqual(@as(?bool, false), Lanes.keepKind(false, 2 * c, 10_000, 128));
++    try std.testing.expectEqual(@as(?bool, false), Lanes.keepKind(true, 2 * c, 10_000, 128));
++    try std.testing.expectEqual(@as(?bool, false), Lanes.keepKind(true, 2 * c, 2 * c + 128, 128));
++    try std.testing.expectEqual(@as(?bool, null), Lanes.keepKind(true, 2 * c, 2 * c + 127, 128)); // nearer than the window, not the end
++    // the pass's own end: off the grid with the switch on (its tail), refused off
++    try std.testing.expectEqual(@as(?bool, true), Lanes.keepKind(true, 10_000, 10_001, 128));
++    try std.testing.expectEqual(@as(?bool, true), Lanes.keepKind(true, 10_000, 10_000, 128));
++    try std.testing.expectEqual(@as(?bool, null), Lanes.keepKind(false, 10_000, 10_001, 128));
++    try std.testing.expectEqual(@as(?bool, null), Lanes.keepKind(true, 0, 10_000, 128));
++    try std.testing.expectEqual(@as(?bool, null), Lanes.keepKind(true, 10_002, 10_001, 128)); // past the prompt
++}
++
+ test "a restore's destination holds the waiting prompt's room past its rows while that fits clear of the others" {
+     const c = model.chunk_rows;
+     var m: Model = undefined;
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 237ade0..909fa3c 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -310,7 +310,7 @@ pub fn main(init: std.process.Init) !u8 {
+     if (spill != null) {
+         const L = dsv41.lanes.Lanes;
+         snap_vt = .{ .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .usable = L.usableFn, .share = L.snapShareFn };
+-        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")), .keep_protect = pcache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null) }, @intFromFloat(cache_gib * (1 << 30)));
++        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")), .keep_protect = pcache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null), .exact = pcache.exactResume(if (std.c.getenv("TF_DS_EXACT_RESUME")) |v| std.mem.span(v) else null) }, @intFromFloat(cache_gib * (1 << 30)));
+         var seed: [4]u8 = undefined;
+         io.random(&seed);
+         store_v.setTier(ln.spill.?.tier(), std.mem.readInt(u32, &seed, .little));
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index ff87bac..99f536d 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -6,6 +6,7 @@
+ //! the windows' taps absorbed (verify), and the drafter's batched pass (pass). Every primitive is the gates' own code
+ //! path (prompt.zig, round.zig, draft.zig) with no checks.
+ const std = @import("std");
++const api = @import("engine_api");
+ const cuda = @import("cuda");
+ const Config = @import("config.zig").Config;
+ const rank_cache = @import("rank_cache.zig");
+@@ -141,6 +142,7 @@ pub const Model = struct {
+     window_rows: usize, // Options.window_rows
+     gemm_rows: usize, // Options.gemm_rows
+     slice_layers: usize, // Options.slice_layers
++    debug_split: ?usize = null, // TF_DS_DEBUG_SPLIT=p: a cold pass's chunk holding p is cut in two at p (step 0)
+     rs: Resume, // the chunk part run between two slices
+     round_ms: []const f64, // the lane core's round costs by rows (Options.round_ms, else draft.round_ms)
+     pool_cap: usize,
+@@ -200,6 +202,11 @@ pub const Model = struct {
+     // the filling prompt's image spans and their rows (setImages; cleared by fillBegin)
+     spans: std.ArrayList(prompt.Span) = .empty,
+     img_buf: ?cuda.DeviceBuffer = null,
++    // TF_DS_EXACT_RESUME: every slot's tail (prompt.Tail: the last window rows of a prompt pass's decoder input, a ring)
++    // and the device buffer they share; no tails with the switch off
++    exact_resume: bool = false,
++    tails: []prompt.Tail = &.{},
++    tail_buf: ?cuda.DeviceBuffer = null,
+     // profiling (lanes' --profile): the last round's forward and absorb, synchronized apart (ns)
+     prof: bool = false,
+     timer: ?*round.PhaseTimer = null, // a profile's GPU time by phase (eager rounds)
+@@ -229,6 +236,10 @@ pub const Model = struct {
+         errdefer gpa.destroy(m);
+         m.* = undefined;
+         m.gpa = gpa;
++        m.exact_resume = api.prompt_cache.exactResume(envOf("TF_DS_EXACT_RESUME")); // every rank alike
++        m.tails = &.{};
++        m.tail_buf = null;
++        errdefer if (m.tail_buf) |*b| b.free();
+         if (std.c.getenv("TF_DS_REPLAY_FLOOR")) |v| prompt.replay_floor = std.mem.eql(u8, std.mem.span(v), "1"); // every rank alike
+         const idx_split_env = std.c.getenv("TF_DS_IDX_SPLIT"); // every rank alike
+         prompt.idx_split = if (idx_split_env) |v| std.mem.eql(u8, std.mem.span(v), "1") else true;
+@@ -250,6 +261,15 @@ pub const Model = struct {
+         m.gemm_rows = o.gemm_rows;
+         if (o.slice_layers > max_slice_layers) return error.BadSliceLayers;
+         m.slice_layers = o.slice_layers;
++        // TF_DS_EXACT_RESUME keeps off-grid states in memory only: a chunk's slices are not covered yet
++        if (m.exact_resume and m.slice_layers > 0) return error.ExactResumeUnsupported;
++        // TF_DS_DEBUG_SPLIT=p (step 0's identity experiment): a cold pass cuts the chunk holding p in two at p (even)
++        m.debug_split = null;
++        if (envOf("TF_DS_DEBUG_SPLIT")) |v| {
++            const p = std.fmt.parseInt(usize, std.mem.trim(u8, v, " "), 10) catch return error.BadDebugSplit;
++            if (p == 0 or p % 2 != 0) return error.BadDebugSplit; // (a ratio-2 layer refuses an odd chunk start)
++            m.debug_split = p;
++        }
+         m.rs = .{};
+         m.round_ms = o.round_ms orelse &draft.round_ms;
+         if (m.round_ms.len == 0) return error.BadRoundMs;
+@@ -328,6 +348,7 @@ pub const Model = struct {
+         const window = ag.window;
+         m.pool_cap = pool;
+         if (mode != .off and (o.world != 2 or sp.pair != null)) return error.KvShardNeedsTwoRanks;
++        if (m.exact_resume and mode != .off) return error.ExactResumeUnsupported; // (the parts' planner is not covered)
+         const pl = try shard.plan(pool, window, o.round_rows, o.world, mode != .off);
+         // (with the spill tier: spillLayout is owner_sharded with the part size, so its compat digest and block lineage
+         // carry the owner layout and the part salt; spill_state packs a sharded plane's part-local rows)
+@@ -407,6 +428,14 @@ pub const Model = struct {
+         m.eng.gemm_rows = m.gemm_rows;
+         m.eng.plain_rows = o.plain_rows;
+         m.ch = try prompt.Chunk.init(&m.eng, &m.arena, chunk_rows, m.request_cap);
++        // TF_DS_EXACT_RESUME: every slot's tail (a prompt pass's last window decoder-input rows, a ring by position)
++        if (m.exact_resume) {
++            m.tails = try a.alloc(prompt.Tail, m.streams);
++            for (m.tails) |*t| t.* = .{};
++            const b = try cuda.DeviceBuffer.alloc(d, m.streams * m.tailBytes());
++            m.tail_buf = b;
++            for (m.tails, 0..) |*t, i| t.buf = b.ptr + i * m.tailBytes();
++        }
+         errdefer if (m.kvs) |*x| x.k.unload(); // (registered before the load: nothing between them leaks it)
+         if (mode != .off) {
+             // TF_DS_KV_SHARD: the fetch kernels, the parts (a trash row a round row), owner-only planes
+@@ -691,6 +720,7 @@ pub const Model = struct {
+         m.stream.synchronize() catch {};
+         if (m.img_buf) |*b| b.free();
+         m.spans.deinit(m.gpa);
++        if (m.tail_buf) |*b| b.free();
+         if (m.graphs) |*g| g.deinit();
+         if (m.pgraphs) |*g| g.deinit();
+         if (m.timer) |t| {
+@@ -804,6 +834,21 @@ pub const Model = struct {
+         m.fill_seq = &.{};
+     }
+ 
++    /// TF_DS_EXACT_RESUME: a slot's tail's bytes, the window's h rows (bf16) then its pre rows (fp32).
++    pub fn tailBytes(m: *const Model) usize {
++        const c = &m.cfg;
++        return c.window * (c.hc * c.hidden * 2 + c.hc * 4);
++    }
++
++    /// TF_DS_EXACT_RESUME: slot `slot`'s tail into `dst` (save: true) or back from it, as it lies (a ring by position).
++    pub fn tailCopy(m: *Model, slot: usize, dst: u64, save: bool) !void {
++        const n = m.tailBytes();
++        const src = m.tails[slot].buf;
++        if (save) try m.ops.copyRows(m.stream, src, n, dst, n, n, 1) else try m.ops.copyRows(m.stream, dst, n, src, n, n, 1);
++        if (!save) m.tails[slot].start = 0; // (its positions: the resuming pass's own stash sets them)
++        if (!save) m.tails[slot].end = 0;
++    }
++
+     /// A kept prompt state's own bytes (the prompt cache's snapshots; the compressed plane stays in the stream's
+     /// extent): one slot's window ring of every layer and positional stores of every ratio-2 layer.
+     pub fn snapBytes(m: *const Model) usize {
+@@ -1296,6 +1341,8 @@ pub const Model = struct {
+ 
+     pub fn fillBegin(m: *Model, slot: usize, base: usize) !void {
+         if (slot >= m.streams) return error.BadSlot;
++        // TF_DS_EXACT_RESUME: this pass starts a tail of its own (fillOpen sets where it resumes and its rows)
++        if (m.exact_resume) m.tails[slot] = .{};
+         // a read-ahead an earlier pass left (cancelled between chunks) never feeds this one: a resume at that pass's
+         // next chunk start would otherwise take its rows, hashed from the other prompt's ids
+         m.dropChunk();
+@@ -1366,6 +1413,8 @@ pub const Model = struct {
+         var ahead: ?std.Thread = m.ahead;
+         m.ahead = null;
+         m.rs = .{ .live = true, .args = args };
++        // TF_DS_EXACT_RESUME: this chunk's tail rows go to its slot's tail (fillBegin's; a resumed pass's prepend too)
++        ch.tail = if (m.exact_resume) &m.tails[m.fill_slot] else null;
+         if (m.eh) |*eh| ref: {
+             // TF_DS_ENGRAM_LEAD: each layer's rows come from its own reader (engram_lead.zig), not the read-ahead below
+             if (eh.lead_on) {
+@@ -1695,6 +1744,15 @@ test "resetting the resume state joins the read-ahead and forgets the chunk" {
+     try std.testing.expect(!r.live);
+ }
+ 
++test "Model.open initialises TF_DS_EXACT_RESUME's fields and the debug split (0114's bug class)" {
++    // open starts from undefined, so a field it does not assign reads garbage: its init list names each one
++    const src = @embedFile("model.zig");
++    const at = std.mem.indexOf(u8, src, "pub fn open(").?;
++    const body = src[at..std.mem.indexOfPos(u8, src, at, "const d = ctx.d;").?];
++    for ([_][]const u8{ "m.exact_resume = ", "m.tails = ", "m.tail_buf = ", "m.debug_split = " }) |f|
++        try std.testing.expect(std.mem.indexOf(u8, body, f) != null);
++}
++
+ test "a round beside a part-run chunk leaves the read-ahead and the pass's ids when the rings are apart, else joins both" {
+     const ids = [_]i32{ 1, 2, 3 };
+     var m: Model = undefined;
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 34b6866..0858df4 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -214,6 +214,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     const port = std.fmt.parseInt(u16, getenv("TF_TP_PORT") orelse "29620", 10) catch return error.BadPort;
+     const arena_gib = if (getenv("TF_DS_ARENA_GIB")) |t| std.fmt.parseInt(usize, t, 10) catch return error.BadArena else 0;
+     if (o.spill != null) try spillPreflight(getenvFn); // (before the staging, the weights and the pool)
++    // TF_DS_EXACT_RESUME keeps off-grid prompt states in memory only: the spill tier's block store (2048-token blocks),
++    // TF_DS_KV_SHARD's planner and the sliced chunks are not covered yet (Model.open refuses the last two)
++    if (api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")) and o.spill != null) return error.ExactResumeUnsupported;
+     const pair_mode = try pairMode(getenvFn); // (a bad value refused before anything loads)
+     const st = try gpa.create(State);
+     errdefer gpa.destroy(st);
+@@ -497,10 +500,11 @@ pub fn rankExchange(gpa: std.mem.Allocator, io: std.Io, mo: model.Options, m: *m
+     const image_cache = spill_tier.Settings.imageCache(getenv("TF_DS_IMAGE_CACHE"));
+     const edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")); // (the marks gate: the fingerprint's reading)
+     const keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")); // (the victim order gate: the fingerprint's reading)
++    const exact_resume = api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")); // (the off-grid states' gate: the fingerprint's reading)
+     // TF_DS_KV_SHARD's switches every rank's planner takes (carry, twins) and its part size: agreed in `features`
+     const kvs: kv_lanes.Settings = if (m.kvs != null) try kv_lanes.Settings.fromEnv(getenvFn) else .{ .carry = false, .twins = false };
+     const part_rows: u64 = if (m.caches.shard) |x| x.part else 0;
+-    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .keep_protect = keep_protect, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
++    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .keep_protect = keep_protect, .exact_resume = exact_resume, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
+     var pbuf: [model.Model.spill.StateLayout.max_encoded]u8 = undefined;
+     const lp = try rank_identity.layoutPart(layout, m.world, &pbuf);
+     var arena = std.heap.ArenaAllocator.init(gpa);
+@@ -677,6 +681,8 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+         error.BadPlainRows => "TF_DS_PLAIN_ROWS: the rows a mixed pack's plain linear runs over, 0 (the round's own) or a count up to TF_DS_ROUND_ROWS",
+         error.BadStreams => "TF_DS_STREAMS: the pool's streams, 1 .. 16",
+         error.BadSliceLayers => model.slice_hint,
++        error.ExactResumeUnsupported => "TF_DS_EXACT_RESUME=1 keeps prompt states at a pass's end in memory only: run it without the spill tier (--spill-dir/--spill-gib, whose blocks are 2048 tokens), TF_DS_KV_SHARD=1, TF_DS_PREFILL_SLICE, and send no images",
++        error.BadDebugSplit => "TF_DS_DEBUG_SPLIT: an even position inside a prompt whose chunk a cold pass cuts in two there (unset: no cut)",
+         error.ContextFull => "the streams' prompts and budgets fill the context's pool: lower max_tokens, or retry when a stream ends",
+         error.PromptTooLong => "the prompt and its max_tokens do not fit the context window",
+         error.NoVisionKit => "this checkpoint reads images: its kit (TF_DS_KIT) needs vision/torch_fmha_sm120.cubin and vision/gate_bias_vl.safetensors",
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index dd0a30e..250b291 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -164,6 +164,112 @@ pub const Engine = struct {
+ /// An image span of the prompt: positions [at, at + len), its rows from row `row` of the image rows buffer.
+ pub const Span = struct { at: usize, len: usize, row: usize };
+ 
++/// TF_DS_EXACT_RESUME (Model.tails): a slot's last `window` rows of a prompt pass's decoder input, a ring by position
++/// (the row at position p at slot p % window), h then pre: the rows a resumed pass replays from before its start.
++pub const Tail = struct {
++    buf: u64 = 0, // bf16 [window, hc, D] then fp32 [window, hc]
++    start: usize = 0, // the positions the ring holds, [start, end) (0 and 0: none)
++    end: usize = 0,
++    resume_at: usize = 0, // where the pass resumes (0: from the start): only its first chunk takes rows from the tail
++};
++
++/// TF_DS_EXACT_RESUME: the rows a pass takes from its tail before its start (replayCut's prepend), 0 for none: the
++/// pass's first chunk (start == the resume point) whose replay reaches before it, the tail holding [replay, start).
++/// error.TailUncovered: the tail does not hold them.
++pub fn tailPre(ch_start: usize, replay: usize, t: *const Tail) !usize {
++    if (ch_start != t.resume_at or replay >= ch_start) return 0;
++    if (replay < t.start or ch_start > t.end) return error.TailUncovered;
++    return ch_start - replay;
++}
++
++/// TF_DS_EXACT_RESUME: the tail rows a chunk adds, [lo, hi): its rows in the pass's last `window` positions.
++pub fn tailRows(ch_start: usize, ch_n: usize, replay: usize, window: usize) [2]usize {
++    const hi = @min(ch_start + ch_n, replay + window);
++    return .{ @max(ch_start, hi -| window), hi };
++}
++
++test "a tail's prepend and its rows: the pass's first chunk takes [replay, start) from the ring, a later chunk none" {
++    // a previous pass ending at 10,000: the ring holds [9,872, 10,000)
++    var t: Tail = .{ .start = 10_000 - 128, .end = 10_000, .resume_at = 10_000 };
++    try std.testing.expectEqual(@as(usize, 100), try tailPre(10_000, 10_000 - 128 + 28, &t)); // 128 - 28 rows before the resume
++    try std.testing.expectEqual(@as(usize, 0), try tailPre(10_000, 10_000, &t)); // replay at the start: nothing to prepend
++    try std.testing.expectEqual(@as(usize, 1), try tailPre(10_000, 9_999, &t)); // a row before it comes from the ring
++    t.resume_at = 8_192; // a later chunk: its start is not the resume point
++    try std.testing.expectEqual(@as(usize, 0), try tailPre(10_240, 10_000, &t));
++    // the ring's rows a chunk adds: the last `window` positions of the pass, never more
++    try std.testing.expectEqual([2]usize{ 10_000, 10_128 }, tailRows(9_000, 1_128, 10_000, 128));
++    try std.testing.expectEqual([2]usize{ 10_000, 10_050 }, tailRows(10_000, 50, 10_000, 128));
++    // a tail that does not hold the replay is refused (the prompt was shorter than the window)
++    var short: Tail = .{ .start = 0, .end = 100, .resume_at = 100 };
++    try std.testing.expectEqual(@as(usize, 100), try tailPre(100, 0, &short)); // the whole state, its prompt shorter than the window
++    try std.testing.expectError(error.TailUncovered, tailPre(100, 0, &.{ .start = 40, .end = 100, .resume_at = 100 }));
++}
++
++test "TF_DS_EXACT_RESUME: a pass's tail across chunks, its turn's deltas, and the prepend a cold pass's rows take" {
++    const window = 128;
++    const Ring = struct {
++        const none = std.math.maxInt(usize);
++        /// The pass's chunks (2048 rows, the last shorter) stashed into the ring: slot -> the position it holds.
++        fn stash(ring: []usize, len: usize, window_: usize, chunks: []const usize) void {
++            @memset(ring, none);
++            var start: usize = 0;
++            var i: usize = 0;
++            while (start < len) : (i += 1) {
++                const n = @min(if (i < chunks.len) chunks[i] else 2048, len - start);
++                const r = tailRows(start, n, len -| window_, window_);
++                for (r[0]..r[1]) |p| ring[p % window_] = p;
++                start += n;
++            }
++        }
++        /// The ring holds exactly the positions [lo, hi) (each at its slot).
++        fn holds(ring: []const usize, lo: usize, hi: usize, window_: usize) bool {
++            for (lo..hi) |p| if (ring[p % window_] != p) return false;
++            return true;
++        }
++    };
++    var ring: [window]usize = undefined;
++    // a cold pass: the whole prompt under the window, the window's last rows at or past it (an exact grid multiple too)
++    for ([_]usize{ 1, 127, 128, 129, 2 * 2048, 10_000 }) |len| {
++        Ring.stash(&ring, len, window, &.{});
++        try std.testing.expect(Ring.holds(&ring, len -| window, len, window));
++    }
++    // a prompt whose last window's rows span two chunks: both stashed, the ring holds them in position order
++    Ring.stash(&ring, 2 * 2048 + 100, window, &.{});
++    try std.testing.expect(Ring.holds(&ring, 2 * 2048 + 100 - window, 2 * 2048 + 100, window));
++    // a resumed pass re-stashes its own rows over the ones it dropped: the ring holds the last window positions
++    Ring.stash(&ring, 10_000, window, &.{});
++    const st: Tail = .{ .start = 10_000 - window, .end = 10_000, .resume_at = 10_000 };
++    const r2 = tailRows(10_000, 50, 10_050 -| window, window);
++    for (r2[0]..r2[1]) |p| ring[p % window] = p;
++    try std.testing.expect(Ring.holds(&ring, 10_050 -| window, 10_050, window));
++    // a turn's deltas: the rows the pass takes from the tail before its state, 0 once the replay is past it
++    for ([_]struct { d: usize, pre: usize }{ .{ .d = 1, .pre = 127 }, .{ .d = 127, .pre = 1 }, .{ .d = 128, .pre = 0 }, .{ .d = 129, .pre = 0 }, .{ .d = 2048, .pre = 0 }, .{ .d = 2049, .pre = 0 } }) |c| {
++        try std.testing.expectEqual(@as(usize, c.pre), try tailPre(st.resume_at, 10_000 + c.d - window, &st));
++    }
++    // an odd end is kept one short (a ratio-2 layer refuses an odd start): its tail is the window before that
++    Ring.stash(&ring, 10_001, window, &.{});
++    const odd: Tail = .{ .start = 10_001 - window, .end = 10_001, .resume_at = 10_000 };
++    try std.testing.expectEqual(@as(usize, 126), try tailPre(odd.resume_at, 10_002 - window, &odd));
++    // the decoder's input rows: the tail's before the state, the chunk's after it, in the position order a cold pass
++    // lays them out (the same rows for the same positions)
++    const len2 = 10_001;
++    const pre = try tailPre(st.resume_at, len2 - window, &st);
++    const replay = len2 - window;
++    var got: [window]usize = undefined;
++    var i: usize = 0;
++    for (replay..st.resume_at) |p| {
++        got[i] = ring[p % window];
++        i += 1;
++    }
++    for (st.resume_at..len2) |p| {
++        got[i] = p;
++        i += 1;
++    }
++    try std.testing.expectEqual(window, i);
++    try std.testing.expectEqual(@as(usize, 127), pre);
++    for (got[0..i], 0..i) |g, j| try std.testing.expectEqual(replay + j, g);
++}
++
+ /// The rows [r0, r1) of the chunk (relative to its start) a span covers, if any.
+ fn overlap(sp: Span, start: usize, n: usize) ?[2]usize {
+     const lo = @max(sp.at, start);
+@@ -173,6 +279,7 @@ fn overlap(sp: Span, start: usize, n: usize) ?[2]usize {
+ 
+ pub const Chunk = struct {
+     cap: usize,
++    tail: ?*Tail = null, // TF_DS_EXACT_RESUME: the slot's tail (Model.tails; null: the switch off)
+     spans: []const Span = &.{}, // the prompt's image spans (absolute positions)
+     img_rows: u64 = 0, // bf16 [span tokens, D]: their rows
+     pick_vl: u64 = 0, // int32 [cap, slots]: the routing of span rows with the image bias, before it joins pick
+@@ -311,6 +418,7 @@ pub const Chunk = struct {
+         ch.sf_cum_rows = 0;
+         ch.sf_sums = 0;
+         ch.cap = cap;
++        ch.tail = null;
+         ch.n = 0;
+         ch.start = 0;
+         ch.pending = false;
+@@ -2197,37 +2305,79 @@ fn indexRowBlock(n: usize, n_comp_end: usize) usize {
+     return @max(16, @min(n, (@as(usize, 1) << 26) / (4 * @max(n_comp_end, 1)) / 16 * 16));
+ }
+ 
++/// TF_DS_EXACT_RESUME: `rows` rows of the ring at `ring` from position `p0`, to/from `dst`'s rows at `dst_row` (a row
++/// `rb` bytes), in two copies when the ring wraps.
++fn tailRowsCopy(e: *const Engine, ring: u64, dst: u64, dst_row: usize, rb: usize, p0: usize, rows: usize, from_ring: bool) !void {
++    const slots = e.c.window;
++    const slot = p0 % slots;
++    const n1 = @min(rows, slots - slot);
++    const src = ring + slot * rb;
++    const dst1 = dst + dst_row * rb;
++    if (from_ring) {
++        try e.ops.copyRows(e.s, src, rb, dst1, rb, rb, n1);
++        if (rows > n1) try e.ops.copyRows(e.s, ring, rb, dst1 + n1 * rb, rb, rb, rows - n1);
++    } else {
++        try e.ops.copyRows(e.s, dst1, rb, src, rb, rb, n1);
++        if (rows > n1) try e.ops.copyRows(e.s, dst1 + n1 * rb, rb, ring, rb, rb, rows - n1);
++    }
++}
++
++/// TF_DS_EXACT_RESUME: the tail takes this chunk's decoder input rows of the pass's last `window` positions (replayCut
++/// runs before the decoder layers, on the rows they read).
++fn tailStash(e: *const Engine, ch: *const Chunk, replay: usize) !void {
++    const t = ch.tail orelse return;
++    if (t.buf == 0) return;
++    const c = e.c;
++    const r = tailRows(ch.start, ch.n, replay, c.window);
++    if (r[1] <= r[0]) return;
++    const row_h = c.hc * c.hidden * 2;
++    const row_p = c.hc * 4;
++    try tailRowsCopy(e, t.buf, ch.h, r[0] - ch.start, row_h, r[0], r[1] - r[0], false);
++    try tailRowsCopy(e, t.buf + c.window * row_h, ch.pre, r[0] - ch.start, row_p, r[0], r[1] - r[0], false);
++    t.end = @max(t.end, r[1]);
++    t.start = t.end -| c.window;
++}
++
+ /// The decoder's bounded replay at its first layer (_forward_k's `replay`, CED's prefill): the layer's attention mixes
+ /// (the pending MoE post fused in) and its kv-source update over every row of the chunk, then the chunk cut to its rows
+ /// at positions >= replay, the streams and their pre copied down (h[first:], pre[first:]). The decoder layers then run
+ /// on those rows with no window key before replay and this layer's update done. False: an encoder-only chunk (no
+ /// row at or past replay), which ends here.
++///
++/// TF_DS_EXACT_RESUME: a resumed pass whose replay reaches before its start takes the rows [replay, start) from its
++/// tail first (the previous pass's decoder input), so the decoder runs on [replay, chunk end) as a cold pass would.
+ pub fn replayCut(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usize, replay: usize, host_pos: []i64) !bool {
+     try attnMixes(e, ch, li);
+     if (e.w.layers[li].comp_wkv == null) return error.NoKvSource;
+     try kvSourceUpdate(e, ch, cs, sh, li);
++    const c = e.c;
++    const pre = if (ch.tail) |t| try tailPre(ch.start, replay, t) else 0;
+     const first = @max(ch.start, replay) - ch.start;
+     if (first >= ch.n) return false;
+-    if (first == 0) return true;
+-    const c = e.c;
+-    const n = ch.n - first;
+-    const row_h = c.hc * c.hidden * 2;
+-    try e.ops.copyRows(e.s, ch.h + first * row_h, row_h, ch.h_alt, row_h, row_h, n);
+-    std.mem.swap(u64, &ch.h, &ch.h_alt);
+-    const row_p = c.hc * 4;
+-    try e.ops.copyRows(e.s, ch.pre + first * row_p, row_p, ch.pre_f, row_p, row_p, n);
+-    std.mem.swap(u64, &ch.pre, &ch.pre_f);
+-    ch.start += first;
+-    ch.n = n;
+-    // pos[first:]: a view, first * 8 bytes in (its alignment is the one the served kernels were specialized for). An odd
+-    // `first` leaves it off a 16-byte boundary, and the kit has no variant for some launches with such a view (a short
+-    // chunk's split attention: _sparse_attn_part with SPLITS > 1 and no row bases); the same positions copied, in the
+-    // stream's order, to a 16-byte boundary then: the kernels read the same values from an address they were captured for.
+-    _ = host_pos;
+-    if ((first * 8) % 16 != 0) {
+-        try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(ch.pos1, ch.pos + first * 8, n * 8, e.s.handle), "cuMemcpyDtoDAsync");
+-        ch.pos = ch.pos1;
+-    } else ch.pos += first * 8;
++    const n = ch.n - first + pre;
++    if (first > 0 or pre > 0) {
++        const row_h = c.hc * c.hidden * 2;
++        const row_p = c.hc * 4;
++        try e.ops.copyRows(e.s, ch.h + first * row_h, row_h, ch.h_alt + pre * row_h, row_h, row_h, ch.n - first);
++        if (pre > 0) try tailRowsCopy(e, ch.tail.?.buf, ch.h_alt + pre * row_h, 0, row_h, replay, pre, true);
++        std.mem.swap(u64, &ch.h, &ch.h_alt);
++        try e.ops.copyRows(e.s, ch.pre + first * row_p, row_p, ch.pre_f + pre * row_p, row_p, row_p, ch.n - first);
++        if (pre > 0) try tailRowsCopy(e, ch.tail.?.buf + c.window * row_h, ch.pre_f + pre * row_p, 0, row_p, replay, pre, true);
++        std.mem.swap(u64, &ch.pre, &ch.pre_f);
++        ch.start = replay;
++        ch.n = n;
++        // pos[first:]: a view, first * 8 bytes in (its alignment is the one the served kernels were specialized for). An odd
++        // `first` leaves it off a 16-byte boundary, and the kit has no variant for some launches with such a view (a short
++        // chunk's split attention: _sparse_attn_part with SPLITS > 1 and no row bases); the same positions copied, in the
++        // stream's order, to a 16-byte boundary then: the kernels read the same values from an address they were captured for.
++        _ = host_pos;
++        const src = if (pre > 0) ch.pos - pre * 8 else ch.pos + first * 8;
++        if ((ch.start * 8) % 16 != 0) {
++            try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(ch.pos1, src, n * 8, e.s.handle), "cuMemcpyDtoDAsync");
++            ch.pos = ch.pos1;
++        } else ch.pos = src;
++    }
++    try tailStash(e, ch, replay);
+     return true;
+ }
+ 
+diff --git a/zig/src/families/dsv41/rank_identity.zig b/zig/src/families/dsv41/rank_identity.zig
+index 45a1658..ad6e6b0 100644
+--- a/zig/src/families/dsv41/rank_identity.zig
++++ b/zig/src/families/dsv41/rank_identity.zig
+@@ -132,6 +132,7 @@ pub const Features = struct {
+     image_cache: bool = true,
+     edit_mark: bool = false, // TF_DS_EDIT_MARK (named in the string only when on)
+     keep_protect: bool = false, // TF_DS_KEEP_PROTECT (named in the string only when on)
++    exact_resume: bool = false, // TF_DS_EXACT_RESUME (named in the string only when on)
+     streams: u32,
+     round_rows: u32,
+     pool: u64,
+@@ -139,7 +140,8 @@ pub const Features = struct {
+ };
+ 
+ /// TF_DS_KV_SHARD adds "part=N;" (the part size: the owner layout's, also in the planes field), TF_DS_EDIT_MARK=1
+-/// "edit_mark=1;" and TF_DS_KEEP_PROTECT=1 "keep_protect=1;"; with none on, the bytes are what they always were.
++/// "edit_mark=1;", TF_DS_KEEP_PROTECT=1 "keep_protect=1;" and TF_DS_EXACT_RESUME=1 "exact_resume=1;"; with none on, the
++/// bytes are what they always were.
+ pub fn featureString(buf: []u8, f: Features) ![]const u8 {
+     const head = try std.fmt.bufPrint(buf, "spill={d};spill_min={d};kv_shard={d};kv_carry={d};twins={d};engram_lanes={d};image_cache={d};streams={d};round_rows={d};pool={d};drafts={d};", .{
+         @intFromBool(f.spill), f.spill_min_tokens, @intFromBool(f.kv_shard), @intFromBool(f.kv_carry), @intFromBool(f.twins),
+@@ -149,6 +151,7 @@ pub fn featureString(buf: []u8, f: Features) ![]const u8 {
+     if (f.kv_shard) n += (try std.fmt.bufPrint(buf[n..], "part={d};", .{f.part_rows})).len;
+     if (f.edit_mark) n += (try std.fmt.bufPrint(buf[n..], "edit_mark=1;", .{})).len; // named only when on: a mismatch with an off peer is a hello refusal
+     if (f.keep_protect) n += (try std.fmt.bufPrint(buf[n..], "keep_protect=1;", .{})).len;
++    if (f.exact_resume) n += (try std.fmt.bufPrint(buf[n..], "exact_resume=1;", .{})).len; // (a mismatch with an off peer refuses at the hello)
+     return buf[0..n];
+ }
+ 
+@@ -607,13 +610,16 @@ test "the features: off as they always were; TF_DS_KV_SHARD adds its switches an
+     try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=1;kv_carry=1;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=2101248;drafts=1;part=1050624;", on);
+ }
+ 
+-test "TF_DS_EDIT_MARK and TF_DS_KEEP_PROTECT are named in the features only when on (an off pair's string is unchanged)" {
++test "TF_DS_EDIT_MARK, TF_DS_KEEP_PROTECT and TF_DS_EXACT_RESUME are named in the features only when on (an off pair's string is unchanged)" {
+     var b: [256]u8 = undefined;
+     const edit = try featureString(&b, .{ .spill = true, .spill_min_tokens = 8192, .edit_mark = true, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
+     try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;edit_mark=1;", edit);
+     var b2: [256]u8 = undefined;
+     const both = try featureString(&b2, .{ .spill = true, .spill_min_tokens = 8192, .edit_mark = true, .keep_protect = true, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
+     try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;edit_mark=1;keep_protect=1;", both);
++    var b3: [256]u8 = undefined;
++    const exact = try featureString(&b3, .{ .spill = true, .spill_min_tokens = 8192, .exact_resume = true, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
++    try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;exact_resume=1;", exact);
+ }
+ 
+ test "TF_DS_KV_SHARD alone: a missing recipe identity reads unset, never a refusal; with the spill tier it is refused" {
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index b7f2160..5835353 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -460,7 +460,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+         if (want > 0) {
+             h.snap_vt = .{ .bytes = sn.bytes, .save = sn.save, .restore = sn.restore, .drop = sn.drop };
+             if (@hasField(@TypeOf(sn), "share")) h.snap_vt.share = sn.share;
+-            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")) }, want);
++            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")), .exact = api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")) }, want);
+             // the spill tier (off by default: nothing below runs then)
+             if (@hasField(@TypeOf(loaded), "tier")) {
+                 const store = &h.cache.?;
+-- 
+2.56.0
+
