@@ -1,0 +1,516 @@
+===== f013282 0250 dsv41: PDL entry splits around the fixed norm weights in the decode compressor and the indexer key (todo item: split PDL entry around proven independent work) =====
+
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index 4cac9f1..2158d37 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -11,15 +11,29 @@
+ // TF_DS_PDL: wait for the kernel this one follows (its memory flushed), then let the next one launch (programmatic
+ // dependent launches, sm_90+). Every kernel in this file takes `pdl` as its last argument (0: same instruction stream as
+ // before).
+-__device__ __forceinline__ void pdl_enter(int pdl) {
++//
++// A kernel with fixed model weights to read (the norm weights) splits the two: `pdl_launch` first so the successor may
++// be scheduled while this kernel still runs, the weight prefetch while this kernel's predecessor is still finishing,
++// then `pdl_wait` before the first byte the predecessor wrote. Every other kernel keeps the back-to-back form: the
++// launch-first order alone measured slower in the decode chain (wp4 chain, +0.6 us at R=48 nb=8192) because a
++// successor scheduled with nothing to do pre-wait only takes slots from the running kernel.
++__device__ __forceinline__ void pdl_launch(int pdl) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+-    if (pdl) {
+-        asm volatile("griddepcontrol.wait;" ::: "memory");
+-        asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+-    }
++    if (pdl) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++#endif
++}
++
++__device__ __forceinline__ void pdl_wait(int pdl) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
++    if (pdl) asm volatile("griddepcontrol.wait;" ::: "memory");
+ #endif
+ }
+ 
++__device__ __forceinline__ void pdl_enter(int pdl) {
++    pdl_wait(pdl);
++    pdl_launch(pdl);
++}
++
+ #define TF_FULL_MASK 0xffffffffu
+ 
+ // ops.rms_norm(x, w, eps) of rows of D bf16 values (D a multiple of 4, at least 128): out = bf16(w * (x * r)),
+@@ -288,9 +302,10 @@ __device__ __forceinline__ float tf_ds_kit_inverse_rms(float sum, float eps) {
+ // Decode RMSNorm, specialized to the two matching _rmsnorm cubins in kit abe07c7d.
+ // Each of the 128 threads loads one contiguous group. The 512-wide cubin starts with
+ // lane element 1 squared, then contracts elements 0, 2 and 3 into that sum.
+-template<int D>
++// PRELOAD: the caller read its weight element before griddepcontrol.wait (fixed model weights only).
++template<int D, bool PRELOAD = false>
+ __device__ __forceinline__ void tf_ds_triton_rmsnorm_row(const __nv_bfloat16* src, const __nv_bfloat16* w,
+-                                                         __nv_bfloat16* dst, float eps) {
++                                                         __nv_bfloat16* dst, float eps, __nv_bfloat16 wv = 0) {
+     static_assert(D == 128 || D == 512, "missing kit specialization");
+     constexpr int items = D / 128;
+     const int tid = threadIdx.x;
+@@ -316,7 +331,7 @@ __device__ __forceinline__ void tf_ds_triton_rmsnorm_row(const __nv_bfloat16* sr
+     #pragma unroll
+     for (int j = 0; j < items; ++j) {
+         const float y = __fmul_rn(x[j], inv);
+-        dst[base + j] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[base + j]), y));
++        dst[base + j] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(PRELOAD ? wv : w[base + j]), y));
+     }
+ }
+ 
+@@ -578,7 +593,7 @@ __device__ __forceinline__ void tf_ds_compress2x_norm_body(const float* ckv, lon
+                                                           const float* cgate, long long cgate_ld,
+                                                           const long long* rslot, float* ring_kv,
+                                                           float* ring_score, const long long* gi, long long src_rows,
+-                                                          const __nv_bfloat16* w, __nv_bfloat16* out, long long ldo,
++                                                          __nv_bfloat16 wv, __nv_bfloat16* out, long long ldo,
+                                                           int G, float eps, unsigned* invalid) {
+     const int g = blockIdx.x;
+     const int tid = threadIdx.x;
+@@ -637,7 +652,7 @@ __device__ __forceinline__ void tf_ds_compress2x_norm_body(const float* ckv, lon
+     const float total = __fadd_rn(__fadd_rn(warp_sum[0], warp_sum[2]), __fadd_rn(warp_sum[1], warp_sum[3]));
+     const float inv = tf_ds_kit_inverse_rms<D>(total, eps);
+     const float y = __fmul_rn(x, inv);
+-    out[g * ldo + tid] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[tid]), y));
++    out[g * ldo + tid] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(wv), y));
+ }
+ 
+ #define TF_DS_COMPRESS2X_NORM_KERNEL(name, D)                                                                          \
+@@ -645,10 +660,19 @@ __device__ __forceinline__ void tf_ds_compress2x_norm_body(const float* ckv, lon
+         long long cgate_ld, const long long* rslot, float* ring_kv, float* ring_score, const long long* gi,             \
+         long long src_rows, const __nv_bfloat16* w, __nv_bfloat16* out, long long ldo, int G, int D_, float eps,         \
+         unsigned* invalid, int pdl) {                                                                                   \
+-        pdl_enter(pdl);                                                                                                 \
+         (void)D_;                                                                                                       \
+-        tf_ds_compress2x_norm_body<D>(ckv, ckv_ld, cgate, cgate_ld, rslot, ring_kv, ring_score, gi, src_rows, w, out,    \
+-                                      ldo, G, eps, invalid);                                                            \
++        if (pdl) {                                                                                                      \
++            /* TF_DS_PDL: the successor may be scheduled now; the comp_norm weight is a fixed model weight (no writer \
++               in the round), so it is read here, before the wait for the predecessor's bytes. */                        \
++            pdl_launch(1);                                                                                              \
++            const __nv_bfloat16 wv = w[threadIdx.x];                                                                    \
++            pdl_wait(1);                                                                                                \
++            tf_ds_compress2x_norm_body<D>(ckv, ckv_ld, cgate, cgate_ld, rslot, ring_kv, ring_score, gi, src_rows, wv,  \
++                                          out, ldo, G, eps, invalid);                                                   \
++        } else {                                                                                                        \
++            tf_ds_compress2x_norm_body<D>(ckv, ckv_ld, cgate, cgate_ld, rslot, ring_kv, ring_score, gi, src_rows,       \
++                                          w[threadIdx.x], out, ldo, G, eps, invalid);                                   \
++        }                                                                                                               \
+     }
+ 
+ TF_DS_COMPRESS2X_NORM_KERNEL(tf_ds_compress2x_norm128_kernel, 128)
+@@ -830,11 +854,13 @@ extern "C" __global__ void __launch_bounds__(128) tf_ds_fused_idx_key_kernel(con
+                                                                              uint8_t* codes, uint8_t* scales,
+                                                                              const long long* rows_idx,
+                                                                              int D, int RD, float eps, int pdl) {
+-    pdl_enter(pdl);
++    pdl_launch(pdl);
++    const __nv_bfloat16 wv = w[threadIdx.x];   // the layer's index-key norm weight: fixed at load, no writer in the round
++    pdl_wait(pdl);
+     const int r = blockIdx.x;
+     __shared__ __nv_bfloat16 srow[512];   // D <= 512
+     // phase 1: _rmsnorm (x row -> srow, bf16)
+-    tf_ds_triton_rmsnorm_row<128>(x + (long long)r * ldx, w, srow, eps);
++    tf_ds_triton_rmsnorm_row<128, true>(x + (long long)r * ldx, w, srow, eps, wv);
+     __syncthreads();
+     // phases 2+3: _rope_heads (RD/2 pairs, head base = D - RD) and _fp4_store in one packed-column pass
+     tf_ds_key_store_row<false>(srow, cos, sin, pos[r], codes, scales, rows_idx[r], D, RD);
+===== d01975d 0217 dsv41: 0195's pool covers 131,072 columns through the opt-in dynamic shared limit (item 7) =====
+
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 04f9e6e..cef7bf4 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -27,9 +27,12 @@ pub fn fromText(text: ?[]const u8) error{BadIdxFused}!bool {
+ /// The selection's k bound (the pool's top blocks: candidate_blocks at both call sites, 2048 on this checkpoint).
+ pub const max_k = 2048;
+ /// The maxima's block count past which the fused launch keeps one block a row for work the unfused launches spread
+-/// over a 2D grid: the fused path covers the pool's regime (nbk > candidate_blocks) up to 8192 blocks (64K keys at
+-/// the served block size); past it the unfused sequence runs.
+-pub const max_nbk = 8192;
++/// over a 2D grid: the fused path covers the pool's regime (nbk > candidate_blocks) up to 16384 blocks (131,072
++/// columns at the served block size, a 262,144-token bucket at ratio 2); past it the unfused sequence runs. The bound
++/// is the GPU's opt-in dynamic shared memory (101,376 bytes here: 25,344 blocks of one fp32 maximum) rounded down to
++/// the served power of two, not the radix shortcut: that one skips the columns' two constant high bytes and would
++/// still hold to 65,536 blocks, where a column's inverted id leaves 0xFFFE in them.
++pub const max_nbk = 16384;
+ 
+ /// Rows at or below this use the small-row form: the maxima over the pool's own 2D grid (block_max), then the selection
+ /// from those global maxima in one CTA a row (tf_ds_idx_pick_kernel), because a single CTA a row leaves most of the GPU
+@@ -146,8 +149,9 @@ test "the switch parses its forms and nothing else" {
+ test "fuseOk takes the pool's bounds" {
+     try std.testing.expect(fuseOk(true, 16, 16392, 8, 2049, 2048)); // the smallest pooled case
+     try std.testing.expect(fuseOk(true, 1, 64, 8, 8, 4));
+-    try std.testing.expect(fuseOk(true, 2048, 65536, 8, 8192, 2048)); // the nbk cap, inclusive
+-    try std.testing.expect(!fuseOk(true, 16, 65544, 8, 8193, 2048)); // past the cap
++    try std.testing.expect(fuseOk(true, 2048, 131072, 8, 16384, 2048)); // the nbk cap, inclusive
++    try std.testing.expect(!fuseOk(true, 16, 131080, 8, 16385, 2048)); // past the cap
++    try std.testing.expect(fuseOk(true, 2048, 65536, 8, 8192, 2048)); // the old cap is inside the new one
+     try std.testing.expect(!fuseOk(false, 16, 16392, 8, 2049, 2048));
+     try std.testing.expect(!fuseOk(true, 0, 16392, 8, 2049, 2048));
+     try std.testing.expect(!fuseOk(true, 16, 16392, 8, 2050, 2048)); // nbk disagrees with width/bsize
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 015208a..604bc94 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -156,7 +156,7 @@ pub const Ops = struct {
+         const compress2_norm_on = try compress2_norm.fromText(envSpan(compress2_norm.env_name));
+         const rope_store_on = try rope_store.fromText(envSpan(rope_store.env_name));
+         const pdl = onValue(envSpan(pdl_env));
+-        return .{
++        const o: Ops = .{
+             .pointwise = pw,
+             .movement = mv,
+             .family = fm,
+@@ -199,6 +199,10 @@ pub const Ops = struct {
+             .draw_rows = if (envOn(draw_env)) try fm.function("tf_ds_draw_rows_kernel") else null,
+             .lora_add = if (loraOn()) try fm.function("tf_ds_add_bf16_kernel") else null,
+         };
++        // the fused pool's maxima are dynamic shared memory: past 48 KiB each kernel opts in (max_nbk blocks of fp32)
++        if (o.idx_fused_fn) |f| try f.allowDynamicShared(@intCast(idx_fused.max_nbk * @sizeOf(f32)));
++        if (o.idx_pick_fn) |f| try f.allowDynamicShared(@intCast(idx_fused.max_nbk * @sizeOf(f32)));
++        return o;
+     }
+ 
+     pub fn unload(o: *Ops) void {
+===== 0b78bec 0215 dsv41: 0195's small-row form spreads the pool over block_max's grid (small-row research item) =====
+
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index 0e6f4ea..129c072 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -801,24 +801,11 @@ __device__ __forceinline__ void tf_ds_block_max_t(float* maxima, const float* ro
+     }
+ }
+ 
+-extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const float* score, long long ss, int width,
+-                                                                          int bsize, const long long* vis,
+-                                                                          const long long* every, int k,
+-                                                                          uint8_t* mask, long long ms, int* cblk,
+-                                                                          int pdl) {
+-    pdl_enter(pdl);
+-    const int r = blockIdx.x;
+-    const int nb = 1 + (width - 1) / bsize;
+-    extern __shared__ float maxima[];
+-    const float ninf = -__int_as_float(0x7f800000);
+-    const float* row = score + (long long)r * ss;
+-    // phase 1: the block maxima; the served block size with a 16-byte-aligned row stride takes the static, vectorized
+-    // form, anything else the runtime loop (the same arithmetic, so both are byte-identical)
+-    const long long visible = vis[r];
+-    const long long last = visible > 0 ? (visible - 1) / bsize : -1;
+-    if (bsize == 8 && (ss & 3) == 0) tf_ds_block_max_t<8>(maxima, row, width, nb, last);
+-    else tf_ds_block_max_t<0>(maxima, row, width, nb, last, bsize);
+-    __syncthreads();
++// The pool's selection and its two outputs: the cutoff on the score digits with the tied columns resolved during
++// compaction (tf_ds_pool_cut), then either the mask alone (the prompt arm: no ballot, prefix sum or compaction) or the
++// decode arm's ascending block list. `maxima` is on chip, one block a column, `limit` the row's `every`.
++__device__ __forceinline__ void tf_ds_idx_select(float* maxima, int nb, int k, uint8_t* mask, long long ms, int* cblk,
++                                                 int r, long long limit) {
+     __shared__ unsigned long long prefix_s, mask_s;
+     __shared__ int want_s;
+     __shared__ int warp_end[32];
+@@ -834,7 +821,7 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+     __syncthreads();
+     const unsigned long long prefix = prefix_s, cmask = mask_s;
+     const int want = want_s;
+-    const long long limit = every[r];
++    const float ninf = -__int_as_float(0x7f800000);
+     const int lane = threadIdx.x & 31;
+     const int warp = threadIdx.x >> 5;
+     if (cblk == nullptr) {
+@@ -889,6 +876,39 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+     }
+ }
+ 
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const float* score, long long ss, int width,
++                                                                          int bsize, const long long* vis,
++                                                                          const long long* every, int k,
++                                                                          uint8_t* mask, long long ms, int* cblk,
++                                                                          int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    const int nb = 1 + (width - 1) / bsize;
++    extern __shared__ float maxima[];
++    const float* row = score + (long long)r * ss;
++    // phase 1: the block maxima; the served block size with a 16-byte-aligned row stride takes the static, vectorized
++    // form, anything else the runtime loop (the same arithmetic, so both are byte-identical)
++    const long long visible = vis[r];
++    const long long last = visible > 0 ? (visible - 1) / bsize : -1;
++    if (bsize == 8 && (ss & 3) == 0) tf_ds_block_max_t<8>(maxima, row, width, nb, last);
++    else tf_ds_block_max_t<0>(maxima, row, width, nb, last, bsize);
++    __syncthreads();
++    tf_ds_idx_select(maxima, nb, k, mask, ms, cblk, r, every[r]);
++}
++
++// The same selection from the block maxima in global memory (block_max's output): the small-row form's second launch,
++// one CTA a row. The maxima are staged on chip once, so the radix passes and the compaction stay shared-memory work.
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_pick_kernel(const float* bmax, long long bs, int nbk, int k,
++                                                                        const long long* every, int* cblk, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    extern __shared__ float maxima[];
++    const float* src = bmax + (long long)r * bs;
++    for (int b = threadIdx.x; b < nbk; b += blockDim.x) maxima[b] = src[b];
++    __syncthreads();
++    tf_ds_idx_select(maxima, nbk, k, nullptr, 0, cblk, r, every[r]);
++}
++
+ // Rows of n16 16-byte words: dst row r = src row r (row strides in words). torch_ops' tf_strided_copy takes a block a
+ // row and a byte a thread; this one a word a thread over grid (ceil(n16 / blockDim), rows). Every pointer, stride and
+ // row length a multiple of 16 bytes (ops.copyRows checks).
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 2a89710..04f9e6e 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -31,6 +31,15 @@ pub const max_k = 2048;
+ /// the served block size); past it the unfused sequence runs.
+ pub const max_nbk = 8192;
+ 
++/// Rows at or below this use the small-row form: the maxima over the pool's own 2D grid (block_max), then the selection
++/// from those global maxima in one CTA a row (tf_ds_idx_pick_kernel), because a single CTA a row leaves most of the GPU
++/// idle at one to seven rows. Above it the one-launch fused form runs. Both produce the same block list.
++pub const small_rows = 7;
++/// The block count from which the small-row form pays: at the pool's 8192-block cap (65,536 columns) the 2D grid's
++/// parallel score read wins at both one and seven rows (10.5 vs 12.1 µs, 11.8 vs 12.4 µs); at 2048 and 4096 blocks the
++/// second launch and the selection's staging cost more than the parallel read saves (5.8 vs 5.6, 8.7 vs 8.5 µs).
++pub const small_nbk = 6144;
++
+ /// Whether the fused launch supports this configuration. The call sites fall back to the unfused sequence when it
+ /// does not. k > nbk (the selection's own bound) and nbk <= 0 refuse; `width` must agree with `bsize`.
+ pub fn fuseOk(fused: bool, rows: usize, width: usize, bsize: usize, nbk: usize, k: usize) bool {
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 2492dc6..015208a 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -123,6 +123,7 @@ pub const Ops = struct {
+     fused_route: bool = false, // TF_DS_FUSED_ROUTE combines pruning and dead-row masking
+     idx_fused: bool = false, // TF_DS_IDX_FUSED, read at load; off by default
+     idx_fused_fn: ?cuda.Function = null, // looked up only when the switch is on
++    idx_pick_fn: ?cuda.Function = null, // the small-row form's second launch (idx_fused's selection from global maxima)
+     compress2_norm: bool = false, // TF_DS_FUSED_COMPRESS2_NORM, read at load; off by default
+     rope_store: bool = false, // TF_DS_FUSED_ROPE_STORE, read at load; off by default
+     check_invalid: bool = false, // TF_DS_CHECK_INVALID, read at load; off by default (a diagnostic)
+@@ -184,6 +185,7 @@ pub const Ops = struct {
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
+             .idx_fused = idx_fused_on,
+             .idx_fused_fn = if (idx_fused_on) try fm.function("tf_ds_idx_fused_kernel") else null,
++            .idx_pick_fn = if (idx_fused_on) try fm.function("tf_ds_idx_pick_kernel") else null,
+             .compress2_norm = compress2_norm_on,
+             .rope_store = rope_store_on,
+             .check_invalid = check_invalid,
+@@ -458,6 +460,24 @@ pub const Ops = struct {
+         try cuda.launch.launch(o.idx_fused_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
+     }
+ 
++    /// TF_DS_IDX_FUSED's small-row form, second launch: tf_ds_idx_pick_kernel selects from block_max's maxima (bmax
++    /// [rows, nbk] fp32 at row stride bs) and writes the decode arm's block list, exactly as idxFused's decode arm does
++    /// (one CTA a row; the maxima are staged on chip). The call sites use it for rows <= idx_fused.small_rows.
++    pub fn idxPick(o: *const Ops, s: cuda.Stream, bmax: u64, bs: usize, nbk: usize, k: usize, every: u64, cblk: u64, rows: usize) !void {
++        if (rows == 0) return;
++        if (bmax == 0 or every == 0 or cblk == 0) return error.BadIdxFusedArgs;
++        if (nbk == 0 or nbk > idx_fused.max_nbk or bs < nbk or k < 1 or k > idx_fused.max_k or k > nbk) return error.BadIdxFusedArgs;
++        var a: cuda.Args = .{};
++        a.add(bmax);
++        a.add(@as(c_longlong, @intCast(bs)));
++        a.add(@as(c_int, @intCast(nbk)));
++        a.add(@as(c_int, @intCast(k)));
++        a.add(every);
++        a.add(cblk);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.idx_pick_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
++    }
++
+     /// model.py apply_candidates, in place: -inf at every column of score [rows, width] (row stride ss) whose block of
+     /// bsize the row's pool mask (u8, row stride ms) leaves out.
+     pub fn applyPool(o: *const Ops, s: cuda.Stream, score: u64, ss: usize, width: usize, bsize: usize, mask: u64, ms: usize, rows: usize) !void {
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 3df785e..346e7f1 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1270,7 +1270,13 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     // TF_DS_IDX_FUSED: the same three launches in one (off by default; the bounds keep the pool's
+                     // regime, past them the unfused sequence runs)
+                     if (idx_fused.fuseOk(e.ops.idx_fused, R, nb, cb, nbk, c.candidate_blocks)) {
+-                        try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
++                        if (R <= idx_fused.small_rows and nbk >= idx_fused.small_nbk) {
++                            // the small-row form: the maxima over the pool's own 2D grid, then the selection from them
++                            // (the same cutoff, tied columns and ascending list; a single CTA a row would leave most
++                            // of the GPU idle at one to seven rows)
++                            try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
++                            try e.ops.idxPick(e.s, rd.bmax, nbk, nbk, c.candidate_blocks, rd.pbufs.every, rd.cblk, R);
++                        } else try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
+                     } else {
+                         try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
+                         try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
+===== 90052a0 0230 dsv41: 0197's decode compressor is one kernel per served width, with the partner slots read ahead of the current row (item 1) =====
+
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index d520ca2..330f089 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -522,28 +522,33 @@ __device__ __forceinline__ void tf_ds_compress2_decode(float value, const __nv_b
+     dst[tid] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[tid]), y));
+ }
+ 
+-// Decode ratio-2 scatter, pair compression and kit RMSNorm. Launch exactly D threads per row.
+-extern "C" __global__ void __launch_bounds__(512) tf_ds_compress2x_norm_kernel(const float* ckv, long long ckv_ld,
+-                                                                               const float* cgate, long long cgate_ld,
+-                                                                               const long long* rslot,
+-                                                                               float* ring_kv,
+-                                                                               float* ring_score,
+-                                                                               const long long* gi, long long src_rows,
+-                                                                               const __nv_bfloat16* w,
+-                                                                               __nv_bfloat16* out, long long ldo,
+-                                                                               int G, int D, float eps,
+-                                                                               unsigned* invalid, int pdl) {
+-    pdl_enter(pdl);
++// Decode ratio-2 scatter, pair compression and kit RMSNorm. Launch exactly D threads per row, one channel a thread.
++// The width is a compile-time parameter with one kernel exported per served width (decodeOk: 128 or 512), so neither
++// kernel carries the other's code or its static shared allocation: at the served decode rows a dedicated 128-wide
++// kernel measures 1.30/1.54/1.54/1.78 us (R = 1/7/32/48) against 1.50/1.73/1.73/1.95 for the shared one, and the
++// 512-wide form 1.69/1.92/1.95/2.20 against 1.73/1.95/1.99/2.22. The 128-wide block is exactly the reduction's 128
++// lanes, so it needs no `tid < 128` guard (that guard alone costs ~0.12 us: it puts the warp-sum store and the
++// shuffles behind a runtime branch ptxas cannot fold away) and no shared `row`.
++template<int D>
++__device__ __forceinline__ void tf_ds_compress2x_norm_body(const float* ckv, long long ckv_ld,
++                                                          const float* cgate, long long cgate_ld,
++                                                          const long long* rslot, float* ring_kv,
++                                                          float* ring_score, const long long* gi, long long src_rows,
++                                                          const __nv_bfloat16* w, __nv_bfloat16* out, long long ldo,
++                                                          int G, float eps, unsigned* invalid) {
+     const int g = blockIdx.x;
++    const int tid = threadIdx.x;
+     const long long own = rslot[g];
+-    const int c = threadIdx.x;
+-    const float own_kv = ckv[g * ckv_ld + c], own_score = cgate[g * cgate_ld + c];
+-    ring_kv[own * D + c] = own_kv;
+-    ring_score[own * D + c] = own_score;
++    // The partner slots are read before the current row: ptxas then issues both 64-bit slot loads ahead of the pair
++    // loads, which hides their latency behind the scatter and the ballot scan (the other order measures 1.46 against
++    // 1.32 us at R = 1, width 128, with otherwise identical SASS).
+     const long long q0 = gi[2 * g], q1 = gi[2 * g + 1];
++    const float own_kv = ckv[g * ckv_ld + tid], own_score = cgate[g * cgate_ld + tid];
++    ring_kv[own * D + tid] = own_kv;
++    ring_score[own * D + tid] = own_score;
+     const int2 pr = tf_ds_compress2_partners(rslot, G, own, q0, q1);
+     const bool ok0 = q0 >= 0 && q0 < src_rows, ok1 = q1 >= 0 && q1 < src_rows;
+-    if ((!ok0 || !ok1) && threadIdx.x == 0 && invalid) atomicExch(invalid, 1u);
++    if ((!ok0 || !ok1) && tid == 0 && invalid) atomicExch(invalid, 1u);
+     float kv[2], score[2];
+     #pragma unroll
+     for (int i = 0; i < 2; ++i) {
+@@ -556,17 +561,54 @@ extern "C" __global__ void __launch_bounds__(512) tf_ds_compress2x_norm_kernel(c
+             kv[i] = own_kv;
+             score[i] = own_score;
+         } else if (row >= 0) {
+-            kv[i] = ckv[row * ckv_ld + c];
+-            score[i] = cgate[row * cgate_ld + c];
++            kv[i] = ckv[row * ckv_ld + tid];
++            score[i] = cgate[row * cgate_ld + tid];
+         } else {
+-            kv[i] = ring_kv[q * D + c];
+-            score[i] = ring_score[q * D + c];
++            kv[i] = ring_kv[q * D + tid];
++            score[i] = ring_score[q * D + tid];
+         }
+     }
+     const float value = tf_ds_compress2_pair(score[0], score[1], kv[0], kv[1]);
+-    if (D == 512) tf_ds_compress2_decode<512>(value, w, out + g * ldo, eps);
+-    else tf_ds_compress2_decode<128>(value, w, out + g * ldo, eps);
+-}
++    const float x = __bfloat162float(__float2bfloat16_rn(value));
++    // At width 512 the kit first reduces four adjacent channels per logical lane, so the block stages the rounded row.
++    __shared__ float row[D == 512 ? 512 : 1];
++    if (D == 512) {
++        row[tid] = x;
++        __syncthreads();
++    }
++    __shared__ float warp_sum[4];
++    if (D == 512) {
++        if (tid < 128) {
++            const int base = tid * 4;
++            float sum = tf_ds_kit_squares4(row[base], row[base + 1], row[base + 2], row[base + 3]);
++            sum = tf_ds_kit_warp_sum(sum);
++            if ((tid & 31) == 0) warp_sum[tid >> 5] = sum;
++        }
++    } else {
++        float sum = __fmul_rn(x, x);
++        sum = tf_ds_kit_warp_sum(sum);
++        if ((tid & 31) == 0) warp_sum[tid >> 5] = sum;
++    }
++    __syncthreads();
++    const float total = __fadd_rn(__fadd_rn(warp_sum[0], warp_sum[2]), __fadd_rn(warp_sum[1], warp_sum[3]));
++    const float inv = tf_ds_kit_inverse_rms<D>(total, eps);
++    const float y = __fmul_rn(x, inv);
++    out[g * ldo + tid] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[tid]), y));
++}
++
++#define TF_DS_COMPRESS2X_NORM_KERNEL(name, D)                                                                          \
++    extern "C" __global__ void __launch_bounds__(D) name(const float* ckv, long long ckv_ld, const float* cgate,        \
++        long long cgate_ld, const long long* rslot, float* ring_kv, float* ring_score, const long long* gi,             \
++        long long src_rows, const __nv_bfloat16* w, __nv_bfloat16* out, long long ldo, int G, int D_, float eps,         \
++        unsigned* invalid, int pdl) {                                                                                   \
++        pdl_enter(pdl);                                                                                                 \
++        (void)D_;                                                                                                       \
++        tf_ds_compress2x_norm_body<D>(ckv, ckv_ld, cgate, cgate_ld, rslot, ring_kv, ring_score, gi, src_rows, w, out,    \
++                                      ldo, G, eps, invalid);                                                            \
++    }
++
++TF_DS_COMPRESS2X_NORM_KERNEL(tf_ds_compress2x_norm128_kernel, 128)
++TF_DS_COMPRESS2X_NORM_KERNEL(tf_ds_compress2x_norm512_kernel, 512)
+ 
+ // ===================================================================================================================
+ // TF_DS_FUSED_ROPE_STORE (0198, off by default).
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index 1115571..9bf0f83 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -48,7 +48,8 @@ pub const Exact = struct {
+     k_bf16_scale: cuda.Function,
+     k_hc_mean4: cuda.Function,
+     k_compress2_norm: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (prompt half): compress2 + rmsNorm, one launch
+-    k_compress2x_norm: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half): the 0127 chain + the kit's _rmsnorm
++    k_compress2x_norm128: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half, d = 128): the 0127 chain + the kit's _rmsnorm
++    k_compress2x_norm512: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half, d = 512)
+     k_fused_idx_key: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rmsnorm + _rope_heads + _fp4_store (decode indexer key)
+     k_fused_rope_store: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4_store (decode latent)
+     k_fused_rope_qd: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 (decode indexer query)
+@@ -71,7 +72,8 @@ pub const Exact = struct {
+             .k_bf16_scale = try m.function("tf_ds_bf16_scale_kernel"),
+             .k_hc_mean4 = try m.function("tf_ds_hc_mean4_kernel"),
+             .k_compress2_norm = try m.function("tf_ds_compress2_norm_kernel"),
+-            .k_compress2x_norm = try m.function("tf_ds_compress2x_norm_kernel"),
++            .k_compress2x_norm128 = try m.function("tf_ds_compress2x_norm128_kernel"),
++            .k_compress2x_norm512 = try m.function("tf_ds_compress2x_norm512_kernel"),
+             .k_fused_idx_key = try m.function("tf_ds_fused_idx_key_kernel"),
+             .k_fused_rope_store = try m.function("tf_ds_fused_rope_store_kernel"),
+             .k_fused_rope_qd = try m.function("tf_ds_fused_rope_qd_kernel"),
+@@ -179,9 +181,12 @@ pub const Exact = struct {
+         try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+-    /// TF_DS_FUSED_COMPRESS2_NORM, decode half: tf_ds_compress2x_norm_kernel — the 0127 chain (scatter, resolve,
+-    /// pair sum) and the kit's `_rmsnorm` in one launch. `w` is the comp_norm weight; `out` is rd.lat (the unfused
+-    /// path's lat2 intermediate is not written). Grid = g blocks of d threads, one per channel.
++    /// TF_DS_FUSED_COMPRESS2_NORM, decode half: tf_ds_compress2x_norm{128,512}_kernel — the 0127 chain (scatter,
++    /// resolve, pair sum) and the kit's `_rmsnorm` in one launch, one kernel per served width (the width is
++    /// compile-time in each: the 128-wide one is 128 threads with no shared row and no lane guard, measured 11-13%
++    /// faster than the shared two-width kernel at the served decode rows, the 512-wide one 1-2%). `w` is the comp_norm
++    /// weight; `out` is rd.lat (the unfused path's lat2 intermediate is not written). Grid = g blocks of d threads,
++    /// one per channel.
+     pub fn compress2xNorm(e: *const Exact, s: cuda.Stream, ckv: u64, ckv_ld: usize, cgate: u64, cgate_ld: usize, rslot: u64, ring_kv: u64, ring_score: u64, gi: u64, src_rows: usize, w: u64, out: u64, ldo: usize, g: usize, d: usize, eps: f32, invalid: u64) !void {
+         if (g == 0) return;
+         if (d != 128 and d != 512) return error.UnsupportedShape;
+@@ -203,7 +208,8 @@ pub const Exact = struct {
+         a.add(eps);
+         a.add(invalid);
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+-        try cuda.launch.launch(e.k_compress2x_norm, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = @intCast(d) }, .pdl = e.pdl }, s, &a);
++        const kernel = if (d == 128) e.k_compress2x_norm128 else e.k_compress2x_norm512;
++        try cuda.launch.launch(kernel, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = @intCast(d) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// TF_DS_FUSED_ROPE_STORE, decode indexer key: the kit's `_rmsnorm` (D = 128) + `_rope_heads`

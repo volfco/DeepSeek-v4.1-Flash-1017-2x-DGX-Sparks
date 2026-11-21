@@ -1,0 +1,715 @@
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index 1115571..72e4bf0 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -5,6 +5,7 @@
+ const std = @import("std");
+ const cuda = @import("cuda");
+ const ops = @import("ops.zig");
++const fused_trace = @import("fused_trace.zig");
+ const rope_store = @import("rope_store.zig");
+ 
+ /// launch_shape.h's tf_launch_blocks: a block a `threads` elements, at most 65535.
+@@ -48,10 +49,12 @@ pub const Exact = struct {
+     k_bf16_scale: cuda.Function,
+     k_hc_mean4: cuda.Function,
+     k_compress2_norm: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (prompt half): compress2 + rmsNorm, one launch
+-    k_compress2x_norm: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half): the 0127 chain + the kit's _rmsnorm
++    k_compress2x_norm128: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half, d = 128): the 0127 chain + the kit's _rmsnorm
++    k_compress2x_norm512: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half, d = 512)
+     k_fused_idx_key: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rmsnorm + _rope_heads + _fp4_store (decode indexer key)
+     k_fused_rope_store: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4_store (decode latent)
+     k_fused_rope_qd: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 (decode indexer query)
++    k_fused_rope_qd_pair: cuda.Function, // the same chain in the pair geometry (the larger row counts)
+     k_fused_prompt_idx_key: cuda.Function, // TF_DS_FUSED_ROPE_STORE: Exact.rmsNorm + Exact.rope + _fp4_store (prompt indexer key)
+     k_fused_prompt_latent: cuda.Function, // TF_DS_FUSED_ROPE_STORE: Exact.rope + _fp4_store (prompt latent)
+     pdl: bool = false, // TF_DS_PDL (ops.pdl_env)
+@@ -71,10 +74,12 @@ pub const Exact = struct {
+             .k_bf16_scale = try m.function("tf_ds_bf16_scale_kernel"),
+             .k_hc_mean4 = try m.function("tf_ds_hc_mean4_kernel"),
+             .k_compress2_norm = try m.function("tf_ds_compress2_norm_kernel"),
+-            .k_compress2x_norm = try m.function("tf_ds_compress2x_norm_kernel"),
++            .k_compress2x_norm128 = try m.function("tf_ds_compress2x_norm128_kernel"),
++            .k_compress2x_norm512 = try m.function("tf_ds_compress2x_norm512_kernel"),
+             .k_fused_idx_key = try m.function("tf_ds_fused_idx_key_kernel"),
+             .k_fused_rope_store = try m.function("tf_ds_fused_rope_store_kernel"),
+             .k_fused_rope_qd = try m.function("tf_ds_fused_rope_qd_kernel"),
++            .k_fused_rope_qd_pair = try m.function("tf_ds_fused_rope_qd_pair_kernel"),
+             .k_fused_prompt_idx_key = try m.function("tf_ds_fused_prompt_idx_key_kernel"),
+             .k_fused_prompt_latent = try m.function("tf_ds_fused_prompt_latent_kernel"),
+         };
+@@ -154,9 +159,15 @@ pub const Exact = struct {
+     /// TF_DS_FUSED_COMPRESS2_NORM, prompt half: tf_ds_compress2_norm_kernel — Exact.compress2's pair sum and
+     /// Exact.rmsNorm's arithmetic in one launch (one block a row; block.x = rmsLanes(d, rows), the lane count the
+     /// unfused rmsNorm launch would use). `factor` is computed as rmsNorm does (rows/(rows*d) as f32).
+-    pub fn compress2Norm(e: *const Exact, s: cuda.Stream, kv: u64, score: u64, w: u64, out: u64, ldo: usize, rows: usize, d: usize, eps: f32) !void {
++    /// `raw_kv`/`raw_score` (0: the caller scatters them) are the raw-ring rows the source step used to write with a
++    /// scatter launch: the last `raw_keep` rows of the chunk (rows at or past `rows - raw_keep`) go to slots
++    /// `raw_pos0 + j - (rows - raw_keep)` modulo `raw_len`. The launch is one block past the pairs when the chunk has
++    /// an odd trailing row, which writes only that row's raw slot.
++    pub fn compress2Norm(e: *const Exact, s: cuda.Stream, kv: u64, score: u64, w: u64, out: u64, ldo: usize, rows: usize, d: usize, eps: f32, raw_kv: u64, raw_score: u64, raw_len: usize, raw_pos0: usize, raw_first: usize, n_rows: usize) !void {
+         if (rows == 0) return;
+         if (d % 4 != 0 or d < 128 or d > 2048 or (d & (d - 1)) != 0) return error.UnsupportedShape;
++        if (n_rows < rows * 2 or n_rows > rows * 2 + 1) return error.UnsupportedShape;
++        if (raw_kv != 0 and (raw_len == 0 or raw_first > n_rows)) return error.UnsupportedShape;
+         const lanes = rmsLanes(d, rows);
+         // GB10: wide CTAs shorten the small-row chain. At larger grids more resident CTAs win.
+         // The x dimension stays identical to rmsNorm so the sum's rounding order is invariant. The y dimension makes
+@@ -176,12 +187,22 @@ pub const Exact = struct {
+         a.add(factor);
+         a.add(eps);
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+-        try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
++        a.add(raw_kv);
++        a.add(raw_score);
++        a.add(@as(c_int, @intCast(raw_len)));
++        a.add(@as(c_longlong, @intCast(raw_pos0)));
++        a.add(@as(c_int, @intCast(raw_first)));
++        a.add(@as(c_int, @intCast(n_rows)));
++        if (fused_trace.enabled()) fused_trace.note(.compress2_norm, n_rows, d, e.pdl);
++        try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast((n_rows + 1) / 2) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+-    /// TF_DS_FUSED_COMPRESS2_NORM, decode half: tf_ds_compress2x_norm_kernel — the 0127 chain (scatter, resolve,
+-    /// pair sum) and the kit's `_rmsnorm` in one launch. `w` is the comp_norm weight; `out` is rd.lat (the unfused
+-    /// path's lat2 intermediate is not written). Grid = g blocks of d threads, one per channel.
++    /// TF_DS_FUSED_COMPRESS2_NORM, decode half: tf_ds_compress2x_norm{128,512}_kernel — the 0127 chain (scatter,
++    /// resolve, pair sum) and the kit's `_rmsnorm` in one launch, one kernel per served width (the width is
++    /// compile-time in each: the 128-wide one is 128 threads with no shared row and no lane guard, measured 11-13%
++    /// faster than the shared two-width kernel at the served decode rows, the 512-wide one 1-2%). `w` is the comp_norm
++    /// weight; `out` is rd.lat (the unfused path's lat2 intermediate is not written). Grid = g blocks of d threads,
++    /// one per channel.
+     pub fn compress2xNorm(e: *const Exact, s: cuda.Stream, ckv: u64, ckv_ld: usize, cgate: u64, cgate_ld: usize, rslot: u64, ring_kv: u64, ring_score: u64, gi: u64, src_rows: usize, w: u64, out: u64, ldo: usize, g: usize, d: usize, eps: f32, invalid: u64) !void {
+         if (g == 0) return;
+         if (d != 128 and d != 512) return error.UnsupportedShape;
+@@ -203,7 +224,9 @@ pub const Exact = struct {
+         a.add(eps);
+         a.add(invalid);
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+-        try cuda.launch.launch(e.k_compress2x_norm, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = @intCast(d) }, .pdl = e.pdl }, s, &a);
++        if (fused_trace.enabled()) fused_trace.note(.compress2x_norm, g, d, e.pdl);
++        const kernel = if (d == 128) e.k_compress2x_norm128 else e.k_compress2x_norm512;
++        try cuda.launch.launch(kernel, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = @intCast(d) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// TF_DS_FUSED_ROPE_STORE, decode indexer key: the kit's `_rmsnorm` (D = 128) + `_rope_heads`
+@@ -227,6 +250,7 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(eps);
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.key_fused, rows, d, e.pdl);
+         try cuda.launch.launch(e.k_fused_idx_key, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 128 }, .pdl = e.pdl }, s, &a);
+     }
+ 
+@@ -248,15 +272,24 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(d)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.latent_fused, rows, d, e.pdl);
+         try cuda.launch.launch(e.k_fused_rope_store, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(@min(d / 2, 256)) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// TF_DS_FUSED_ROPE_STORE, decode indexer query: `_rope_heads` (RD = rope_dim, H = heads, forward) + `_fp4qd_p2`
+-    /// (32-element blocks, pow2 scale, dequantized bf16 out) in one launch. Grid = rows * heads; `out` is rd.iq4 and
+-    /// rd.iq is read only (the in-place rotation has no reader).
++    /// (32-element blocks, pow2 scale, dequantized bf16 out) in one launch. `out` is rd.iq4 and rd.iq is read only
++    /// (the in-place rotation has no reader). Two geometries, chosen on the row count: the pair form (a warp a head, the
++    /// rotary pair inside one lane, grid = (rows, heads / 8)) from decode's largest window upward, and one element a
++    /// thread (grid = (rows, heads)) below it. Both write the same bytes; the threshold is where the measurements cross
++    /// (R=32: 2.55 us pair against 2.85 one-element; R=7: 1.46 against 1.32), and `heads % 8` or a head dim that is not
++    /// a multiple of 64 keeps the one-element form.
++    pub const pair_rows: usize = 32;
++    pub const pair_warps: usize = 8;
++
+     pub fn ropeQd(e: *const Exact, s: cuda.Stream, x: u64, out: u64, cos: u64, sin: u64, pos: u64, rows: usize, heads: usize, hd: usize, rd: usize) !void {
+         if (rows == 0 or heads == 0) return;
+         if (hd < 32 or hd > 512 or (hd & (hd - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > hd or hd % 32 != 0 or !rope_store.warpShapesOk(hd, rd, 128)) return error.UnsupportedShape;
++        const pair = rows >= pair_rows and heads % pair_warps == 0 and hd % 64 == 0;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(out);
+@@ -267,7 +300,12 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(hd)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+-        try cuda.launch.launch(e.k_fused_rope_qd, .{ .grid = .{ .x = @intCast(rows * heads) }, .block = .{ .x = 128 }, .pdl = e.pdl }, s, &a);
++        if (fused_trace.enabled()) fused_trace.note(if (pair) .query_pair else .query_fused, rows, hd, e.pdl);
++        if (pair) {
++            try cuda.launch.launch(e.k_fused_rope_qd_pair, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(heads / pair_warps) }, .block = .{ .x = 32 * pair_warps }, .pdl = e.pdl }, s, &a);
++        } else {
++            try cuda.launch.launch(e.k_fused_rope_qd, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(heads) }, .block = .{ .x = 128 }, .pdl = e.pdl }, s, &a);
++        }
+     }
+ 
+     /// TF_DS_FUSED_ROPE_STORE, prompt indexer key: Exact.rmsNorm (torch's arithmetic; block.x = rmsLanes(d, rows), the
+@@ -275,7 +313,7 @@ pub const Exact = struct {
+     /// packed-column pass) + Exact.rope (tf_ds_rope_kernel's arithmetic) + the kit's `_fp4_store`
+     /// (BLOCK = 32, E4M3 = false) in one launch. `x` is ch.lat2; codes/scales go to row `rows_idx[r]` (the group's
+     /// slot) and the rotated row stays on chip (ch.ik's store has no reader).
+-    pub fn promptIdxKey(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, w: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize, eps: f32) !void {
++    pub fn promptIdxKey(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, w: u64, cos: u64, sin: u64, base_group: usize, ratio: usize, codes: u64, scales: u64, rows: usize, d: usize, rd: usize, eps: f32) !void {
+         if (rows == 0) return;
+         if (d < 128 or d > 512 or (d & (d - 1)) != 0 or d % 4 != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
+         const lanes = rmsLanes(d, rows);
+@@ -290,20 +328,21 @@ pub const Exact = struct {
+         a.add(factor);
+         a.add(cos);
+         a.add(sin);
+-        a.add(pos);
++        a.add(@as(c_longlong, @intCast(base_group)));
++        a.add(@as(c_int, @intCast(ratio)));
+         a.add(codes);
+         a.add(scales);
+-        a.add(rows_idx);
+         a.add(@as(c_int, @intCast(d)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.prompt_key_fused, rows, d, e.pdl);
+         try cuda.launch.launch(e.k_fused_prompt_idx_key, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(lanes), .y = @intCast(y) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// TF_DS_FUSED_ROPE_STORE, prompt latent: Exact.rope + the kit's `_fp4_store` (D = head_dim, BLOCK = 16, E4M3 =
+     /// true) in one launch. Codes/scales to row `rows_idx[r]`; ch.lat is read only and the rotated row never reaches
+     /// ch.lat2 (nothing reads it there).
+-    pub fn promptLatent(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize) !void {
++    pub fn promptLatent(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, base_group: usize, ratio: usize, codes: u64, scales: u64, rows: usize, d: usize, rd: usize) !void {
+         if (rows == 0) return;
+         const block = @min(d / 2, 256);
+         if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d or !rope_store.warpShapesOk(d, rd, block)) return error.UnsupportedShape;
+@@ -311,13 +350,14 @@ pub const Exact = struct {
+         a.add(x);
+         a.add(cos);
+         a.add(sin);
+-        a.add(pos);
++        a.add(@as(c_longlong, @intCast(base_group)));
++        a.add(@as(c_int, @intCast(ratio)));
+         a.add(codes);
+         a.add(scales);
+-        a.add(rows_idx);
+         a.add(@as(c_int, @intCast(d)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.prompt_latent_fused, rows, d, e.pdl);
+         try cuda.launch.launch(e.k_fused_prompt_latent, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(@min(d / 2, 256)) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+diff --git a/zig/src/families/dsv41/fused_trace.zig b/zig/src/families/dsv41/fused_trace.zig
+new file mode 100644
+index 0000000..d405742
+--- /dev/null
++++ b/zig/src/families/dsv41/fused_trace.zig
+@@ -0,0 +1,183 @@
++//! TF_DS_FUSED_TRACE (off by default): an opt-in, once-per-distinct-tuple record of which fused arm the call sites
++//! select, so a run can show which kernel ran at each row count, width and PDL setting. Host-side only: the call sites
++//! hand over what they already decided (the same gate functions and bounds the launchers use), nothing is read back
++//! from the device, no bytes change, and no fingerprint bit moves. The record is bounded: past `capacity` distinct
++//! tuples further ones are not printed (a round's matrix is far below it).
++const std = @import("std");
++
++pub const env_name: [:0]const u8 = "TF_DS_FUSED_TRACE";
++
++/// The arm a call site runs. `width` in the record is the shape the arm was chosen for (the compressor's channel
++/// count, the indexer's column width, the rope kernel's head dim), so one entry identifies the exact kernel and shape.
++pub const Arm = enum {
++    idx_fused,
++    idx_small,
++    idx_unfused,
++    compress2x_norm,
++    compress2_norm,
++    compress_unfused,
++    key_fused,
++    key_unfused,
++    latent_fused,
++    latent_unfused,
++    query_fused,
++    query_pair,
++    query_unfused,
++    prompt_key_fused,
++    prompt_key_unfused,
++    prompt_latent_fused,
++    prompt_latent_unfused,
++    prune_six,
++    prune_unfused,
++};
++
++pub const Entry = struct {
++    arm: Arm,
++    rows: usize,
++    width: usize,
++    pdl: bool,
++};
++
++pub const capacity = 128;
++
++var seen: [capacity]Entry = undefined;
++var count: usize = 0;
++var enabled_cache: ?bool = null;
++
++/// TF_DS_FUSED_TRACE: unset, "" or "0" off; anything else on.
++pub fn enabled() bool {
++    if (enabled_cache) |on| return on;
++    const text = std.c.getenv(env_name);
++    const on = if (text) |t| std.mem.span(t).len != 0 and !std.mem.eql(u8, std.mem.span(t), "0") else false;
++    enabled_cache = on;
++    return on;
++}
++
++/// Record one arm selection. Called from the call sites behind `enabled()`, and directly by the test below.
++pub fn note(arm: Arm, rows: usize, width: usize, pdl: bool) void {
++    for (seen[0..count]) |e| {
++        if (e.arm == arm and e.rows == rows and e.width == width and e.pdl == pdl) return;
++    }
++    if (count == capacity) return;
++    seen[count] = .{ .arm = arm, .rows = rows, .width = width, .pdl = pdl };
++    count += 1;
++    std.debug.print("dsv41 fused trace: {s} rows={d} width={d} pdl={d}\n", .{ @tagName(arm), rows, width, @intFromBool(pdl) });
++}
++
++pub fn entries() []const Entry {
++    return seen[0..count];
++}
++
++pub fn reset() void {
++    count = 0;
++    enabled_cache = null;
++}
++
++// -- the served matrix the call sites run ----------------------------------------------------------------------------
++
++const idx_fused = @import("idx_fused.zig");
++const compress2_norm = @import("compress2_norm.zig");
++const rope_store = @import("rope_store.zig");
++
++/// The indexer's arm for a decode row count and bucket width (round.zig's candidate-source arm, prompt.zig's pooled
++/// source layer): the fused launch, its small-row form, or the unfused block_max/pool_pick sequence.
++pub fn idxArm(fused: bool, rows: usize, width: usize, bsize: usize, nbk: usize, k: usize) Arm {
++    if (!idx_fused.fuseOk(fused, rows, width, bsize, nbk, k)) return .idx_unfused;
++    return if (rows <= idx_fused.small_rows and nbk >= idx_fused.small_nbk) .idx_small else .idx_fused;
++}
++
++/// The compressor's arm (round.zig's decode ratio-2 chain, prompt.zig's chunk path).
++pub fn compressArm(fused: bool, prompt: bool, rows: usize, d: usize) Arm {
++    if (prompt) return if (compress2_norm.fuseOk(fused, rows, d)) .compress2_norm else .compress_unfused;
++    return if (compress2_norm.decodeOk(fused, rows, d)) .compress2x_norm else .compress_unfused;
++}
++
++/// The 0198 arms (round.zig's key / latent / query launches, prompt.zig's stores).
++pub fn keyArm(fused: bool, rows: usize, d: usize, rd: usize, heads: usize, prompt: bool) Arm {
++    if (!prompt and rope_store.keyFuseOk(fused, rows, d, rd, heads)) return .key_fused;
++    if (prompt and rope_store.fuseOk(fused, rows, d, rd, heads)) return .prompt_key_fused;
++    return if (prompt) .prompt_key_unfused else .key_unfused;
++}
++
++pub fn latentArm(fused: bool, rows: usize, d: usize, rd: usize, prompt: bool) Arm {
++    if (prompt) return if (rope_store.fuseOk(fused, rows, d, rd, 1)) .prompt_latent_fused else .prompt_latent_unfused;
++    return if (rope_store.fuseOk(fused, rows, d, rd, 1)) .latent_fused else .latent_unfused;
++}
++
++pub fn queryArm(fused: bool, rows: usize, d: usize, rd: usize, heads: usize) Arm {
++    if (!rope_store.fuseOk(fused, rows, d, rd, heads)) return .query_unfused;
++    return if (rows >= 32) .query_pair else .query_fused;   // the per-row-count geometry (0241)
++}
++
++// -- tests -----------------------------------------------------------------------------------------------------------
++
++const expectEqual = std.testing.expectEqual;
++
++test "the trace is off unless TF_DS_FUSED_TRACE is set" {
++    reset();
++    try expectEqual(false, enabled());   // the test harness runs without the variable
++}
++
++test "the served matrix selects the recorded arms, once per tuple" {
++    reset();
++    const rows_list = [_]usize{ 1, 7, 32, 48, 128, 1024 };
++    for (rows_list) |rows| {
++        for ([_]bool{ false, true }) |pdl| {
++            // decode: bucket 8 (the small pool) and 8192 (the 65,536-column window); k = candidate_blocks
++            for ([_]usize{ 8, 8192 }) |nb| {
++                const width = 8 * nb - 3;
++                const nbk = 1 + (width - 1) / 8;
++                note(idxArm(true, rows, width, 8, nbk, @min(2048, nbk)), rows, width, pdl);
++            }
++            for ([_]usize{ 128, 512 }) |d| note(compressArm(true, false, rows, d), rows, d, pdl);
++            note(keyArm(true, rows, 128, 64, 1, false), rows, 128, pdl);
++            note(latentArm(true, rows, 512, 64, false), rows, 512, pdl);
++            note(queryArm(true, rows, 128, 64, 32), rows, 128, pdl);
++            note(.prune_six, rows, 7, pdl);
++        }
++    }
++    // the arms the call sites take at the served decode shapes, as a table
++    const table = [_]Entry{
++        .{ .arm = .idx_fused, .rows = 1, .width = 61, .pdl = false },
++        .{ .arm = .idx_small, .rows = 1, .width = 65533, .pdl = false },
++        .{ .arm = .idx_small, .rows = 7, .width = 65533, .pdl = false },
++        .{ .arm = .idx_fused, .rows = 32, .width = 65533, .pdl = false },
++        .{ .arm = .compress2x_norm, .rows = 1, .width = 128, .pdl = false },
++        .{ .arm = .compress2x_norm, .rows = 1, .width = 512, .pdl = false },
++        .{ .arm = .key_fused, .rows = 1, .width = 128, .pdl = false },
++        .{ .arm = .latent_fused, .rows = 1, .width = 512, .pdl = false },
++        .{ .arm = .query_fused, .rows = 1, .width = 128, .pdl = false },
++        .{ .arm = .query_pair, .rows = 32, .width = 128, .pdl = false },
++        .{ .arm = .prune_six, .rows = 1, .width = 7, .pdl = false },
++    };
++    for (table) |want| {
++        var found = false;
++        for (entries()) |e| {
++            if (std.meta.eql(e, want)) found = true;
++        }
++        if (!found) std.debug.print("missing {s} rows={d} width={d} pdl={d}\n", .{ @tagName(want.arm), want.rows, want.width, @intFromBool(want.pdl) });
++        try std.testing.expect(found);
++    }
++    // pdl is part of the key, and a repeated tuple is recorded once (rows 3 is not in the matrix above)
++    const before = count;
++    note(.idx_fused, 3, 61, true);
++    try expectEqual(before + 1, count);
++    note(.idx_fused, 3, 61, true);
++    try expectEqual(before + 1, count);
++    note(.idx_fused, 3, 61, false);
++    try expectEqual(before + 2, count);
++    try std.testing.expect(count <= capacity);
++}
++
++test "the arms switch off with the switches" {
++    reset();
++    try expectEqual(.idx_unfused, idxArm(false, 7, 65533, 8, 8192, 2048));
++    try expectEqual(.compress_unfused, compressArm(false, false, 7, 512));
++    try expectEqual(.key_unfused, keyArm(false, 7, 128, 64, 1, false));
++    try expectEqual(.latent_unfused, latentArm(false, 7, 512, 64, false));
++    try expectEqual(.query_unfused, queryArm(false, 32, 128, 64, 32));
++    // and past the fused bounds the unfused sequence runs, as the call sites fall back
++    try expectEqual(.idx_unfused, idxArm(true, 7, 8 * 16385 - 3, 8, 16385, 2048));
++    try expectEqual(.compress_unfused, compressArm(true, false, 7, 256));   // decodeOk takes 128 and 512 only
++    try expectEqual(.compress2_norm, compressArm(true, true, 128, 2048));   // the prompt half takes pow2 to 2048
++}
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 2a89710..cef7bf4 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -27,9 +27,21 @@ pub fn fromText(text: ?[]const u8) error{BadIdxFused}!bool {
+ /// The selection's k bound (the pool's top blocks: candidate_blocks at both call sites, 2048 on this checkpoint).
+ pub const max_k = 2048;
+ /// The maxima's block count past which the fused launch keeps one block a row for work the unfused launches spread
+-/// over a 2D grid: the fused path covers the pool's regime (nbk > candidate_blocks) up to 8192 blocks (64K keys at
+-/// the served block size); past it the unfused sequence runs.
+-pub const max_nbk = 8192;
++/// over a 2D grid: the fused path covers the pool's regime (nbk > candidate_blocks) up to 16384 blocks (131,072
++/// columns at the served block size, a 262,144-token bucket at ratio 2); past it the unfused sequence runs. The bound
++/// is the GPU's opt-in dynamic shared memory (101,376 bytes here: 25,344 blocks of one fp32 maximum) rounded down to
++/// the served power of two, not the radix shortcut: that one skips the columns' two constant high bytes and would
++/// still hold to 65,536 blocks, where a column's inverted id leaves 0xFFFE in them.
++pub const max_nbk = 16384;
++
++/// Rows at or below this use the small-row form: the maxima over the pool's own 2D grid (block_max), then the selection
++/// from those global maxima in one CTA a row (tf_ds_idx_pick_kernel), because a single CTA a row leaves most of the GPU
++/// idle at one to seven rows. Above it the one-launch fused form runs. Both produce the same block list.
++pub const small_rows = 7;
++/// The block count from which the small-row form pays: at the pool's 8192-block cap (65,536 columns) the 2D grid's
++/// parallel score read wins at both one and seven rows (10.5 vs 12.1 µs, 11.8 vs 12.4 µs); at 2048 and 4096 blocks the
++/// second launch and the selection's staging cost more than the parallel read saves (5.8 vs 5.6, 8.7 vs 8.5 µs).
++pub const small_nbk = 6144;
+ 
+ /// Whether the fused launch supports this configuration. The call sites fall back to the unfused sequence when it
+ /// does not. k > nbk (the selection's own bound) and nbk <= 0 refuse; `width` must agree with `bsize`.
+@@ -137,8 +149,9 @@ test "the switch parses its forms and nothing else" {
+ test "fuseOk takes the pool's bounds" {
+     try std.testing.expect(fuseOk(true, 16, 16392, 8, 2049, 2048)); // the smallest pooled case
+     try std.testing.expect(fuseOk(true, 1, 64, 8, 8, 4));
+-    try std.testing.expect(fuseOk(true, 2048, 65536, 8, 8192, 2048)); // the nbk cap, inclusive
+-    try std.testing.expect(!fuseOk(true, 16, 65544, 8, 8193, 2048)); // past the cap
++    try std.testing.expect(fuseOk(true, 2048, 131072, 8, 16384, 2048)); // the nbk cap, inclusive
++    try std.testing.expect(!fuseOk(true, 16, 131080, 8, 16385, 2048)); // past the cap
++    try std.testing.expect(fuseOk(true, 2048, 65536, 8, 8192, 2048)); // the old cap is inside the new one
+     try std.testing.expect(!fuseOk(false, 16, 16392, 8, 2049, 2048));
+     try std.testing.expect(!fuseOk(true, 0, 16392, 8, 2049, 2048));
+     try std.testing.expect(!fuseOk(true, 16, 16392, 8, 2050, 2048)); // nbk disagrees with width/bsize
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 2492dc6..ff645a2 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -8,6 +8,7 @@ const std = @import("std");
+ const cuda = @import("cuda");
+ const expert_prune = @import("expert_prune.zig");
+ const idx_fused = @import("idx_fused.zig");
++const fused_trace = @import("fused_trace.zig");
+ const compress2_norm = @import("compress2_norm.zig");
+ const rope_store = @import("rope_store.zig");
+ 
+@@ -123,6 +124,7 @@ pub const Ops = struct {
+     fused_route: bool = false, // TF_DS_FUSED_ROUTE combines pruning and dead-row masking
+     idx_fused: bool = false, // TF_DS_IDX_FUSED, read at load; off by default
+     idx_fused_fn: ?cuda.Function = null, // looked up only when the switch is on
++    idx_pick_fn: ?cuda.Function = null, // the small-row form's second launch (idx_fused's selection from global maxima)
+     compress2_norm: bool = false, // TF_DS_FUSED_COMPRESS2_NORM, read at load; off by default
+     rope_store: bool = false, // TF_DS_FUSED_ROPE_STORE, read at load; off by default
+     check_invalid: bool = false, // TF_DS_CHECK_INVALID, read at load; off by default (a diagnostic)
+@@ -155,7 +157,7 @@ pub const Ops = struct {
+         const compress2_norm_on = try compress2_norm.fromText(envSpan(compress2_norm.env_name));
+         const rope_store_on = try rope_store.fromText(envSpan(rope_store.env_name));
+         const pdl = onValue(envSpan(pdl_env));
+-        return .{
++        const o: Ops = .{
+             .pointwise = pw,
+             .movement = mv,
+             .family = fm,
+@@ -184,6 +186,7 @@ pub const Ops = struct {
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
+             .idx_fused = idx_fused_on,
+             .idx_fused_fn = if (idx_fused_on) try fm.function("tf_ds_idx_fused_kernel") else null,
++            .idx_pick_fn = if (idx_fused_on) try fm.function("tf_ds_idx_pick_kernel") else null,
+             .compress2_norm = compress2_norm_on,
+             .rope_store = rope_store_on,
+             .check_invalid = check_invalid,
+@@ -197,6 +200,10 @@ pub const Ops = struct {
+             .draw_rows = if (envOn(draw_env)) try fm.function("tf_ds_draw_rows_kernel") else null,
+             .lora_add = if (loraOn()) try fm.function("tf_ds_add_bf16_kernel") else null,
+         };
++        // the fused pool's maxima are dynamic shared memory: past 48 KiB each kernel opts in (max_nbk blocks of fp32)
++        if (o.idx_fused_fn) |f| try f.allowDynamicShared(@intCast(idx_fused.max_nbk * @sizeOf(f32)));
++        if (o.idx_pick_fn) |f| try f.allowDynamicShared(@intCast(idx_fused.max_nbk * @sizeOf(f32)));
++        return o;
+     }
+ 
+     pub fn unload(o: *Ops) void {
+@@ -355,6 +362,7 @@ pub const Ops = struct {
+         const six = if (useSixSlotPrune(m, rows, topk, slots)) o.prune_six_fn else null;
+         const kernel = six orelse o.prune_fn orelse return error.ExpertPruneOff;
+         const threads: u32 = if (six != null and rows <= 32) 32 else expert_prune.max_rows;
++        if (fused_trace.enabled()) fused_trace.note(if (six != null) .prune_six else .prune_unfused, rows, slots, o.pdl);
+         try cuda.launch.launch(kernel, .{ .grid = .{ .x = 1 }, .block = .{ .x = threads }, .pdl = o.pdl }, s, &a);
+     }
+ 
+@@ -455,9 +463,29 @@ pub const Ops = struct {
+         a.add(@as(c_longlong, @intCast(ms)));
+         a.add(cblk);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.idx_fused, rows, width, o.pdl);
+         try cuda.launch.launch(o.idx_fused_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
+     }
+ 
++    /// TF_DS_IDX_FUSED's small-row form, second launch: tf_ds_idx_pick_kernel selects from block_max's maxima (bmax
++    /// [rows, nbk] fp32 at row stride bs) and writes the decode arm's block list, exactly as idxFused's decode arm does
++    /// (one CTA a row; the maxima are staged on chip). The call sites use it for rows <= idx_fused.small_rows.
++    pub fn idxPick(o: *const Ops, s: cuda.Stream, bmax: u64, bs: usize, nbk: usize, k: usize, every: u64, cblk: u64, rows: usize) !void {
++        if (rows == 0) return;
++        if (bmax == 0 or every == 0 or cblk == 0) return error.BadIdxFusedArgs;
++        if (nbk == 0 or nbk > idx_fused.max_nbk or bs < nbk or k < 1 or k > idx_fused.max_k or k > nbk) return error.BadIdxFusedArgs;
++        var a: cuda.Args = .{};
++        a.add(bmax);
++        a.add(@as(c_longlong, @intCast(bs)));
++        a.add(@as(c_int, @intCast(nbk)));
++        a.add(@as(c_int, @intCast(k)));
++        a.add(every);
++        a.add(cblk);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.idx_small, rows, nbk, o.pdl);
++        try cuda.launch.launch(o.idx_pick_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
++    }
++
+     /// model.py apply_candidates, in place: -inf at every column of score [rows, width] (row stride ss) whose block of
+     /// bsize the row's pool mask (u8, row stride ms) leaves out.
+     pub fn applyPool(o: *const Ops, s: cuda.Stream, score: u64, ss: usize, width: usize, bsize: usize, mask: u64, ms: usize, rows: usize) !void {
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index b84ca9e..ada099f 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -40,6 +40,7 @@ const shard_ops = @import("shard_ops.zig");
+ const prompt_rows = @import("prompt_rows.zig");
+ const prefill_prof = @import("prefill_prof.zig");
+ const idx_fused = @import("idx_fused.zig");
++const fused_trace = @import("fused_trace.zig");
+ const compress2_norm = @import("compress2_norm.zig");
+ const rope_store = @import("rope_store.zig");
+ 
+@@ -1295,44 +1296,61 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+         try mm(e, ch, lay.comp_wgate.?, ch.x, c.hidden, ch.scc, .fp32, hd);
+         // rk[pw] = kv[-keep:], rs[pw] = score[-keep:]: pw = positions start + n - keep .. % RAW
+         const keep: usize = @min(n, raw_rows);
+-        var idx: [raw_rows]i64 = undefined;
+-        for (0..keep) |j| idx[j] = @intCast((start + n - keep + j) % raw_rows);
+-        try upload(e, ch.raw_idx, &idx, keep * 8);
+-        try e.ops.scatterRows(e.s, ch.kvc + (n - keep) * hd * 4, hd * 4, ch.raw_idx, cs.raw_kv[li], hd * 4, hd * 4, keep);
+-        try e.ops.scatterRows(e.s, ch.scc + (n - keep) * hd * 4, hd * 4, ch.raw_idx, cs.raw_score[li], hd * 4, hd * 4, keep);
++        const raw_first = n - keep;
++        const raw_pos0 = (start + raw_first) % raw_rows;
++        const fused = e.ops.compress2_norm and compress2_norm.fuseOk(true, full, hd);
++        // TF_DS_FUSED_COMPRESS2_NORM writes both raw tails itself (one block per pair, plus one for an odd trailing
++        // row), so the index upload and the two scatters run only when it is off or there is no pair to launch.
++        if (!fused or full == 0) {
++            var idx: [raw_rows]i64 = undefined;
++            for (0..keep) |j| idx[j] = @intCast((start + raw_first + j) % raw_rows);
++            try upload(e, ch.raw_idx, &idx, keep * 8);
++            try e.ops.scatterRows(e.s, ch.kvc + raw_first * hd * 4, hd * 4, ch.raw_idx, cs.raw_kv[li], hd * 4, hd * 4, keep);
++            try e.ops.scatterRows(e.s, ch.scc + raw_first * hd * 4, hd * 4, ch.raw_idx, cs.raw_score[li], hd * 4, hd * 4, keep);
++        }
+         if (full == 0) { // a one-row chunk (a prompt one past a chunk end): its row waits in the store, no new group
+             sh.kv_layer = li;
+             return;
+         }
+-        if (e.ops.compress2_norm and compress2_norm.fuseOk(true, full, hd)) {
+-            // TF_DS_FUSED_COMPRESS2_NORM: compress2 and the RMSNorm in one launch (tf_ds_compress2_norm_kernel;
+-            // torch's arithmetic both times, the norm's lane count the unfused launch would use)
+-            try e.exact.compress2Norm(e.s, ch.kvc, ch.scc, lay.comp_norm, ch.lat, hd, full, hd, c.eps);
++        if (fused) {
++            // TF_DS_FUSED_COMPRESS2_NORM: compress2, the RMSNorm and the raw-ring tails in one launch
++            // (tf_ds_compress2_norm_kernel; torch's arithmetic both times, the norm's lane count the unfused launch
++            // would use, ring slots by modular position, the trailing row when the chunk has one)
++            try e.exact.compress2Norm(e.s, ch.kvc, ch.scc, lay.comp_norm, ch.lat, hd, full, hd, c.eps,
++                                      cs.raw_kv[li], cs.raw_score[li], raw_rows, raw_pos0, raw_first, n);
+         } else {
++            if (fused_trace.enabled()) fused_trace.note(.compress_unfused, full, hd, e.ops.pdl);
+             try e.exact.compress2(e.s, ch.kvc, ch.scc, ch.lat2, full, hd);
+             try e.exact.rmsNorm(e.s, ch.lat2, hd, lay.comp_norm, ch.lat, hd, full, hd, c.eps);
+         }
+     }
+     sh.kv_layer = li;
+-    // groups first // r .. and their positions group * r (the rotations _rot reads)
+-    var g_host: [4096]i64 = undefined;
+-    var p_host: [4096]i64 = undefined;
+-    if (full > g_host.len) return error.ChunkTooLong;
+-    for (0..full) |j| {
+-        g_host[j] = @intCast(start / r + j);
+-        p_host[j] = @intCast((start / r + j) * r);
+-    }
+-    try upload(e, ch.groups, &g_host, full * 8);
+-    try upload(e, ch.gpos, &p_host, full * 8);
++    // The fused stores derive their group id and rotation position from the chunk (start/ratio + row, times ratio),
++    // so ch.groups/ch.gpos are staged only for a path that reads them: the unfused rope/fp4_store chains.
+     const rot = e.compressed;
++    const base_group = start / r;
++    const idx_key_fused = if (lay.idx_wk) |_| (e.ops.rope_store and rope_store.fuseOk(true, full, c.index_head_dim, rd, 1)) else true;
++    const lat_fused = e.ops.rope_store and rope_store.fuseOk(true, full, hd, rd, 1);
++    if (!idx_key_fused or !lat_fused) {
++        var g_host: [4096]i64 = undefined;
++        var p_host: [4096]i64 = undefined;
++        if (full > g_host.len) return error.ChunkTooLong;
++        for (0..full) |j| {
++            g_host[j] = @intCast(base_group + j);
++            p_host[j] = @intCast((base_group + j) * r);
++        }
++        try upload(e, ch.groups, &g_host, full * 8);
++        try upload(e, ch.gpos, &p_host, full * 8);
++    }
+     if (lay.idx_wk) |iwk| {
+         const id = c.index_head_dim;
+         try mmRows(e, ch, full, iwk, ch.lat, hd, ch.lat2, .bf16, id);
+-        if (e.ops.rope_store and rope_store.fuseOk(true, full, id, rd, 1)) {
++        if (idx_key_fused) {
+             // TF_DS_FUSED_ROPE_STORE: rmsNorm + rope + fp4_store in one launch (torch's rms_norm/rope arithmetic,
+             // the kit's _fp4_store; the rotation stays on chip - nothing reads a rotated ch.ik)
+-            try e.exact.promptIdxKey(e.s, ch.lat2, id, lay.idx_k_norm, rot.cos, rot.sin, ch.gpos, cs.idx_codes[li], cs.idx_scales[li], ch.groups, full, id, rd, c.eps);
++            try e.exact.promptIdxKey(e.s, ch.lat2, id, lay.idx_k_norm, rot.cos, rot.sin, base_group, r, cs.idx_codes[li], cs.idx_scales[li], full, id, rd, c.eps);
+         } else {
++            if (fused_trace.enabled()) fused_trace.note(.prompt_key_unfused, full, id, e.ops.pdl);
+             try e.exact.rmsNorm(e.s, ch.lat2, id, lay.idx_k_norm, ch.ik, id, full, id, c.eps);
+             try e.exact.rope(e.s, ch.ik, id, id - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);
+             // switch "comp": the packed cache's rows in one launch (fp4_store: store_rows' bytes)
+@@ -1341,11 +1359,12 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+     }
+     // TF_DS_KV_SHARD: only the extent's owner holds (and stores) its compressed rows; the other rank's view has none
+     if (cs.own != null and !cs.own.?) return;
+-    if (e.ops.rope_store and rope_store.fuseOk(true, full, hd, rd, 1)) {
++    if (lat_fused) {
+         // TF_DS_FUSED_ROPE_STORE: rope + fp4_store in one launch (torch's rope arithmetic, the kit's _fp4_store;
+         // the rotation stays on chip - nothing reads a rotated ch.lat2)
+-        try e.exact.promptLatent(e.s, ch.lat, rot.cos, rot.sin, ch.gpos, cs.comp_codes[li], cs.comp_scales[li], ch.groups, full, hd, rd);
++        try e.exact.promptLatent(e.s, ch.lat, rot.cos, rot.sin, base_group, r, cs.comp_codes[li], cs.comp_scales[li], full, hd, rd);
+     } else {
++        if (fused_trace.enabled()) fused_trace.note(.prompt_latent_unfused, full, hd, e.ops.pdl);
+         try e.ops.copyRows(e.s, ch.lat, hd * 2, ch.lat2, hd * 2, hd * 2, full);
+         try e.exact.rope(e.s, ch.lat2, hd, hd - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);
+         try tri_attn.fp4Store(e.t, ch.lat2, hd, cs.comp_codes[li], cs.comp_scales[li], ch.groups, full, hd, 16, true);
+@@ -1375,12 +1394,24 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+         return;
+     }
+     if (n_comp_end > ch.max_comp) return error.ChunkTooLong;
++    if (n_comp_end <= c.index_topk) {
++        // every compressed key fits in the pick budget: the selection is the visible ids themselves (the k best of
++        // n_comp_end keys is all of them, `vis` masking those past the row's count, and the engine's own topk_indices
++        // already writes them in ascending column order), so the query projection, its RoPE and quantization, the
++        // heads' weights, the scoring and the selection launches are not needed. The decode arm takes the same identity
++        // for nb <= index_topk. `pooled` is false here (a pool needs nbk > candidate_blocks), so `sh.pool` stays unset
++        // exactly as the full path would leave it.
++        try e.ops.iotaVis(e.s, ch.vis, ch.cidx, n_comp_end, n);
++        sh.kk = n_comp_end;
++        return;
++    }
+     try mm(e, ch, wqb, ch.qr, lay.wq_a.n, ch.iq, .bf16, ih * id);
+     if (e.ops.rope_store and rope_store.fuseOk(true, n, id, c.rope_dim, ih)) {
+         // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 in one launch (the decode arm's kernel: the same Triton
+         // arithmetic over the same [rows, heads, head_dim] layout, with the prompt's own positions, ch.pos)
+         try e.exact.ropeQd(e.t.stream, ch.iq, ch.iq4, rope.cos, rope.sin, ch.pos, n, ih, id, c.rope_dim);
+     } else {
++        if (fused_trace.enabled()) fused_trace.note(.query_unfused, n, id, e.ops.pdl);
+         try tri_norm.ropeHeads(e.t, ch.iq, rope.cos, rope.sin, ch.pos, c.rope_dim, false, n, ih, id);
+         // switch "idx": fp4_qd's bytes in one launch
+         try tri_attn.fp4QdP2(e.t, ch.iq, ch.iq4, n * ih * id);
+@@ -1445,6 +1476,7 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+                 if (idx_fused.fuseOk(e.ops.idx_fused, m, n_comp_end, cb, nbk, pk)) {
+                     try e.ops.idxFused(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.every, pk, mrows, ch.pool_ms, 0, m);
+                 } else {
++                    if (fused_trace.enabled()) fused_trace.note(.idx_unfused, m, n_comp_end, e.ops.pdl);
+                     try e.ops.blockMax(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.bmax, nbk, m);
+                     try e.ops.topkIndices(e.s, ch.bmax, nbk, m, nbk, pk, ch.every, ch.pidx);
+                     try e.ops.poolPick(e.s, ch.bmax, nbk, nbk, ch.pidx, pk, mrows, ch.pool_ms, 0, m);
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 3df785e..a41f888 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -35,6 +35,7 @@ const expert_prune = @import("expert_prune.zig");
+ const idx_fused = @import("idx_fused.zig");
+ const compress2_norm = @import("compress2_norm.zig");
+ const rope_store = @import("rope_store.zig");
++const fused_trace = @import("fused_trace.zig");
+ 
+ const Engine = prompt.Engine;
+ const Chunk = prompt.Chunk;
+@@ -1039,6 +1040,7 @@ fn compressorChain(e: *const Engine, rd: *const Round, ch: *const Chunk, t: tri.
+             try checkInvalid(e, ch, li);
+             return;
+         }
++        if (fused_trace.enabled()) fused_trace.note(.compress_unfused, R, hd, e.ops.pdl);
+         if (rd.fused_compress2) {
+             // TF_DS_FUSED_COMPRESS2: the scatter of the rows into the raw slots, the pair's rows back and compress2's
+             // weighted sum in one launch (LDs in elements of the buffer's dtype; the memset stays out — ch.invalid's
+@@ -1200,6 +1202,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     // width gate: its norm is the 128-wide kit specialization)
+                     try e.exact.idxKeyFused(t.stream, rd.ikp, id, lay.idx_k_norm, rope.cos, rope.sin, gpos, cs.idx_codes[li], cs.idx_scales[li], ctarget, R, id, rd_dim, c.eps);
+                 } else {
++                    if (fused_trace.enabled()) fused_trace.note(.key_unfused, R, id, e.ops.pdl);
+                     try tri_basic.rmsnorm(t, rd.ikp, id, lay.idx_k_norm, rd.ik, id, c.eps, R, id);
+                     try tri_norm.ropeHeads(t, rd.ik, rope.cos, rope.sin, gpos, rd_dim, false, R, 1, id);
+                     try tri_attn.fp4Store(t, rd.ik, id, cs.idx_codes[li], cs.idx_scales[li], ctarget, R, id, 32, false);
+@@ -1212,6 +1215,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                 // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4_store in one launch (rd.lat read only)
+                 try e.exact.ropeStore(t.stream, rd.lat, rope.cos, rope.sin, gpos, cs.comp_codes[li], cs.comp_scales[li], ltarget, R, hd, rd_dim);
+             } else {
++                if (fused_trace.enabled()) fused_trace.note(.latent_unfused, R, hd, e.ops.pdl);
+                 try tri_norm.ropeHeads(t, rd.lat, rope.cos, rope.sin, gpos, rd_dim, false, R, 1, hd);
+                 try tri_attn.fp4Store(t, rd.lat, hd, cs.comp_codes[li], cs.comp_scales[li], ltarget, R, hd, 16, true);
+             }
+@@ -1232,6 +1236,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                 // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 in one launch (rd.iq read only)
+                 try e.exact.ropeQd(t.stream, rd.iq, rd.iq4, rope.cos, rope.sin, pos, R, ih, id, rd_dim);
+             } else {
++                if (fused_trace.enabled()) fused_trace.note(.query_unfused, R, id, e.ops.pdl);
+                 try tri_norm.ropeHeads(t, rd.iq, rope.cos, rope.sin, pos, rd_dim, false, R, ih, id);
+                 try tri_attn.fp4QdP2(t, rd.iq, rd.iq4, R * ih * id);
+             }
+@@ -1270,8 +1275,15 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     // TF_DS_IDX_FUSED: the same three launches in one (off by default; the bounds keep the pool's
+                     // regime, past them the unfused sequence runs)
+                     if (idx_fused.fuseOk(e.ops.idx_fused, R, nb, cb, nbk, c.candidate_blocks)) {
+-                        try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
++                        if (R <= idx_fused.small_rows and nbk >= idx_fused.small_nbk) {
++                            // the small-row form: the maxima over the pool's own 2D grid, then the selection from them
++                            // (the same cutoff, tied columns and ascending list; a single CTA a row would leave most
++                            // of the GPU idle at one to seven rows)
++                            try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
++                            try e.ops.idxPick(e.s, rd.bmax, nbk, nbk, c.candidate_blocks, rd.pbufs.every, rd.cblk, R);
++                        } else try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
+                     } else {
++                        if (fused_trace.enabled()) fused_trace.note(.idx_unfused, R, nb, e.ops.pdl);
+                         try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
+                         try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
+                         try e.ops.poolPick(e.s, rd.bmax, nbk, nbk, rd.pidx, c.candidate_blocks, 0, 0, rd.cblk, R);

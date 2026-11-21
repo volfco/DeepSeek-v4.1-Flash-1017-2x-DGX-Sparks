@@ -1,0 +1,20 @@
+Extension error (/home/colum/.pi/agent/npm/node_modules/pi-subagents/index.js): Auto-drain failed for session '/home/colum/Workspace/pi-sessions/fused-next/2026-11-21T13-07-17-306Z_01a1fe37-e0b9-75e5-9834-043f5a1f69ff.jsonl': Waited 5m30s for 5 async run(s); done. Outcome: 1 complete, 4 failed.
+Result [9f50b781-8f81-4daa-8ae7-a007b995cb01]: /tmp/pi-subagents-uid-1000/async-subagent-results/output-archives/9f50b781-8f81-4daa-8ae7-a007b995cb01.json
+ Resume-first: 4 failed runs have persisted child sessions. Inspect status and revive each original run before reporting failure or launching a replacement. Launch a replacement only if revive fails or the user explicitly asks for one. Completion/control events have been observed; inspect status if a notification is not visible yet.
+Workflow receipt [9f50b781-8f81-4daa-8ae7-a007b995cb01]: /tmp/pi-subagents-uid-1000/async-subagent-runs/9f50b781-8f81-4daa-8ae7-a007b995cb01/workflow-receipt.json.
+Extension error (/home/colum/.pi/agent/npm/node_modules/pi-subagents/index.js): Auto-drain failed for session '/home/colum/Workspace/pi-sessions/fused-next/2026-11-21T13-07-17-306Z_01a1fe37-e0b9-75e5-9834-043f5a1f69ff.jsonl': Waited 21m43s for 7 async run(s); done. Outcome: 3 complete, 4 failed.
+Result [7f9c963d-463f-42f2-ad12-86c1956e8181]: /tmp/pi-subagents-uid-1000/async-subagent-results/output-archives/7f9c963d-463f-42f2-ad12-86c1956e8181.json
+ Resume-first: 4 failed runs have persisted child sessions. Inspect status and revive each original run before reporting failure or launching a replacement. Launch a replacement only if revive fails or the user explicitly asks for one. Completion/control events have been observed; inspect status if a notification is not visible yet.
+Workflow receipt [7f9c963d-463f-42f2-ad12-86c1956e8181]: /tmp/pi-subagents-uid-1000/async-subagent-runs/7f9c963d-463f-42f2-ad12-86c1956e8181/workflow-receipt.json.
+`runs/fused-next-20261121/review/REVIEW.md` written (302 lines, in two appends plus the verdict).
+
+**Reviewers:** ran as six parallel read-only subagents (the four required focuses; bit-exactness split three ways because the first single-agent attempt at 30 min per agent timed out mid-read). Two delivered full reports; four were resumed with a "stop reading, report now" steer and delivered. Every blocker/should-fix was re-checked against the branch before inclusion — `git show`, line-number verification, and for the one numeric claim a reproduction in numpy.
+
+**Findings:** 2 blockers, 12 should-fix, 8 notes.
+
+- **B1 (new, verified numerically):** 0241's pair kernel rounds the odd rotary element with the *torch* contraction `fma(xo, cs, xe*sn)` while the kernel it replaces and the file's own kit contract use `fma(xe, sn, xo*cs)`. Not the same function. Reproduced a concrete served-output difference (`xe=-0.38867188, xo=-0.034179688, cs=0.48039034, sn=-0.44551173` → kit `0.125`, pair `0.1875`). The harness's 0-differing-bytes result is not evidence of equality — ~0.25% per launch, forty launches a round.
+- **B2:** the previous round's two unreproduced new-only byte differences on served decode shapes (`idx-small R=1 nb=8192`, `compress-decode R=32 D=512`) sit inside this series' 0215/0230 and are still unexplained.
+- Highest residual should-fix: 0216 is a default-on, unswitched host shortcut whose justification cites the engine's `topk_indices` while the path it actually replaces is the kit's `_topk_sel` — the 0206 failure class, unbyte-checked.
+
+Skipped: no build and no GPU run, so `zig build test` (794/796) and every SASS/occupancy number are taken from the evidence, not re-derived; the 101,376-byte opt-in limit is quoted, not re-queried.
+pi exit 0

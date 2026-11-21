@@ -1,0 +1,66 @@
+{
+ "results": [
+  {
+   "kernel": "0198-query",
+   "shape": "rope query R=32 D=128 adv",
+   "rows": 32,
+   "d": 128,
+   "parity": {
+    "new_vs_ref": 0,
+    "old_vs_ref": 0
+   },
+   "bytes": 524288
+  },
+  {
+   "kernel": "0198-query",
+   "shape": "rope query R=48 D=128 adv",
+   "rows": 48,
+   "d": 128,
+   "parity": {
+    "new_vs_ref": 0,
+    "old_vs_ref": 0
+   },
+   "bytes": 786432
+  },
+  {
+   "kernel": "0198-query",
+   "shape": "rope query R=64 D=128 adv",
+   "rows": 64,
+   "d": 128,
+   "parity": {
+    "new_vs_ref": 36,
+    "old_vs_ref": 36
+   },
+   "bytes": 1048576
+  },
+  {
+   "kernel": "0198-query",
+   "shape": "rope query R=1024 D=128 adv",
+   "rows": 1024,
+   "d": 128,
+   "parity": {
+    "new_vs_ref": 576,
+    "old_vs_ref": 576
+   },
+   "bytes": 16777216
+  }
+ ],
+ "failures": [
+  "query new R=64 buffer 0: 36 bytes differ (first 155778)",
+  "query old R=64 buffer 0: 36 bytes differ (first 155778)",
+  "query new R=1024 buffer 0: 576 bytes differ (first 83331)",
+  "query old R=1024 buffer 0: 576 bytes differ (first 83331)"
+ ],
+ "health": {
+  "before": {
+   "prompt_tokens_total": 232891412,
+   "generation_tokens_total": 1679716
+  },
+  "after": {
+   "prompt_tokens_total": 232891412,
+   "generation_tokens_total": 1679716
+  },
+  "timing_retries": 0,
+  "timing_clean": true
+ }
+}

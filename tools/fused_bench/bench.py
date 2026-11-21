@@ -666,6 +666,38 @@ def bf(shape):
     return (rng.normal(size=shape).astype("f4").view("u4") >> 16).astype("u2")
 
 
+def bf16_bits(v):
+    return int(np.float32(v).view("u4") >> 16)
+
+
+def bf16_round(v):
+    u = int(np.float32(v).view("u4"))
+    u = (u + 0x7FFF + ((u >> 16) & 1)) >> 16 << 16
+    return np.uint32(u & 0xFFFFFFFF).view("f4")
+
+
+def adv_query_hits():
+    """(xe, xo, cos, sin) with bf16 xe/xo where the kit and torch odd-element contractions round to different bf16
+    values and one of the two has an E2M1-boundary mantissa (1.000, 1.010, 1.100, 1.110): host search, f64 emulation
+    of the f32 fma (the GPU is the arbiter)."""
+    g = np.random.default_rng(7)
+    out = []
+    to_bf = lambda x: ((x.astype("f4").view("u4").astype("u8") + 0x7FFF + ((x.astype("f4").view("u4") >> 16) & 1))
+                       >> 16 << 16).astype("u4").view("f4")
+    while len(out) < 64:
+        n = 2_000_000
+        xe, xo = to_bf(g.standard_normal(n).astype("f4")), to_bf(g.standard_normal(n).astype("f4"))
+        a = g.uniform(-np.pi, np.pi, n)
+        cs, sn = np.cos(a).astype("f4"), np.sin(a).astype("f4")
+        f = np.float64
+        kit = to_bf((f(xe) * f(sn) + f((f(xo) * f(cs)).astype("f4"))).astype("f4"))
+        tor = to_bf((f(xo) * f(cs) + f((f(xe) * f(sn)).astype("f4"))).astype("f4"))
+        for i in np.nonzero(kit != tor)[0]:
+            if any(((np.float32(abs(v)).view("u4") >> 16) & 0x7F) in (0x00, 0x20, 0x40, 0x60) for v in (kit[i], tor[i])):
+                out.append((xe[i], xo[i], cs[i], sn[i]))
+    return out[:64]
+
+
 def case_compress_decode(rows, d, layout="mixed", timing=True, special=False):
     n = rows * 2
     stride = d + int(layout == "unaligned")
@@ -786,11 +818,14 @@ def case_rope(path, rows, special=False, timing=True):
     query = path == "query"
     heads = 32 if query else 1
     d = 128 if key or query else 512
-    label = f"rope {path} R={rows} D={d}{' special' if special else ''}"
+    adv = special == "adv"
+    label = f"rope {path} R={rows} D={d}{' adv' if adv else ' special' if special else ''}"
     if not shape_ok(label):
         return None
     src = bf((rows, heads, d))
-    if special:
+    if adv:
+        src[:] = 0
+    elif special:
         src[..., :8] = [0x7FC1, 0x7F80, 0xFF80, 0x8000, 0, 1, 0x7F7F, 0x8001]
         src[..., 32:64] = 0x7FC1
     weights = Buffer(bf(d))
@@ -804,7 +839,26 @@ def case_rope(path, rows, special=False, timing=True):
         dest = Buffer(rng.permutation(rows).astype("i8"))
     # the rotation tables are indexed by absolute position, so a prompt case with a nonzero group base needs rows
     angle = rng.uniform(-np.pi, np.pi, ((base + rows) if prompt else rows, 32))
-    cos, sin = Buffer(np.cos(angle).astype("f4")), Buffer(np.sin(angle).astype("f4"))
+    cos_t, sin_t = np.cos(angle).astype("f4"), np.sin(angle).astype("f4")
+    if adv:
+        # B1 (review): inputs where the kit's odd-element contraction fma(xe, sn, xo*cs) and the torch form
+        # fma(xo, cs, xe*sn) round to different bf16 values, at a value whose magnitude sits on an E2M1 boundary
+        # pattern; head h sets the group's maximum A = 2^(e + h % 8 - 1) at another pair (cos 1, sin 0), so some
+        # head's scale puts the boundary inside the code grid. Each row's position picks the hit.
+        hits = adv_query_hits()
+        cos_t[:] = 1.0
+        sin_t[:] = 0.0
+        pos_host = rng.permutation(rows).astype("i8")
+        pos = Buffer(pos_host)
+        for r in range(rows):
+            xe, xo, c_, s_ = hits[int(pos_host[r]) % len(hits)]
+            cos_t[pos_host[r], 0], sin_t[pos_host[r], 0] = c_, s_
+            e = int(np.floor(np.log2(abs(float(c_) * float(xo) + float(s_) * float(xe)) + 1e-30)))
+            for h in range(heads):
+                src[r, h, d - 64] = bf16_bits(xe)
+                src[r, h, d - 63] = bf16_bits(xo)
+                src[r, h, d - 64 + 16] = bf16_bits(np.float32(2.0 ** (e + h % 8 - 1)))
+    cos, sin = Buffer(cos_t), Buffer(sin_t)
     if os.environ.get("FUSED_BENCH_DEBUG"):
         print(f"  {label}: base={base if prompt else None} rows={rows} angle={angle.shape} src={src.shape}",
               flush=True)
@@ -881,6 +935,21 @@ def case_rope(path, rows, special=False, timing=True):
         live = [3, 4]
     else:
         live = [3, 4]
+    if adv:
+        cu("cuStreamSynchronize", stream)
+        rot = states[0][0].readarr()[:, 0, d - 63].astype("u4") << 16   # the kit's rotated odd element, head 0
+        tally = {"kit": 0, "torch": 0, "both": 0, "neither": 0}
+        for r in range(rows):
+            xe, xo, c_, s_ = hits[int(pos_host[r]) % len(hits)]
+            f = np.float64
+            kit = np.float32(f(xe) * f(s_) + f(np.float32(f(xo) * f(c_))))
+            tor = np.float32(f(xo) * f(c_) + f(np.float32(f(xe) * f(s_))))
+            kb, tb = bf16_bits(bf16_round(kit)), bf16_bits(bf16_round(tor))
+            g = int(rot[r] >> 16)
+            tally["both" if g == kb == tb else "kit" if g == kb else "torch" if g == tb else "neither"] += 1
+        dq_ref, dq_new = states[0][2].readarr(), states[2][2].readarr()
+        print(f"  adv R={rows}: kit rope matches {tally}; dq rows differing new vs ref: "
+              f"{int((dq_ref != dq_new).any(axis=(1, 2)).sum())}", flush=True)
     diff_new = compare(f"{path} new R={rows}", [states[2][i] for i in live], [states[0][i] for i in live])
     diff_old = compare(f"{path} old R={rows}", [states[1][i] for i in live], [states[0][i] for i in live])
     row = {"kernel": f"0198-{path.replace(' ', '-')}", "shape": label, "rows": rows, "d": d,
@@ -1180,13 +1249,13 @@ IDX_SHAPES = [
 ]
 
 DECODE_SHAPES = [(r, d) for r in (1, 7, 32, 48) for d in (128, 512)]
-PROMPT_SHAPES = [(r, d) for r in (128, 1024) for d in (512, 2048)]
+PROMPT_SHAPES = [(r, d) for r in (128, 1024, 2048, 4096) for d in (512, 2048)]
 ROPE_SHAPES = [("key", r) for r in (1, 7, 32, 48)] + \
               [("latent", r) for r in (1, 7, 32, 48)] + \
               [("query", r) for r in (1, 7, 32, 48)] + \
               [("query", r) for r in (128, 1024)] + \
-              [("prompt key", r) for r in (128, 1024)] + \
-              [("prompt latent", r) for r in (128, 1024)]
+              [("prompt key", r) for r in (128, 1024, 2048, 4096)] + \
+              [("prompt latent", r) for r in (128, 1024, 2048, 4096)]
 PRUNE_SHAPES = [1, 7, 32, 48]
 SCORE_KEYS_SHAPES = [(r, w) for r in (1, 7, 32, 128) for w in (16384, 32768, 65536)]
 
@@ -1341,6 +1410,9 @@ def main():
                 if path == tag:
                     run(case_rope, path, rows)
             run(case_rope, tag, 128 if tag.startswith("prompt") else 7, True, False)
+            if tag == "query":
+                for rows in (32, 48, 64, 1024):
+                    run(case_rope, "query", rows, "adv", False)
             free_all()
         if selected("latent"):
             case_latent_values()

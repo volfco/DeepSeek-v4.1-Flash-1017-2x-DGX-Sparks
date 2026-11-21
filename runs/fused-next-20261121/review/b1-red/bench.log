@@ -1,0 +1,24 @@
+MemAvailable 5.29 GiB
+health: connections=0
+health before: {'prompt_tokens_total': 232891412, 'generation_tokens_total': 1679716}
+  adv R=32: kit rope matches {'kit': 32, 'torch': 0, 'both': 0, 'neither': 0}; dq rows differing new vs ref: 0
+  adv R=48: kit rope matches {'kit': 48, 'torch': 0, 'both': 0, 'neither': 0}; dq rows differing new vs ref: 0
+  adv R=64: kit rope matches {'kit': 64, 'torch': 0, 'both': 0, 'neither': 0}; dq rows differing new vs ref: 3
+  adv R=1024: kit rope matches {'kit': 1024, 'torch': 0, 'both': 0, 'neither': 0}; dq rows differing new vs ref: 48
+
+== parity
+PASS  0198-query               rope query R=32 D=128 adv                            {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-query               rope query R=48 D=128 adv                            {'new_vs_ref': 0, 'old_vs_ref': 0}
+FAIL  0198-query               rope query R=64 D=128 adv                            {'new_vs_ref': 36, 'old_vs_ref': 36}
+FAIL  0198-query               rope query R=1024 D=128 adv                          {'new_vs_ref': 576, 'old_vs_ref': 576}
+
+== timing (us, median[iqr])
+health after: {'prompt_tokens_total': 232891412, 'generation_tokens_total': 1679716}  every timing block verified idle
+
+wrote b1-red.json
+
+4 parity failure(s)
+  query new R=64 buffer 0: 36 bytes differ (first 155778)
+  query old R=64 buffer 0: 36 bytes differ (first 155778)
+  query new R=1024 buffer 0: 576 bytes differ (first 83331)
+  query old R=1024 buffer 0: 576 bytes differ (first 83331)
