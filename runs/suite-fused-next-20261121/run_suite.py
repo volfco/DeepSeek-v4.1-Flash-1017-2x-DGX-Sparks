@@ -38,6 +38,7 @@ def cell(self, c):
 
 
 bo.Block.cell = cell
+CAMPAIGN_T0 = __import__('time').strftime('%Y-%m-%dT%H:%M:%SZ', __import__('time').gmtime())
 
 _run_block = bo.run_block
 
@@ -46,7 +47,9 @@ def run_block(entry, corpus):
     # The runner waits ten minutes for an idle server and then restarts anyway. Before each block, look at the
     # running container's log: a request that did not come from this machine means a real client is here, so stop
     # (the runner then goes straight to its production restore).
-    seen = bo.sh(f"docker logs {bo.CONTAINER} 2>&1 | grep 'POST /v1/' | grep -v '\\[tensorfold\\] 127\\.0\\.0\\.1 ' | head -3")
+    # suite-fused-next: only requests since the campaign started count (production's container carries a real
+    # client's history from before the launch window; launch.sh waits for 30 idle minutes before starting)
+    seen = bo.sh(f"docker logs --since {CAMPAIGN_T0} {bo.CONTAINER} 2>&1 | grep 'POST /v1/' | grep -v '\\[tensorfold\\] 127\\.0\\.0\\.1 ' | head -3")
     if seen.strip():
         bo.log(f"{entry['id']} NON-LOOPBACK REQUESTS in the running container's log: stopping the campaign: {seen.strip()[:300]}")
         with open(f"{bo.OUT}/STOP", "w") as fh:
