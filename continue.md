@@ -1,5 +1,18 @@
 # Continue
 
+**Production since November 21, 07:36 UTC: the fused kernels 0193-0199.** Both ranks run
+`tensorfold-dsv41:bench-prune-six-20261120` (production source + reworked 0193/0194, 0195/0197/0198 and 0199) with
+production's `.env` plus `TF_DS_IDX_FUSED=1`, `TF_DS_FUSED_COMPRESS2_NORM=1`, `TF_DS_FUSED_ROPE_STORE=1`,
+`TF_DS_FUSED_ROUTE=1`, and `IMAGE=` / `PREPARE=0` so a plain `./start.sh restart` starts it without building. A
+four-block ABBA run of the full suite against production found the exact panel identical 39/39 on both fused blocks,
+every probe and decode reply equal, the probe +0.76%/+0.91% and decode rounds 0.1-1.1% shorter, prefill within
++-0.6%. After the restart both ranks showed the image and switches and all eight saved replies matched. The image
+change started a fresh spill namespace (kept states went cold). No committed patch series reproduces this image: it
+is `~/Workspace/tfref-fusedbench` branch `prune-six` (`d66e663`); binary hashes are in the deploy record. **Undo:**
+`cp ~/dsv41-env-backups/.env.bak-20261121-pre-fused .env && ./start.sh restart` on the head, and remove the same seven
+lines from this checkout's `.env`. [Suite results](runs/suite-fused-20261121/RESULTS.md) ·
+[Deploy record](runs/deploy-fused-20261121/)
+
 **Next: fix 0206's key encoding, then re-run the `TF_DS_IDX_FUSED` arm (2026-11-21).** The follow-up series was
 collapsed: `0195` now carries the six faster follow-ups (0200, 0201, 0202, 0209, 0210, 0212) folded in, and the four
 diagnostic/gate follow-ups stay separate (0203, 0204, 0205, 0211). **0206, 0207 and 0208 are parked in
