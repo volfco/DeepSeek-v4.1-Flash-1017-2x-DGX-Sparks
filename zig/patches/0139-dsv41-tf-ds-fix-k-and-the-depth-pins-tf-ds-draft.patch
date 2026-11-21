@@ -1,0 +1,39 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 9b834fe084a2..140398fbf89d)
+# dsv41: TF_DS_FIX_K and the depth pins TF_DS_DRAFT_DEPTH2..5 (unset: nothing changes) are read by the batch driver too - the served process's parse rules, so W4's fixed-rows cells can run there
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 62c46c55310cd9b449dab866c5fb95c94ca80ce4..ab6607d6d00608b83c6bead27205fa5bbe3e54ef 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -9,6 +9,7 @@
+ //! line a request, then the summary. FILE: zrec_lanereq.py's requests (prompt ids, max_tokens, sampling, expect_sha).
+ //! KIT_DIR: a gate dir's aot/, cubins/, RoPE tables (as many rows as the pool) and engram.json.
+ //! TF_DS_PROMPT_WINDOW_ROWS and TF_DS_PROMPT_GEMM_ROWS (64 and 128 unset) are read here as the served process reads them: set them alike on every rank.
++//! TF_DS_FIX_K and the depth pins TF_DS_DRAFT_DEPTH2..5 are read here likewise (native.zig's parse rules): unset, nothing changes. --fix-k set: the flag wins over TF_DS_FIX_K.
+ //! The spill tier (GPU validation of keep, evict, restore and restart without the HTTP server): every rank takes
+ //! --spill-dir DIR --spill-gib G [--spill-min-free-gib F] [--spill-min-tokens T] [--spill-quota Q]
+ //! [--spill-staging-mib M] (else TF_DS_SPILL_DIR, TF_DS_SPILL_GIB, ... and TF_SPILL_TURNS / TF_SPILL_FLUSH_MS; the
+@@ -126,7 +127,7 @@ pub fn main(init: std.process.Init) !u8 {
+     const clock_marks: u8 = if (std.c.getenv("TF_DS_CLOCK_MARKS")) |v| std.fmt.parseInt(u8, std.mem.span(v), 10) catch 0 else 0;
+     var phases = false; // --profile 2: also the rounds' GPU time by phase (eager rounds)
+     var serial = false; // --serial 1: every stream without drafts (one row a round)
+-    var fix_k: ?usize = null; // --fix-k K: every drafted stream verifies K drafts a round (a cost measurement)
++    var fix_k: ?usize = null; // --fix-k K: every drafted stream verifies K drafts a round (a cost measurement; TF_DS_FIX_K when the flag is absent)
+     var cache_gib: f64 = 4; // --prompt-cache-gib: rank 0's prompt cache with the spill tier
+     var ai: usize = 8;
+     while (ai + 1 < args.len) : (ai += 2) {
+@@ -300,6 +301,14 @@ pub fn main(init: std.process.Init) !u8 {
+         ln.spill = null;
+     };
+     try ln.startKv();
++    // TF_DS_FIX_K and the depth pins (TF_DS_DRAFT_DEPTH2..5), as the served process reads them (native.zig): unset, the
++    // flags and the rule stand; two depth pins at once refused as native refuses them (lanes.parseDepthPin)
++    if (fix_k == null) {
++        if (spillEnv("TF_DS_FIX_K")) |t| fix_k = std.fmt.parseInt(usize, t, 10) catch return error.BadFixK;
++    }
++    var pins: [dsv41.lanes.depth_pins.len]?[]const u8 = undefined;
++    inline for (dsv41.lanes.depth_pins, 0..) |d, i| pins[i] = spillEnv(d.name);
++    ln.draft_pin = dsv41.lanes.parseDepthPin(&pins) catch return error.BadDraftPin;
+     ln.fix_k = fix_k;
+     var snap_vt: pcache.Snapshots.VTable = undefined;
+     var store_v: pcache.Store = undefined;

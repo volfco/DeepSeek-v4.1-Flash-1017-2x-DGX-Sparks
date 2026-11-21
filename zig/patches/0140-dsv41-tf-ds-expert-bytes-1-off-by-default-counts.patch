@@ -1,0 +1,197 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 140398fbf89d..b4e1fbb76314)
+# dsv41: TF_DS_EXPERT_BYTES=1 (off by default) counts a decode round's expert places at fixed rows and the trellis bytes they read, printed beside expert_prune's line (W4-1)
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index ab6607d6d00608b83c6bead27205fa5bbe3e54ef..0f16c10f19a3d83b89ff2903efa56ad00819814a 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -246,6 +246,7 @@ pub fn main(init: std.process.Init) !u8 {
+             printClock(w, o.rank, m) catch {};
+             printKvShard(w, o.rank, m) catch {};
+             printPrune(w, o.rank, m) catch {};
++            printExpertBytes(w, o.rank, m) catch {};
+             if (m.ptimer) |tm| {
+                 w.print("{{\"rank\": {d}, \"prefill_phases_ms\": {{", .{o.rank}) catch {};
+                 for (dsv41.round.PhaseTimer.phases, 0..) |name, i| w.print("{s}\"{s}\": {d:.3}", .{ if (i == 0) "" else ", ", name, if (tm.rounds == 0) 0 else tm.ms[i] / @as(f64, @floatFromInt(tm.rounds)) }) catch {};
+@@ -441,6 +442,7 @@ pub fn main(init: std.process.Init) !u8 {
+         try printClock(w, 0, m);
+         try printKvShard(w, 0, m);
+         try printPrune(w, 0, m);
++        try printExpertBytes(w, 0, m);
+         if (m.eh) |eh| if (eh.p_calls > 0) {
+             const pc: f64 = @floatFromInt(eh.p_calls);
+             try w.print("{{\"rank\": 0, \"prefill_engram_ms\": {{\"calls\": {d}, \"rows\": {d:.2}, \"upload\": {d:.2}, \"mm\": {d:.2}, \"exchange\": {d:.2}, \"gate\": {d:.2}}}}}\n", .{ eh.p_calls, @as(f64, @floatFromInt(eh.p_rows)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_upload)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_mm)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_x)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_gate)) / pc / 1e6 });
+@@ -547,6 +549,17 @@ fn printPrune(w: *std.Io.Writer, rank: u32, m: *dsv41.model.Model) !void {
+     try w.flush();
+ }
+ 
++/// TF_DS_EXPERT_BYTES's MoE counters on this rank (a profile), a layer's decode window each: the distinct expert places
++/// the windows route and the trellis bytes those places read; nothing when the switch is off.
++fn printExpertBytes(w: *std.Io.Writer, rank: u32, m: *const dsv41.model.Model) !void {
++    const xb = m.rd.moe_bytes orelse return;
++    const win: f64 = @floatFromInt(@max(xb.windows, 1));
++    const rounds: f64 = @floatFromInt(@max(xb.windows / @max(m.w.layers.len, 1), 1));
++    const kb = @as(f64, @floatFromInt(xb.bytes)) / 1024;
++    try w.print("{{\"rank\": {d}, \"expert_bytes\": {{\"windows\": {d}, \"rows_a_window\": {d:.1}, \"places_a_window\": {d:.3}, \"kb_a_window\": {d:.1}, \"kb_a_round\": {d:.1}}}}}\n", .{ rank, xb.windows, @as(f64, @floatFromInt(xb.rows)) / win, @as(f64, @floatFromInt(xb.places)) / win, kb / win, kb / rounds });
++    try w.flush();
++}
++
+ /// A profile's round GPU clock gaps (us a round): start to the first stretch, then each stretch and the wait after it.
+ fn printClock(w: *std.Io.Writer, rank: u32, m: *const dsv41.model.Model) !void {
+     if (m.clk_rounds == 0) return;
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 1f459dc02d1b7300d2c08342df1c82e0d69cdcd0..ec019872d01c7a9a59479c7b27be2fdbebd024f2 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -466,6 +466,12 @@ pub const Model = struct {
+         m.draw_tab = if (m.ops.draw_rows != null) try m.arena.take(round.max_rows * @sizeOf(ops_mod.DrawRow)) else 0;
+         m.draw_rows = 0;
+         if (o.graphs) m.graphs = round.Graphs.init(gpa, o.graph_cap);
++        if (o.graphs) if (m.rd.moe_bytes) |*xb| {
++            // TF_DS_EXPERT_BYTES reads the decode scratch back a layer: a captured stretch cannot (the copy would join
++            // the graph), so the profile keeps to eager rounds
++            xb.deinit(gpa);
++            m.rd.moe_bytes = null;
++        };
+         if (o.side) try m.rd.useSide(&m.eng);
+         if (o.prefetch) try m.rd.usePrefetch(&m.eng);
+         if (o.drafts) {
+@@ -740,6 +746,7 @@ pub const Model = struct {
+         if (m.tail_buf) |*b| b.free();
+         if (m.graphs) |*g| g.deinit();
+         if (m.pgraphs) |*g| g.deinit();
++        if (m.rd.moe_bytes) |*xb| xb.deinit(m.gpa);
+         if (m.timer) |t| {
+             t.deinit();
+             m.gpa.destroy(t);
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 455c876b9311c27abbba320f981fb04008cabc39..9c4088d235cf184ca110084e1196edbff8dbbb3e 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -111,6 +111,81 @@ pub const Window = struct { row: usize, n: usize, seq: []const i32 };
+ const Glue = enum(u8) { wslot, wbase, cbase1, ctarget1, gpos1, vis1, cbase2, ctarget2, gpos2, vis2, rslot, gi };
+ const glue_n = @as(usize, @backingInt(Glue.gi)) + 2; // gi (the last) takes two
+ 
++/// TF_DS_EXPERT_BYTES=1 (a profile, W4-1: the MoE byte model's check): a decode round's expert places at fixed rows and
++/// the trellis bytes they read. After a layer's experts run, its window's distinct ids and count are read back from the
++/// decode scratch (a synchronous copy a layer: eager rounds only) and each place's bytes added to the counters.
++/// `place`: expert e's trellis bytes (gate + up + down) from the layer's k2 tables, read once at open, off the round.
++pub const ExpertBytes = struct {
++    place: []u64, // emax a layer
++    ids: []i32, // the window's places, read back a layer
++    emax: usize,
++    windows: u64 = 0, // a layer's decode window each
++    rows: u64 = 0,
++    places: u64 = 0,
++    bytes: u64 = 0,
++
++    /// A [n, k] trellis at k2 half-bits a value is k * n * k2 / 16 bytes: weights.zig's tr shape is [k / 16, n / 16,
++    /// 8 * k2] of i16, and experts() splits gate and up by output columns ([width, dims]) and down by input rows
++    /// ([down_n, down_k]). k2 is the expert's own (weights.Expert's gate_k2 / up_k2 / down_k2 tables): k2_gu and k2_d
++    /// are only the {min, max} bounds the kernel range is picked by.
++    fn placeBytes(ex: weights.Experts, k2_g: u32, k2_u: u32, k2_d: u32) u64 {
++        const gu: u64 = @as(u64, ex.dims) * ex.width * (@as(u64, k2_g) + @as(u64, k2_u));
++        return (gu + @as(u64, ex.down_k) * ex.down_n * @as(u64, k2_d)) / 16;
++    }
++
++    /// The switch's tables: the k2 tables are constants (loaded before a round is made), so the bytes a place reads are
++    /// worked out once here.
++    fn open(e: *const Engine, gpa: std.mem.Allocator) !ExpertBytes {
++        var emax: usize = 0;
++        for (e.w.layers) |lay| emax = @max(emax, lay.experts.count);
++        if (emax == 0) return error.NoExpertBytes; // no routed experts to count
++        const place = try gpa.alloc(u64, e.w.layers.len * emax);
++        errdefer gpa.free(place);
++        const ids = try gpa.alloc(i32, @min(e.round_rows * e.slots(), emax));
++        errdefer gpa.free(ids);
++        @memset(place, 0); // (the shared expert's, and past a layer's last: no bytes)
++        var xb: ExpertBytes = .{ .place = place, .ids = ids, .emax = emax };
++        const k2 = try gpa.alloc(i32, 3 * emax);
++        defer gpa.free(k2);
++        for (e.w.layers, 0..) |lay, l| {
++            const ex = lay.experts;
++            for ([_]u64{ ex.gate_k2, ex.up_k2, ex.down_k2 }, 0..) |tbl, j|
++                try e.d.check(e.d.api.cuMemcpyDtoH_v2(@ptrCast(k2.ptr + j * emax), tbl, ex.count * 4), "cuMemcpyDtoH");
++            for (0..ex.count) |x| {
++                const k2g: u32 = @intCast(k2[x]);
++                const k2u: u32 = @intCast(k2[emax + x]);
++                const k2d: u32 = @intCast(k2[2 * emax + x]);
++                xb.place[l * emax + x] = placeBytes(ex, k2g, k2u, k2d);
++            }
++        }
++        return xb;
++    }
++
++    pub fn deinit(xb: *ExpertBytes, gpa: std.mem.Allocator) void {
++        gpa.free(xb.place);
++        gpa.free(xb.ids);
++    }
++
++    /// A layer's decode window: the scratch's distinct places (decode_prep's ids, count) and their trellis bytes. The
++    /// copy waits for the layer's experts (the round queues them a layer ahead), which is the profile's one cost.
++    fn count(xb: *ExpertBytes, e: *const Engine, rd: *const Round, ch: *const Chunk, l: usize) !void {
++        var n: i32 = 0;
++        try e.d.check(e.d.api.cuMemcpyDtoH_v2(&n, ch.xsd.count, 4), "cuMemcpyDtoH");
++        if (n <= 0) return;
++        const places: usize = @min(@as(usize, @intCast(n)), xb.ids.len);
++        try e.d.check(e.d.api.cuMemcpyDtoH_v2(@ptrCast(xb.ids.ptr), ch.xsd.ids, places * 4), "cuMemcpyDtoH");
++        xb.windows += 1;
++        xb.rows += rd.r;
++        xb.places += places;
++        for (xb.ids[0..places]) |id| {
++            if (id < 0) continue; // (a slot no expert routes)
++            const e_id: usize = @intCast(id);
++            if (e_id >= xb.emax) continue;
++            xb.bytes += xb.place[l * xb.emax + e_id];
++        }
++    }
++};
++
+ /// A round's buffers for up to max_rows rows (Python allocates them a round; their contents never carry over).
+ pub const Round = struct {
+     r: usize = 0,
+@@ -182,6 +257,7 @@ pub const Round = struct {
+     prune: ?expert_prune.Mode, // TF_DS_T13_EXPERT_PRUNE (TP2 only); fixed for the process, so a captured graph never differs from an eager round
+     pstat: u64, // expert_prune.Stats on the device, 0 unless prune
+     place_bound: bool, // TF_DS_T15_PLACE_BOUND under an applied cap: the experts' grids stop at placeBound
++    moe_bytes: ?ExpertBytes = null, // TF_DS_EXPERT_BYTES (a profile): the windows' places and trellis bytes; null: off
+     gm: u64, // fp32 [world, R, D]
+     // Engram
+     e_in: u64, // bf16 [R, cols * engram_head_dim]: the rows read for this rank's hash columns
+@@ -393,6 +469,12 @@ pub const Round = struct {
+                 try prompt.fill(e, rd.pstat, 0, expert_prune.stats_bytes);
+             }
+         }
++        // TF_DS_EXPERT_BYTES (a profile): the window's places at fixed rows and their trellis bytes; unset, null and
++        // nothing a round reads back
++        rd.moe_bytes = null;
++        if (getenv("TF_DS_EXPERT_BYTES")) |v| if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "on")) {
++            rd.moe_bytes = try ExpertBytes.open(e, gpa);
++        };
+         rd.gm = try a.take(e.world * R * d * 4);
+         // TF_DS_ENGRAM_BOTH: both Engram layers' rows land at the round's first Engram cut; read here, before the e_in
+         // allocation the switch sizes (set alike on both ranks)
+@@ -1425,6 +1507,8 @@ fn moe(e: *const Engine, rd: *Round, ch: *const Chunk, li: usize) !void {
+         try rd.mark(e, .m_x);
+         try exl3_experts2d.decodeDown(e.ex, e.s, lay.experts, ch.xsd, tw.xd_full, rd.pick, rd.mw, rd.pm, R);
+     } else try exl3_experts.decode(e.ex, e.s, lay.experts, ch.xsd, rd.x, c.hidden, rd.pick, rd.mw, rd.pm, R, c.swiglu_limit, if (rd.place_bound) expert_prune.placeBound(rd.prune.?, R) else null);
++    // TF_DS_EXPERT_BYTES: the window the experts just read, counted (a profile; null unless the switch is on)
++    if (rd.moe_bytes) |*xb| try xb.count(e, rd, ch, li);
+     // the prefetch behind the experts: the next layer's attention mix and input linears (an Engram layer: the first
+     // 4 MiB of its wkv), after the last layer the head
+     if (li + 1 < e.w.layers.len) {
+@@ -1894,6 +1978,14 @@ test "context buckets as graph.py makes them" {
+     try std.testing.expectEqual(@as(usize, 4096), bucketFor(5000, 4096));
+ }
+ 
++test "TF_DS_EXPERT_BYTES: a place's trellis bytes" {
++    // gate and up [width, dims] at 6 and 6 half-bits, down [down_n, down_k] at 10: 5120 * 1152 * 6 / 16 twice, then
++    // 1152 * 5120 * 10 / 16
++    const ex: weights.Experts = .{ .trellis = 0, .gate_ptr = 0, .up_ptr = 0, .down_ptr = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .count = 385, .dims = 5120, .width = 1152, .down_k = 1152, .down_n = 5120, .k2_gu = .{ 6, 10 }, .k2_d = .{ 6, 10 } };
++    try std.testing.expectEqual(@as(u64, 2_211_840 + 2_211_840 + 3_686_400), ExpertBytes.placeBytes(ex, 6, 6, 10));
++    try std.testing.expectEqual(@as(u64, 3 * 5120 * 1152 * 10 / 16), ExpertBytes.placeBytes(ex, 10, 10, 10));
++}
++
+ fn getenv(name: [*:0]const u8) ?[]const u8 {
+     return std.mem.span(std.c.getenv(name) orelse return null);
+ }

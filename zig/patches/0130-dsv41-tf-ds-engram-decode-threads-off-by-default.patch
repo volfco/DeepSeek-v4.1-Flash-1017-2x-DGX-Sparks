@@ -1,0 +1,85 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 2e3826392bc6..08ee52fef852)
+# dsv41: TF_DS_ENGRAM_DECODE_THREADS (off by default) sizes the FAST row-decode pool, 8 unless 1..16
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/engram_io.zig b/zig/src/families/dsv41/engram_io.zig
+index b8634c71b7acad1cb01c8e4955194b7f314534a7..a074daca5ee12dde225203de0505710c99461cfe 100644
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -701,6 +701,27 @@ test "rows of a toy table by id, on the pool" {
+     try std.testing.expectEqualSlices(u8, &.{ 29, 24, 26 }, &s);
+ }
+ 
++test "DecodePool: the same rows decode the same at each pool size" {
++    const a = std.testing.allocator;
++    const io = std.testing.io;
++    const row_w = 96; // three 32-value cells, three scales a row
++    const row_s = 3;
++    const m = 40;
++    var w: [m * row_w]u8 = undefined;
++    var s: [m * row_s]u8 = undefined;
++    for (&w, 0..) |*b, i| b.* = @intCast((i * 31 + 7) & 0xff);
++    for (&s, 0..) |*b, i| b.* = @intCast(100 + (i * 3) % 60);
++    var want: [m * row_w]u16 = undefined;
++    for (0..m) |i| engram.decodeRow(w[i * row_w ..][0..row_w], s[i * row_s ..][0..row_s], want[i * row_w ..][0..row_w]);
++    for ([_]usize{ 1, 2, 8, 16 }) |n| {
++        const p = try DecodePool.init(a, io, n);
++        defer p.deinit(a);
++        var got: [m * row_w]u16 = @splat(0);
++        p.decode(&w, &s, &got, m, row_w, row_s);
++        try std.testing.expectEqualSlices(u16, &want, &got);
++    }
++}
++
+ test "TF_DS_ENGRAM_ROWCACHE_MB: unset or 0 is off, N is N MiB" {
+     try std.testing.expect(RowCache.budgetOf(null) == null);
+     try std.testing.expect(RowCache.budgetOf("0") == null);
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index d5fb510730503dc70444ffb3235b75a6d12c0f8e..e86530d8dacc63aa9a657f72a4d3347c373e545d 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -516,8 +516,8 @@ pub const Model = struct {
+             hasher.fast = fast; // TF_DS_ENGRAM_FAST: the reciprocal modulo, same ids
+             m.eh = try prompt.EngramHost.init(a, c, hasher, &m.tables.?, m.epool.?, sp.rank, sp.world, chunk_rows);
+             if (fast) {
+-                // the rows' decode on threads of their own, not a spawn a chunk
+-                m.edpool = try engram_io.DecodePool.init(gpa, io, 8);
++                // the rows' decode on threads of their own, not a spawn a chunk (TF_DS_ENGRAM_DECODE_THREADS over the 8)
++                m.edpool = try engram_io.DecodePool.init(gpa, io, prompt.decodeThreads(if (std.c.getenv("TF_DS_ENGRAM_DECODE_THREADS")) |v| std.mem.span(v) else null));
+                 m.eh.?.dpool = m.edpool;
+             }
+             // TF_DS_ENGRAM_STRICT=1: a scale row shorter than decodeRow reads is refused before any collective
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 0609d2fa8594315c78bf49c804ed8625d3d5de07..d108fbb57b215b48177344ce3a358c186ada8b0b 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1859,6 +1859,14 @@ pub fn trimTables(eh: *EngramHost, c: *const Config, io: std.Io) void {
+     std.log.info("dsv41: Engram trim: punched {d} MiB this rank never reads (columns {d}..{d})", .{ freed >> 20, eh.lo, eh.hi });
+ }
+ 
++/// TF_DS_ENGRAM_DECODE_THREADS=<n>: the Engram row-decode pool's size (TF_DS_ENGRAM_FAST's DecodePool); unset, unparsable
++/// or outside 1 .. 16 reads 8, as before. The bytes are the same either way.
++pub fn decodeThreads(v: ?[]const u8) usize {
++    const n = std.fmt.parseInt(u32, v orelse return 8, 10) catch return 8;
++    if (n < 1 or n > 16) return 8;
++    return n;
++}
++
+ /// TF_DS_ENGRAM_FAST's hash cache: forget the chunk `hashes` holds (a round's engramAhead wrote it, or a new pass started).
+ pub fn forgetHashes(eh: *EngramHost) void {
+     eh.hash_start = std.math.maxInt(usize);
+@@ -2158,6 +2166,15 @@ test "TF_DS_ENGRAM_FAST: only 1 turns the host-side economies on" {
+     for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!fastEnabled(v));
+ }
+ 
++test "TF_DS_ENGRAM_DECODE_THREADS: unset or outside 1..16 reads 8, inside is the number" {
++    try std.testing.expectEqual(@as(usize, 8), decodeThreads(null));
++    for ([_]?[]const u8{ "", "x", "-1", "0", "17", "4294967296", " 8", "8 ", "1.5" }) |v| try std.testing.expectEqual(@as(usize, 8), decodeThreads(v));
++    for (1..17) |n| {
++        var buf: [3]u8 = undefined;
++        try std.testing.expectEqual(n, decodeThreads(std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable));
++    }
++}
++
+ test "TF_DS_ENGRAM_SCALES: map, or everything else reads the scales" {
+     try std.testing.expect(scalesMapped("map"));
+     try std.testing.expect(scalesMapped("map-warm"));

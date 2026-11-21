@@ -1,4 +1,4 @@
-From b2a8fd21b26fc5d06910a0e7562b805571ffd48d Mon Sep 17 00:00:00 2001
+From cbff9da550cac027dc7ece9ef4248f30d9e72e67 Mon Sep 17 00:00:00 2001
 From: colum <git@volf.co>
 Date: Sat, 14 Nov 2026 21:20:40 -0800
 Subject: [PATCH] dsv41: TF_DS_EXACT_RESUME (off by default) keeps a prompt
@@ -60,17 +60,19 @@ first live measurements (docs/baseten-ultrafast-plan.md item 3).
     `Rules.exact` is set, since the family's `usable` above it is that state's own gate — without it a store built with
     a grid (the offline `tf-dsv41-lanes` binary, which sets one) kept the end state and never found it. Test: an
     off-grid end state is found on a grid store with the switch on and passed over without it.
+
+Review round: fillBegin keeps the tail's device pointer; the prepend lands in rows [0, pre) and its positions are written afresh to pos1; rank 1 keeps each kept state's tail span (its restore cleared it, so it refused the resume chunk rank 0 ran); the tail's errdefer covers the whole keep; the family's usable is the store's gate with the switch on, tier or not; and the pair compares the switch in a `switches` frame (kind 15) sent first and only when it is on, since the features ride only the spill/KV hello.
 ---
  zig/src/core/prompt_cache.zig            |  28 +++-
  zig/src/core/prompt_cache_test.zig       |  21 +++
- zig/src/families/dsv41/lanes.zig         | 135 +++++++++++++++-
+ zig/src/families/dsv41/lanes.zig         | 188 +++++++++++++++++++++-
  zig/src/families/dsv41/lanes_main.zig    |   2 +-
  zig/src/families/dsv41/model.zig         |  58 +++++++
- zig/src/families/dsv41/native.zig        |   8 +-
- zig/src/families/dsv41/prompt.zig        | 190 ++++++++++++++++++++---
+ zig/src/families/dsv41/native.zig        |  16 +-
+ zig/src/families/dsv41/prompt.zig        | 196 ++++++++++++++++++++---
  zig/src/families/dsv41/rank_identity.zig |  10 +-
- zig/src/native/cuda.zig                  |   2 +-
- 9 files changed, 422 insertions(+), 32 deletions(-)
+ zig/src/native/cuda.zig                  |   6 +-
+ 9 files changed, 491 insertions(+), 34 deletions(-)
 
 diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
 index 772f5cc..ddd95f5 100644
@@ -169,9 +171,18 @@ index a632466..f096102 100644
 +    try std.testing.expect(s2.find(&t2, &.{}) == null);
 +}
 diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
-index 0b0f367..b8a74f7 100644
+index c9b1f8e..7782241 100644
 --- a/zig/src/families/dsv41/lanes.zig
 +++ b/zig/src/families/dsv41/lanes.zig
+@@ -64,7 +64,7 @@ pub var logits_sha = false;
+ /// one Follower a follower (PairFollower): one Tracker sees every frame of the pair. (Kind 11, the untracked spill
+ /// notes of round 2, is gone: a frame of it is BadFrame.) fill_slice (TF_DS_PREFILL_SLICE) is 13: layers [lo, hi) of a
+ /// chunk (SliceFrame). pass_keyed (TF_DS_T26_KEYED_DRAFT) is 14: a drafter pass with keyed noise.
+-pub const Kind = enum(u8) { fill_begin = 1, fill_chunk = 2, verify = 3, pass = 4, snap_save = 5, snap_restore = 6, snap_drop = 7, fill_images = 8, done = 9, rank_wire = 10, fill_resume = 12, fill_slice = 13, pass_keyed = 14 };
++pub const Kind = enum(u8) { fill_begin = 1, fill_chunk = 2, verify = 3, pass = 4, snap_save = 5, snap_restore = 6, snap_drop = 7, fill_images = 8, done = 9, rank_wire = 10, fill_resume = 12, fill_slice = 13, pass_keyed = 14, switches = 15 };
+ 
+ comptime {
+     std.debug.assert(@intFromEnum(Kind.rank_wire) == @import("rank_wire.zig").lanes_kind);
 @@ -456,6 +456,10 @@ pub const Snap = struct {
      restored: bool = false, // read back from the spill tier
      part: u8 = 0, // TF_DS_KV_SHARD: the part holding its rows (parts.zig's Kept; a live move changes it)
@@ -183,7 +194,15 @@ index 0b0f367..b8a74f7 100644
  };
  
  /// Kept states this long or longer say so in the log when they go stale (their prompts then run again from 0).
-@@ -558,6 +562,7 @@ pub const Lanes = struct {
+@@ -532,6 +536,7 @@ pub const Lanes = struct {
+     next: u64 = 0,
+     snaps: std.ArrayList(*Snap) = .empty, // kept prompt states, oldest first
+     keep_protect: bool = false, // TF_DS_KEEP_PROTECT=1: a placement takes a snap a longer one covers first, then the oldest non-shared (placeKept)
++    switches_sent: bool = false, // sendSwitches ran (openPair can run twice: openSpill)
+     next_snap: u64 = 1,
+     fill: ?Fill = null, // the prompt pass that runs in pieces between rounds, from its next chunk
+     paused: ?Fill = null, // the pass a short prompt cut into (lanes' cut_in), resumed by its next piece
+@@ -558,6 +563,7 @@ pub const Lanes = struct {
          self.stopKv();
          for (self.snaps.items) |sn| {
              sn.buf.free();
@@ -191,7 +210,29 @@ index 0b0f367..b8a74f7 100644
              self.gpa.destroy(sn);
          }
          self.snaps.deinit(self.gpa);
-@@ -903,7 +908,9 @@ pub const Lanes = struct {
+@@ -654,6 +660,21 @@ pub const Lanes = struct {
+         if (try self.begin(kind)) try self.flush();
+     }
+ 
++    /// TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE: both ranks must run them alike, and the spill/KV hello that names them
++    /// in the features never runs with them alone (openPair returns before it). Rank 0 sends its bits once, first, only
++    /// when one is on (an off pair's frames are the base ones); followPair compares them with its own and ends on a
++    /// difference, and a follower with one on refuses any other first frame (a head with both off).
++    pub fn sendSwitches(self: *Lanes) !void {
++        if (self.switches_sent) return;
++        self.switches_sent = true;
++        const bits = pairSwitches(self.m);
++        if (bits == 0) return;
++        if (try self.begin(.switches)) {
++            try self.wire.int(self.gpa, u8, bits);
++            try self.flush();
++        }
++    }
++
+     // -- TF_DS_KV_SHARD: kv_lanes.zig drives parts.zig's planner (docs/port/shard-lanes.md) ------------------------
+ 
+     /// TF_DS_KV_SHARD: the parts' planner made and agreed with the followers (hello, shard_layout, shard_set, the
+@@ -903,7 +924,9 @@ pub const Lanes = struct {
              const start = f.start;
              const len = f.len;
              if (start > 0 and s.isCancelled()) return error.Cancelled;
@@ -202,7 +243,7 @@ index 0b0f367..b8a74f7 100644
              // TF_DS_KV_SHARD pins the twins for the whole chunk: it runs whole
              const sliced = m.slice_layers > 0 and self.kv == null and midWanted(s);
              if (!sliced) if (try self.begin(.fill_chunk)) {
-@@ -934,6 +941,12 @@ pub const Lanes = struct {
+@@ -934,6 +957,12 @@ pub const Lanes = struct {
          if (f.start < f.len) return false;
          const done = f.*;
          self.fill = null;
@@ -215,7 +256,7 @@ index 0b0f367..b8a74f7 100644
          if (self.prof) |*p| p.prefills += 1;
          if (!done.head) return error.NoPromptLogits;
          // a state read back from disk: the drafter's rings were rebuilt by the replay before the first draft
-@@ -949,7 +962,14 @@ pub const Lanes = struct {
+@@ -952,7 +981,14 @@ pub const Lanes = struct {
          return true;
      }
  
@@ -231,7 +272,7 @@ index 0b0f367..b8a74f7 100644
      fn midWanted(s: *lanes.Stream) bool {
          const b = s.between orelse return false;
          if (s.images.len > 0) return false;
-@@ -1014,6 +1034,8 @@ pub const Lanes = struct {
+@@ -1017,6 +1053,8 @@ pub const Lanes = struct {
          const ids = s.prompt();
          const len = ids.len;
          if (len == 0) return error.EmptyPrompt;
@@ -240,7 +281,7 @@ index 0b0f367..b8a74f7 100644
          const size = std.mem.alignForward(usize, len + s.max_new + m.eng.round_rows + 2, model.chunk_rows);
          if (size > m.request_cap) return error.PromptTooLong; // (the pool's, unless TF_DS_POOL or TF_DS_KV_SHARD part it)
          // TF_DS_KV_SHARD: parts.zig's planner places the extent inside one part (placeParts: part-local placeSoft and
-@@ -1164,6 +1186,13 @@ pub const Lanes = struct {
+@@ -1167,6 +1205,13 @@ pub const Lanes = struct {
                  try m.copyExtent(sn.base, base, sn.at);
              }
              try m.snapCopy(slot, sn.buf.ptr, false);
@@ -254,7 +295,7 @@ index 0b0f367..b8a74f7 100644
              start = sn.at;
              s.cached = @intCast(sn.at);
          }
-@@ -1376,7 +1405,19 @@ pub const Lanes = struct {
+@@ -1393,7 +1438,19 @@ pub const Lanes = struct {
      fn usable(self: *const Lanes, sn: *const Snap, len: usize) bool {
          if (std.mem.indexOfScalar(*Snap, self.snaps.items, @constCast(sn)) == null) return false;
          if (self.kv) |k| if (k.planner.keptIndex(sn.id) == null) return false; // (TF_DS_KV_SHARD: its rows the planner holds)
@@ -275,7 +316,7 @@ index 0b0f367..b8a74f7 100644
      }
  
      /// The first extent that fits around the live streams and the kept states. Kept states give their room oldest
-@@ -1463,7 +1504,18 @@ pub const Lanes = struct {
+@@ -1480,7 +1537,18 @@ pub const Lanes = struct {
      /// The prompt cache's Snapshots functions (native.zig hands them to the CUDA host).
      pub fn snapBytesFn(ptr: *anyopaque, at: u32) u64 {
          _ = at;
@@ -295,7 +336,7 @@ index 0b0f367..b8a74f7 100644
      }
  
      /// The live state at `at` (the pass stands at that chunk end): the slot's own part copied, the extent's rows kept.
-@@ -1471,11 +1523,22 @@ pub const Lanes = struct {
+@@ -1488,11 +1556,22 @@ pub const Lanes = struct {
          const self = of(ptr);
          const s: *const lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
          const l = self.streams.getPtr(s) orelse return error.UnknownStream;
@@ -306,12 +347,12 @@ index 0b0f367..b8a74f7 100644
          errdefer self.gpa.destroy(sn);
          sn.* = .{ .id = self.next_snap, .at = at, .base = l.base, .end = l.end, .part = l.part, .buf = try cuda.DeviceBuffer.alloc(self.m.ctx.d, self.m.snapBytes()), .slot = @intCast(l.slot) };
          errdefer sn.buf.free();
++        errdefer if (sn.tail) |*b| b.free(); // (the whole function's: a later failure would leak it)
 +        if (tail) {
 +            // the pass's stash: the window rows before `at` (a keep it did not reach refuses)
 +            const t = self.m.tails[l.slot];
 +            if (t.buf == 0 or t.end < at) return error.NotAChunkEnd;
 +            sn.tail = try cuda.DeviceBuffer.alloc(self.m.ctx.d, self.m.tailBytes());
-+            errdefer if (sn.tail) |*b| b.free();
 +            try self.m.tailCopy(l.slot, sn.tail.?.ptr, true);
 +            sn.tail_start = t.start;
 +            sn.tail_end = t.end;
@@ -319,7 +360,7 @@ index 0b0f367..b8a74f7 100644
          try self.snaps.append(self.gpa, sn);
          self.next_snap += 1;
          if (try self.begin(.snap_save)) {
-@@ -1516,6 +1579,7 @@ pub const Lanes = struct {
+@@ -1533,6 +1612,7 @@ pub const Lanes = struct {
          // TF_DS_KV_SHARD: the planner's record goes too (deferred while a copy or carry still reads its rows)
          if (self.kv) |k| k.drop(sn.id) catch |err| std.log.err("dsv41: the parts' planner kept a dropped prompt state: {s}", .{@errorName(err)});
          sn.buf.free();
@@ -327,7 +368,7 @@ index 0b0f367..b8a74f7 100644
          self.gpa.destroy(sn);
      }
  
-@@ -1610,6 +1674,7 @@ pub const Lanes = struct {
+@@ -1627,6 +1707,7 @@ pub const Lanes = struct {
          if (self.kv) |k| k.unhold(sn.id) catch |err| std.log.warn("dsv41: a discarded restore kept its part's hold: {s}", .{@errorName(err)});
          if (std.mem.indexOfScalar(*Snap, self.snaps.items, sn)) |i| _ = self.snaps.orderedRemove(i);
          sn.buf.free();
@@ -335,7 +376,55 @@ index 0b0f367..b8a74f7 100644
          self.gpa.destroy(sn);
      }
  
-@@ -2175,12 +2240,14 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+@@ -1998,6 +2079,11 @@ pub fn followWith(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower) !vo
+     return followPair(gpa, m, spill, null);
+ }
+ 
++/// The both-rank switches sendSwitches compares: bit 0 TF_DS_EXACT_RESUME.
++fn pairSwitches(m: *const Model) u8 {
++    return @as(u8, @intFromBool(m.exact_resume));
++}
++
+ /// followWith, with `fx` for the pair's one rank_wire Follower's hello instead of its default: the spill side's full
+ /// fingerprint when the tier is on, else (TF_DS_KV_SHARD alone) round 2's shard-only hello (kv_lanes.Follower.exchange).
+ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx: ?fingerprint.Exchange) !void {
+@@ -2025,6 +2111,10 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+         while (ki.next()) |b| b.free();
+         kept.deinit(gpa);
+     }
++    // TF_DS_EXACT_RESUME: each kept state's tail positions [start, end) as this rank's own pass stashed them (rank 0
++    // restores its own from the Snap; the frames carry neither, and both ranks' passes stash alike). Empty when off.
++    var kept_tail: std.AutoHashMapUnmanaged(u64, [2]usize) = .empty;
++    defer kept_tail.deinit(gpa);
+     var fk: FollowKept = .{ .gpa = gpa, .m = m, .kept = &kept, .seqs = &seqs };
+     defer fk.deinit();
+     if (spill) |sd| sd.attach(fk.family());
+@@ -2050,6 +2140,8 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+     defer if (pf) |p| gpa.destroy(p);
+     // TF_DS_ENERGY: this rank's GPU counter, one line per frame (the rank-0 done line's round ordinals join them)
+     var energy: ?api.energy.Reader = if (api.energy.enabled(getenv("TF_DS_ENERGY"))) api.energy.Reader.open(true) else null;
++    const own_switches = pairSwitches(m);
++    var switches_seen = false;
+     while (true) {
+         // with spill writes or restores pending, they progress while rank 0 sends nothing (2 ms polls)
+         if (spill) |sd| while (sd.busy() and !try peer.readable(2 * std.time.ns_per_ms)) sd.service(std.time.ns_per_ms);
+@@ -2070,8 +2162,15 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+             12 => .fill_resume,
+             13 => .fill_slice,
+             14 => .pass_keyed,
++            15 => .switches,
+             else => return error.BadFrame,
+         };
++        // TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE: rank 0 sends its bits first when one is on (Lanes.sendSwitches)
++        if (kind != .switches and !switches_seen and own_switches != 0) {
++            std.log.err("dsv41: this rank runs TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE ({d}) and rank 0 runs neither: set them alike on every rank", .{own_switches});
++            return error.PairSwitchesDiffer;
++        }
++        switches_seen = true;
+         if (try r.int(u64) != step) return error.OutOfStep;
+         if (energy) |*e| e.note(step); // the counter before this frame runs: rank 0's ordinals bracket a request
+         step += 1;
+@@ -2192,12 +2291,17 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
                  const id = try r.int(u64);
                  const s: usize = try r.int(u32);
                  if (s >= max_streams) return error.BadSlot;
@@ -347,23 +436,50 @@ index 0b0f367..b8a74f7 100644
                      refused(err);
                      continue;
                  };
-+                if (m.exact_resume) m.tailCopy(s, b.ptr + m.snapBytes(), true) catch |err| refused(err);
++                if (m.exact_resume) {
++                    m.tailCopy(s, b.ptr + m.snapBytes(), true) catch |err| refused(err);
++                    try kept_tail.put(gpa, id, .{ m.tails[s].start, m.tails[s].end });
++                }
                  try kept.put(gpa, id, b);
              },
              .snap_restore => {
-@@ -2196,6 +2263,11 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+@@ -2213,16 +2317,35 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
                      m.copyExtent(from, to, at) catch |err| refused(err);
                  }
                  m.snapCopy(s, b.ptr, false) catch |err| refused(err);
 +                // TF_DS_EXACT_RESUME: the tail back into the slot's ring, and the pass resumes where the state stands
 +                if (m.exact_resume) {
 +                    m.tailCopy(s, b.ptr + m.snapBytes(), false) catch |err| refused(err);
++                    // its positions as at the keep (tailCopy clears them): without them tailPre finds the resume's
++                    // prepend uncovered here while rank 0 runs it, and the ranks' collectives part
++                    if (kept_tail.get(id)) |se| {
++                        m.tails[s].start = se[0];
++                        m.tails[s].end = se[1];
++                    }
 +                    m.tails[s].resume_at = at;
 +                }
              },
              .snap_drop => {
                  const id = try r.int(u64);
-@@ -2494,6 +2566,57 @@ test "a restore's destination is held back from placement, never a victim and ne
+                 if (spill) |sd| sd.dropSnap(id); // its write guarded, its small-state capture done, before the free
++                _ = kept_tail.remove(id);
+                 if (kept.fetchRemove(id)) |kv| {
+                     var b = kv.value;
+                     b.free();
+                 }
+             },
+             // one rank_wire Follower a rank, for the spill tier's and the KV parts' frames alike
++            .switches => {
++                const theirs = try r.int(u8);
++                if (theirs != own_switches) {
++                    std.log.err("dsv41: rank 0's TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE bits ({d}) differ from this rank's ({d}): set them alike on every rank", .{ theirs, own_switches });
++                    return error.PairSwitchesDiffer;
++                }
++            },
+             .rank_wire => try (pf orelse return error.SpillNotStarted).onFrame(peer, r.rest()), // (rank 0 runs the spill tier)
+             .done => {
+                 if (spill) |sd| {
+@@ -2511,6 +2634,57 @@ test "a restore's destination is held back from placement, never a victim and ne
      try std.testing.expect(ln.spill == null);
  }
  
@@ -435,7 +551,7 @@ index 237ade0..909fa3c 100644
          io.random(&seed);
          store_v.setTier(ln.spill.?.tier(), std.mem.readInt(u32, &seed, .little));
 diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
-index ff87bac..99f536d 100644
+index ff87bac..23ac597 100644
 --- a/zig/src/families/dsv41/model.zig
 +++ b/zig/src/families/dsv41/model.zig
 @@ -6,6 +6,7 @@
@@ -551,7 +667,7 @@ index ff87bac..99f536d 100644
      pub fn fillBegin(m: *Model, slot: usize, base: usize) !void {
          if (slot >= m.streams) return error.BadSlot;
 +        // TF_DS_EXACT_RESUME: this pass starts a tail of its own (fillOpen sets where it resumes and its rows)
-+        if (m.exact_resume) m.tails[slot] = .{};
++        if (m.exact_resume) m.tails[slot] = .{ .buf = m.tails[slot].buf }; // (its slice of tail_buf stays)
          // a read-ahead an earlier pass left (cancelled between chunks) never feeds this one: a resume at that pass's
          // next chunk start would otherwise take its rows, hashed from the other prompt's ids
          m.dropChunk();
@@ -581,10 +697,19 @@ index ff87bac..99f536d 100644
      const ids = [_]i32{ 1, 2, 3 };
      var m: Model = undefined;
 diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
-index 34b6866..0858df4 100644
+index d0da660..1f6e85d 100644
 --- a/zig/src/families/dsv41/native.zig
 +++ b/zig/src/families/dsv41/native.zig
-@@ -214,6 +214,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+@@ -165,7 +165,7 @@ pub const Snaps = struct {
+     drop: *const fn (*anyopaque, *anyopaque) void,
+     /// Rows a resumed prompt pass must still run past a kept state (core/prompt_cache Rules.tail).
+     tail: u32 = 0,
+-    /// Whether a kept state still restores (Lanes.usable): given with the spill tier only.
++    /// Whether a kept state still restores (Lanes.usable): given with the spill tier or TF_DS_EXACT_RESUME only.
+     usable: ?*const fn (*anyopaque, *anyopaque, u32) bool = null,
+     /// The kept state became a shared prefix (core/prompt_cache's Snapshots.share; Lanes.snapShareFn).
+     share: ?*const fn (*anyopaque, *anyopaque) void = null,
+@@ -217,6 +217,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
      const port = std.fmt.parseInt(u16, getenv("TF_TP_PORT") orelse "29620", 10) catch return error.BadPort;
      const arena_gib = if (getenv("TF_DS_ARENA_GIB")) |t| std.fmt.parseInt(usize, t, 10) catch return error.BadArena else 0;
      if (o.spill != null) try spillPreflight(getenvFn); // (before the staging, the weights and the pool)
@@ -594,7 +719,17 @@ index 34b6866..0858df4 100644
      const pair_mode = try pairMode(getenvFn); // (a bad value refused before anything loads)
      const st = try gpa.create(State);
      errdefer gpa.destroy(st);
-@@ -497,10 +500,11 @@ pub fn rankExchange(gpa: std.mem.Allocator, io: std.Io, mo: model.Options, m: *m
+@@ -306,6 +309,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+         snaps.usable = L.usableFn;
+         tier = st.lanes.spill.?.tier();
+     }
++    // TF_DS_EXACT_RESUME: the store's tail rule stands aside for every state then (Rules.exact), so the family's
++    // usable is the resume gate even without the spill tier (a grid state too near the end is passed over)
++    if (st.m.exact_resume) snaps.usable = L.usableFn;
+     const kv_parts: ?lanes.kv_parts.Source = if (st.m.kvs != null) .{ .ctx = &st.lanes, .read = L.kvPartsFn } else null;
+     const engram: ?api.EngramSource = if (st.m.eh != null and st.m.eh.?.metrics) .{ .ctx = &st.lanes, .read = L.engramStatsFn } else null;
+     const pair: ?Pair = if (pair_mode == .exit) .{ .watch = pairWatch, .abort = pairAbort } else null;
+@@ -500,10 +506,11 @@ pub fn rankExchange(gpa: std.mem.Allocator, io: std.Io, mo: model.Options, m: *m
      const image_cache = spill_tier.Settings.imageCache(getenv("TF_DS_IMAGE_CACHE"));
      const edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")); // (the marks gate: the fingerprint's reading)
      const keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")); // (the victim order gate: the fingerprint's reading)
@@ -607,7 +742,21 @@ index 34b6866..0858df4 100644
      var pbuf: [model.Model.spill.StateLayout.max_encoded]u8 = undefined;
      const lp = try rank_identity.layoutPart(layout, m.world, &pbuf);
      var arena = std.heap.ArenaAllocator.init(gpa);
-@@ -677,6 +681,8 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+@@ -568,6 +575,8 @@ fn agreeSink(ctx: *anyopaque, sub: []const u8) anyerror!void {
+ /// (Lanes.startKv) both post through it, so one Tracker orders every frame of the pair. Nothing with both off (no
+ /// frame, no fingerprint: the served bytes unchanged) or one rank.
+ pub fn openPair(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, ln: *lanes_mod.Lanes, mo: model.Options, s: ?spill_tier.Settings) !void {
++    // TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE: the pair compares them first (nothing is sent with both off)
++    if (m.world >= 2) try ln.sendSwitches();
+     if (ln.rw != null or m.world < 2 or (s == null and m.kvs == null)) return;
+     if (s != null and m.world != 2) return error.SpillNeedsTwoRanks;
+     const fx = if (s != null) blk: {
+@@ -676,10 +685,13 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+         error.BadPromptGemmRows => rows_mod.gemm_hint,
+         error.PromptRowsMismatch => "TF_DS_PROMPT_WINDOW_ROWS / TF_DS_PROMPT_GEMM_ROWS: the ranks run different prompt paths; set them alike on every rank (tf-dsv41-lanes reads them too)",
+         error.BadRoundRows => "TF_DS_ROUND_ROWS: a round's rows at most, 16 .. 48",
++        error.PairSwitchesDiffer => "TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE differ between the ranks: set them alike on every rank",
+         error.BadGraphCap => "TF_DS_GRAPH_CAP: the captured CUDA graphs kept at most, a count (0: all)",
          error.BadPlainRows => "TF_DS_PLAIN_ROWS: the rows a mixed pack's plain linear runs over, 0 (the round's own) or a count up to TF_DS_ROUND_ROWS",
          error.BadStreams => "TF_DS_STREAMS: the pool's streams, 1 .. 16",
          error.BadSliceLayers => model.slice_hint,
@@ -617,7 +766,7 @@ index 34b6866..0858df4 100644
          error.PromptTooLong => "the prompt and its max_tokens do not fit the context window",
          error.NoVisionKit => "this checkpoint reads images: its kit (TF_DS_KIT) needs vision/torch_fmha_sm120.cubin and vision/gate_bias_vl.safetensors",
 diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
-index dd0a30e..250b291 100644
+index dd0a30e..f1a095a 100644
 --- a/zig/src/families/dsv41/prompt.zig
 +++ b/zig/src/families/dsv41/prompt.zig
 @@ -164,6 +164,112 @@ pub const Engine = struct {
@@ -749,7 +898,7 @@ index dd0a30e..250b291 100644
          ch.n = 0;
          ch.start = 0;
          ch.pending = false;
-@@ -2197,37 +2305,79 @@ fn indexRowBlock(n: usize, n_comp_end: usize) usize {
+@@ -2197,37 +2305,85 @@ fn indexRowBlock(n: usize, n_comp_end: usize) usize {
      return @max(16, @min(n, (@as(usize, 1) << 26) / (4 * @max(n_comp_end, 1)) / 16 * 16));
  }
  
@@ -823,14 +972,15 @@ index dd0a30e..250b291 100644
 -        ch.pos = ch.pos1;
 -    } else ch.pos += first * 8;
 +    const n = ch.n - first + pre;
++    if (n > ch.cap or (pre > 0 and host_pos.len < n)) return error.ChunkTooLong;
 +    if (first > 0 or pre > 0) {
 +        const row_h = c.hc * c.hidden * 2;
 +        const row_p = c.hc * 4;
 +        try e.ops.copyRows(e.s, ch.h + first * row_h, row_h, ch.h_alt + pre * row_h, row_h, row_h, ch.n - first);
-+        if (pre > 0) try tailRowsCopy(e, ch.tail.?.buf, ch.h_alt + pre * row_h, 0, row_h, replay, pre, true);
++        if (pre > 0) try tailRowsCopy(e, ch.tail.?.buf, ch.h_alt, 0, row_h, replay, pre, true); // rows [0, pre)
 +        std.mem.swap(u64, &ch.h, &ch.h_alt);
 +        try e.ops.copyRows(e.s, ch.pre + first * row_p, row_p, ch.pre_f + pre * row_p, row_p, row_p, ch.n - first);
-+        if (pre > 0) try tailRowsCopy(e, ch.tail.?.buf + c.window * row_h, ch.pre_f + pre * row_p, 0, row_p, replay, pre, true);
++        if (pre > 0) try tailRowsCopy(e, ch.tail.?.buf + c.window * row_h, ch.pre_f, 0, row_p, replay, pre, true);
 +        std.mem.swap(u64, &ch.pre, &ch.pre_f);
 +        ch.start = replay;
 +        ch.n = n;
@@ -838,12 +988,17 @@ index dd0a30e..250b291 100644
 +        // `first` leaves it off a 16-byte boundary, and the kit has no variant for some launches with such a view (a short
 +        // chunk's split attention: _sparse_attn_part with SPLITS > 1 and no row bases); the same positions copied, in the
 +        // stream's order, to a 16-byte boundary then: the kernels read the same values from an address they were captured for.
-+        _ = host_pos;
-+        const src = if (pre > 0) ch.pos - pre * 8 else ch.pos + first * 8;
-+        if ((ch.start * 8) % 16 != 0) {
++        if (pre > 0) {
++            // the prepended rows' positions are not in pos0 (it starts at the pass's own start): [replay, replay + n)
++            // written afresh to pos1 (16-byte aligned; host_pos is pageable, so the upload is staged before it returns)
++            for (host_pos[0..n], 0..) |*p, i| p.* = @intCast(replay + i);
++            try upload(e, ch.pos1, host_pos.ptr, n * 8);
++            ch.pos = ch.pos1;
++        } else if ((first * 8) % 16 != 0) { // (pos0 is 16-byte aligned: the view's alignment is first's)
++            const src = ch.pos + first * 8;
 +            try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(ch.pos1, src, n * 8, e.s.handle), "cuMemcpyDtoDAsync");
 +            ch.pos = ch.pos1;
-+        } else ch.pos = src;
++        } else ch.pos = ch.pos + first * 8;
 +    }
 +    try tailStash(e, ch, replay);
      return true;
@@ -898,15 +1053,19 @@ index 45a1658..ad6e6b0 100644
  
  test "TF_DS_KV_SHARD alone: a missing recipe identity reads unset, never a refusal; with the spill tier it is refused" {
 diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
-index b7f2160..5835353 100644
+index dd4b77d..3dd73fc 100644
 --- a/zig/src/native/cuda.zig
 +++ b/zig/src/native/cuda.zig
-@@ -460,7 +460,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+@@ -460,7 +460,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
          if (want > 0) {
              h.snap_vt = .{ .bytes = sn.bytes, .save = sn.save, .restore = sn.restore, .drop = sn.drop };
              if (@hasField(@TypeOf(sn), "share")) h.snap_vt.share = sn.share;
 -            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")) }, want);
 +            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")), .exact = api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")) }, want);
++            // TF_DS_EXACT_RESUME: the store passes its tail rule to the family's usable, wired without a tier too
++            if (h.cache.?.rules.exact) if (@hasField(@TypeOf(sn), "usable")) {
++                h.snap_vt.usable = sn.usable;
++            };
              // the spill tier (off by default: nothing below runs then)
              if (@hasField(@TypeOf(loaded), "tier")) {
                  const store = &h.cache.?;

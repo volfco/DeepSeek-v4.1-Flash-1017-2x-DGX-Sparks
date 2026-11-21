@@ -1,0 +1,329 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits 1b33d2862e81..0b168fe1d2aa)
+# dsv41: TF_DS_EXPERT_HOT_CACHE=hot:<n> (off by default, M5) prefetches the next layer's hot experts' trellis beside the paced prefetch - and names the decoded-cache contract the kit must fill
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index 728cd80ce430359ed1cfa930d1e92598f1f929c7..a04c89498b44ef9dc2e235d16d8011a396ed577a 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -981,3 +981,16 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_draw_rows_kernel(const
+     }
+     out[blockIdx.x] = sid[best];
+ }
++
++// 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the round's picked experts counted per layer (hist [layers, experts] u32 on the
++// device), for the prefetch's hot set. Counts only: invisible to every output. The count comes from the decode
++// scratch (decode_prep's ids/count), so the launch rides after it on the same stream.
++struct TfDsHotTrack { const int* ids; const unsigned* count; unsigned* hist; int layer, experts; };
++extern "C" __global__ void tf_ds_hot_track_kernel(TfDsHotTrack a, int pdl) {
++    pdl_enter(pdl);
++    const int count = (int)*a.count;
++    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += gridDim.x * blockDim.x) {
++        const int id = a.ids[i];
++        if (id >= 0 && id < a.experts) atomicAdd(&a.hist[(size_t)a.layer * a.experts + id], 1u);
++    }
++}
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 1168a5293812e8a3996faebd38d7a4bde95256d9..a7ca9dfc0e84e33c5b551ef822db6d51eb204422 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1500,6 +1500,13 @@ fn chunkRows(start: usize, len: usize) usize {
+         }
+         const logits: []const f32 = if (path == .host_draw) try m.roundLogits(n_rows) else &.{};
+         if (m.absorb_after_pick) try m.absorbRows(rows, self.built.absorb[0..windows.len]); // (0160: after the pick's read; runs under the host's accept and the frame send)
++        if (m.rd.hot != null) { // (0179: the hot plan rebuilds every 32 rounds, on the pick's own sync)
++            m.hot_age += 1;
++            if (m.hot_age >= 32) {
++                m.hot_age = 0;
++                m.updateHot();
++            }
++        }
+         if (m.ringFailed()) return error.RingFailed; // (robustness: a graph's collect gave up on a dead peer's flags)
+         const t3 = m.now();
+         defer if (self.prof) |*p| {
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index ad1611a94b26a88a197e5ebfeed9bc264bca112a..d95f71fe3429c65514aa01cf274d87792f618042 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -191,6 +191,8 @@ pub const Model = struct {
+     amax_host: [round.max_rows + max_streams]u32 = undefined,
+     draw_tab: u64 = 0, // ops.DrawRow [round.max_rows] (TF_DS_T27_DEVICE_DRAW; 0: off)
+     triage: ?f64 = null, // 0177 (TF_DS_DRAFT_TRIAGE): the conf rule's survival threshold (null: off)
++    hot_k: ?u8 = null, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot:<n>): the prefetch's hot experts a layer (null: off)
++    hot_age: u32 = 0, // rounds since the hot plan was rebuilt (32: the first round rebuilds)
+     draw_rows: usize = 0, // rows the round's tokens are drawn on the device (setDraw; 0: the greedy argmax)
+     accept_tab: u64 = 0, // TF_DS_DEVICE_ACCEPT: the device tab [row0 ..][wrows ..] of the round's windows (setAccept)
+     accept_rows: usize = 0, // windows the round's chain keeps are computed on the device (setAccept; 0: off)
+@@ -246,6 +248,7 @@ pub const Model = struct {
+         m.exact_resume = api.prompt_cache.exactResume(envOf("TF_DS_EXACT_RESUME")); // every rank alike
+         m.absorb_after_pick = envOnOff(envOf("TF_DS_ABSORB_AFTER_PICK")); // rank-local: an uneven pair stays bit-identical
+         m.triage = try parseTriage(envOf("TF_DS_DRAFT_TRIAGE")); // rank-local: the mask rides the verify frame
++        m.hot_k = try parseHot(envOf("TF_DS_EXPERT_HOT_CACHE")); // rank-local: prefetch is invisible to the bits
+         m.tails = &.{};
+         m.tail_buf = null;
+         errdefer if (m.tail_buf) |*b| b.free();
+@@ -479,6 +482,24 @@ pub const Model = struct {
+         m.amax = try m.arena.take((round.max_rows + max_streams) * 4);
+         m.accept_tab = try m.arena.take(max_streams * 8); // [row0 ..][wrows ..] u32 each, the wrows half nwin * 4 bytes in
+         m.draw_tab = if (m.ops.draw_rows != null) try m.arena.take(round.max_rows * @sizeOf(ops_mod.DrawRow)) else 0;
++        if (m.hot_k) |k| {
++            // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picked-experts histogram (zeroed at open) and the prefetch plan
++            // (the model's lifetime, as the weights' named entries)
++            const layers = m.eng.w.layers.len;
++            var stride: usize = 0;
++            for (m.eng.w.layers) |lay| stride = @max(stride, lay.experts.count);
++            const h = try m.gpa.create(round.Hot);
++            errdefer m.gpa.destroy(h);
++            h.* = .{ .stride = stride, .layers = layers, .k = k, .hist = try m.arena.take(layers * stride * 4), .counts = try m.gpa.alloc(u32, layers * stride), .ranges = try m.gpa.alloc([2]u64, layers * k * 3), .n = try m.gpa.alloc(u8, layers) };
++            @memset(h.counts, 0);
++            @memset(h.n, 0);
++            const zeros = try m.gpa.alloc(u8, layers * stride * 4);
++            defer m.gpa.free(zeros);
++            @memset(zeros, 0);
++            try d.check(d.api.cuMemcpyHtoD_v2(h.hist, zeros.ptr, zeros.len), "cuMemcpyHtoD");
++            m.rd.hot = h;
++            m.hot_age = 32; // the first round builds the plan
++        }
+         m.draw_rows = 0;
+         if (o.graphs) m.graphs = round.Graphs.init(gpa, o.graph_cap);
+         if (o.graphs) if (m.rd.moe_bytes) |*xb| {
+@@ -1699,6 +1720,19 @@ pub const Model = struct {
+         m.accept_rows = n;
+     }
+ 
++    /// 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the hot plan from the histogram's host copy (read after the round's own
++    /// sync - the track kernel wrote it during the forward). Called every 32 rounds from verifyFn.
++    pub fn updateHot(m: *Model) void {
++        const h = m.rd.hot orelse return;
++        const d = m.ctx.d;
++        if (d.api.cuMemcpyDtoH_v2(h.counts.ptr, h.hist, h.counts.len * 4) != 0) return; // (the plan stays what it was)
++        for (0..h.layers) |li| {
++            const ex = m.eng.w.layers[li].experts;
++            const e_count: usize = @intCast(ex.count);
++            h.n[li] = @intCast(round.hotPick(h.counts[li * h.stride ..][0..e_count], ex.ranges, h.k, h.ranges[li * h.k * 3 ..][0 .. h.k * 3]));
++        }
++    }
++
+     /// 0177 (TF_DS_DRAFT_TRIAGE): the round's dead-row mask, u8 a row (1: the probe says its predecessor will reject
+     /// its input; the row routes nothing and the host treats it as rejected). Uploaded every round the switch is on,
+     /// so the device never keeps a stale flag; the mask is the same on both ranks (it rides the verify frame).
+@@ -1825,6 +1859,20 @@ fn parseTriage(v: ?[]const u8) !?f64 {
+     return error.BadDraftTriage;
+ }
+ 
++/// 0179 (TF_DS_EXPERT_HOT_CACHE): `hot:<n>` counts the round's picked experts per layer and prefetches the top
++/// <n>'s trellis beside the paced prefetch; `decoded...` is the decoded-weights cache whose kernel does not exist in
++/// the kit - it refuses with its named error (the contract is the patch's commit body). Unset, `0`, `off`: nothing.
++fn parseHot(v: ?[]const u8) !?u8 {
++    const s = std.mem.trim(u8, v orelse return null, " \t\r\n");
++    if (s.len == 0 or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "off")) return null;
++    if (std.mem.startsWith(u8, s, "hot:")) {
++        const n = std.fmt.parseInt(u8, s["hot:".len..], 10) catch return error.BadExpertHot;
++        return if (n >= 1 and n <= 5) n else error.BadExpertHot;
++    }
++    if (std.mem.startsWith(u8, s, "decoded")) return error.KitKernelMissing;
++    return error.BadExpertHot;
++}
++
+ test "a boolean switch parses 1 and on, and nothing else" {
+     try std.testing.expect(envOnOff("1"));
+     try std.testing.expect(envOnOff("on"));
+@@ -1876,6 +1924,18 @@ test "TF_DS_DRAFT_TRIAGE: conf:<t> takes a threshold in (0,1), file: refuses wit
+     try std.testing.expectError(error.TriageProbeUnsupported, parseTriage("file:/tmp/probe.bin"));
+ }
+ 
++test "TF_DS_EXPERT_HOT_CACHE: hot:<n> takes 1..5, decoded refuses with the kit's name, the rest off" {
++    try std.testing.expectEqual(@as(?u8, null), try parseHot(null));
++    try std.testing.expectEqual(@as(?u8, null), try parseHot("0"));
++    try std.testing.expectEqual(@as(?u8, null), try parseHot("off"));
++    try std.testing.expectEqual(@as(?u8, 3), try parseHot("hot:3"));
++    try std.testing.expectError(error.BadExpertHot, parseHot("hot:0"));
++    try std.testing.expectError(error.BadExpertHot, parseHot("hot:6"));
++    try std.testing.expectError(error.BadExpertHot, parseHot("hot"));
++    try std.testing.expectError(error.KitKernelMissing, parseHot("decoded"));
++    try std.testing.expectError(error.KitKernelMissing, parseHot("decoded,hot:2"));
++}
++
+ test "the slice knob parses to 0 or 1 to 40 layers" {
+     try std.testing.expectEqual(@as(usize, 0), try parseSliceLayers("0"));
+     try std.testing.expectEqual(@as(usize, 5), try parseSliceLayers("5"));
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 64c9de6a897dbb3b9507f58779bc81d318bdadf1..5489eb648bfffff98200f7996c98515aeade353a 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -43,6 +43,13 @@
+ //!                                               never a false negative). The check counters ride /metrics
+ //!                                               (engram_rowcache_*): if the locked probes stay the wall with the
+ //!                                               filter on, the lock is not the thing to optimize
++//!   TF_DS_EXPERT_HOT_CACHE=hot:<n>               0179 (M5's prefetch half): the round's picked experts counted per
++//!                                               layer (a device histogram, invisible to the bits) and the top <n>
++//!                                               (1..5) of the next layer prefetch their trellis beside the paced
++//!                                               prefetch. `decoded...` is the decoded-weights cache: its kernel
++//!                                               does not exist in the kit, so the value refuses with
++//!                                               error.KitKernelMissing (the contract is the patch's commit body);
++//!                                               unset: nothing
+ //!   TF_DS_ROUND_ROWS, TF_DS_STREAMS             a round's rows at most (16; the four-node lane's 48) and the pool's
+ //!                                               streams (4; its 16): --parallel at most the streams
+ //!   TF_DS_PROMPT_WINDOW_ROWS=<rows>             a prompt chunk under these rows (64 .. 128; 64 unset) takes the MoE decode window
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index e05b11f65959bdf0c5192b6729bc0d762dc91e08..89b8a7f23d84dabe2063a429cde5b83a7fa852aa 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -110,6 +110,7 @@ pub const Ops = struct {
+     prune: ?expert_prune.Mode = null, // TF_DS_T13_EXPERT_PRUNE and _EXPERT_CAP, read at load
+     prune_fn: ?cuda.Function = null, // looked up only when the switch is on
+     dead_rows: cuda.Function, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' picks emptied
++    hot_track: cuda.Function, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picks counted per layer for the prefetch
+     keyed_noise: ?cuda.Function = null, // TF_DS_T26_KEYED_DRAFT or TF_DS_SPEC_SAMPLE, looked up only when on
+     spec_clean: ?cuda.Function = null, // TF_DS_SPEC_SAMPLE, looked up only when on
+     gather_cols: ?cuda.Function = null, // TF_DS_SPEC_SAMPLE, looked up only when on
+@@ -158,6 +159,7 @@ pub const Ops = struct {
+             .prune = prune,
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
+             .dead_rows = try fm.function("tf_ds_dead_rows_kernel"),
++            .hot_track = try fm.function("tf_ds_hot_track_kernel"),
+             .keyed_noise = if (envOn(keyed_env) or spec) try fm.function("tf_ds_keyed_noise_kernel") else null,
+             .spec_clean = if (spec) try fm.function("tf_ds_spec_clean_kernel") else null,
+             .gather_cols = if (spec) try fm.function("tf_ds_gather_cols_kernel") else null,
+@@ -332,6 +334,16 @@ pub const Ops = struct {
+         try cuda.launch.launch(o.dead_rows, .{ .grid = .{ .x = @intCast(blocks(rows, 256)) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
+     }
+ 
++    /// 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the round's picked experts counted per layer into `hist` [layers, experts]
++    /// u32 on the device - the prefetch's hot set's evidence. Counts only: invisible to every output.
++    pub fn hotTrack(o: *const Ops, s: cuda.Stream, ids: u64, count: u64, hist: u64, layer: usize, experts: usize) !void {
++        const HotTrack = extern struct { ids: u64, count: u64, hist: u64, layer: c_int, experts: c_int };
++        var a: cuda.Args = .{};
++        a.add(HotTrack{ .ids = ids, .count = count, .hist = hist, .layer = @intCast(layer), .experts = @intCast(experts) });
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.hot_track, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 }, .pdl = o.pdl }, s, &a);
++    }
++
+     /// The indexer's selection of every scanned key (its top-k takes all nb): out [rows, nb] int64 = j where j <
+     /// vis[r], else -1 (vis [rows] int64), on the device.
+     pub fn iotaVis(o: *const Ops, s: cuda.Stream, vis: u64, out: u64, nb: usize, rows: usize) !void {
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index f3369da1e257d029512a143b6b7b3e3f9ef841c7..a6d95abb76010b9dbb14efd6d22329c5143fc68f 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -259,6 +259,7 @@ pub const Round = struct {
+     place_bound: bool, // TF_DS_T15_PLACE_BOUND under an applied cap: the experts' grids stop at placeBound
+     moe_bytes: ?ExpertBytes = null, // TF_DS_EXPERT_BYTES (a profile): the windows' places and trellis bytes; null: off
+     dead: u64 = 0, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' mask u8 [max_rows] on the device (0: off)
++    hot: ?*Hot = null, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the hot set's histogram and prefetch plan (null: off)
+     gm: u64, // fp32 [world, R, D]
+     // Engram
+     e_in: u64, // bf16 [R, cols * engram_head_dim]: the rows read for this rank's hash columns
+@@ -1492,6 +1493,43 @@ fn ownerRing(e: *const Engine, rd: *Round, a: tri_attn.Attn, ratio: usize, li: u
+ }
+ 
+ /// Model.moe of a decode window (shared_side off: SHARED_OVERLAP unset in the served lane): the gate's chunk sums
++/// 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the hot set - the round's picked experts counted per layer on the device
++/// (hist, u32 [layers, stride], the track kernel's), its host copy (counts), and each layer's top-k picked experts'
++/// trellis ranges for the prefetch (ranges [layers, k*3], n [layers]). The plan rebuilds every 32 rounds from the
++/// histogram, read after the round's own sync. Counts only: invisible to every output.
++pub const Hot = struct {
++    stride: usize, // the histogram's experts a layer (the largest count; ids are bounds-checked against it)
++    layers: usize,
++    k: usize, // the plan's experts a layer (1..5: 3 ranges a piece, the prefetch's 16-entry cap)
++    hist: u64, // u32 [layers, stride] on the device
++    counts: []u32, // the same, host
++    ranges: [][2]u64, // [layers, k * 3]: gate, up, down of each chosen expert
++    n: []u8, // [layers] how many the plan holds
++};
++
++/// 0179: a layer's top `k` picked experts from its counts (ties to the lower id), their gate/up/down trellis ranges
++/// from the host copy (`ranges`: 3 * E, expert e's at [e], [E + e], [2E + e]) into `out`; returns how many.
++pub fn hotPick(counts: []const u32, ranges: []const [2]u64, k: usize, out: [][2]u64) usize {
++    const e_count = counts.len;
++    if (e_count == 0 or k == 0 or out.len < 3 * k) return 0;
++    var taken: [8]bool = @splat(false);
++    var n: usize = 0;
++    while (n < k) : (n += 1) {
++        var best: ?usize = null;
++        for (0..e_count) |i| {
++            if (taken[i]) continue;
++            if (best == null or counts[i] > counts[best.?]) best = i; // (ties to the lower id)
++        }
++        const i = best orelse break;
++        if (counts[i] == 0) break;
++        taken[i] = true;
++        out[n * 3 + 0] = ranges[i];
++        out[n * 3 + 1] = ranges[e_count + i];
++        out[n * 3 + 2] = ranges[2 * e_count + i];
++    }
++    return n;
++}
++
+ /// (rowmm_gate), the routing with the shared expert in every row's last slot, the routed experts' decode path.
+ fn moe(e: *const Engine, rd: *Round, ch: *const Chunk, li: usize) !void {
+     const lay = e.w.layers[li];
+@@ -1515,6 +1553,8 @@ fn moe(e: *const Engine, rd: *Round, ch: *const Chunk, li: usize) !void {
+         try rd.mark(e, .m_x);
+         try exl3_experts2d.decodeDown(e.ex, e.s, lay.experts, ch.xsd, tw.xd_full, rd.pick, rd.mw, rd.pm, R);
+     } else try exl3_experts.decode(e.ex, e.s, lay.experts, ch.xsd, rd.x, c.hidden, rd.pick, rd.mw, rd.pm, R, c.swiglu_limit, if (rd.place_bound) expert_prune.placeBound(rd.prune.?, R) else null);
++    // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picks counted for the prefetch's hot set (1D only; counts only)
++    if (rd.hot) |h| if (e.two == null) try e.ops.hotTrack(e.s, ch.xsd.ids, ch.xsd.count, h.hist, li, h.stride);
+     // TF_DS_EXPERT_BYTES: the window the experts just read, counted (a profile; null unless the switch is on)
+     if (rd.moe_bytes) |*xb| try xb.count(e, rd, ch, li);
+     // the prefetch behind the experts: the next layer's attention mix and input linears (an Engram layer: the first
+@@ -1526,6 +1566,9 @@ fn moe(e: *const Engine, rd: *Round, ch: *const Chunk, li: usize) !void {
+         } else {
+             try rd.prefetch(e, &.{ .{ nx.hc_attn[0], hcFnBytes(c) }, linearBytes(nx.wq_a), linearBytes(nx.wkv), if (nx.comp_wkv) |x| linearBytes(x) else .{ 0, 0 }, if (nx.comp_wgate) |x| linearBytes(x) else .{ 0, 0 }, linearBytes(nx.wq_b) }, prefetch_budget);
+         }
++        // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): beside the linears, the next layer's hot experts' trellis - the
++        // review's routed-expert prefetch, which its own section 7 rules out without the decoded-cache premise
++        if (rd.hot) |h| if (h.n[li + 1] > 0) try rd.prefetch(e, h.ranges[(li + 1) * h.k * 3 ..][0 .. h.n[li + 1] * 3], prefetch_budget / 2);
+     } else try rd.prefetch(e, &.{linearBytes(e.w.head)}, prefetch_budget);
+ }
+ 
+@@ -2116,3 +2159,22 @@ fn notPorted(src: std.builtin.SourceLocation) error{NotPortedYet} {
+     std.debug.print("{{\"not_ported\": \"{s}:{d}\"}}\n", .{ src.file, src.line });
+     return error.NotPortedYet;
+ }
++
++test "TF_DS_EXPERT_HOT_CACHE: hotPick takes the top counts' ranges, ties to the lower id" {
++    // two experts of three, each with gate/up/down ranges (3 * E in id order)
++    const ranges = [_][2]u64{ .{ 10, 1 }, .{ 20, 2 }, .{ 30, 3 }, .{ 11, 1 }, .{ 21, 2 }, .{ 31, 3 }, .{ 12, 1 }, .{ 22, 2 }, .{ 32, 3 } };
++    var out: [6][2]u64 = undefined;
++    // expert 2 first (count 9), then expert 0 (count 5); ties (1 and 2 at 0 counts) never reached
++    const n = hotPick(&.{ 5, 0, 9 }, &ranges, 2, out[0..]);
++    try std.testing.expectEqual(@as(usize, 2), n);
++    try std.testing.expectEqual(@as(u64, 30), out[0][0]);
++    try std.testing.expectEqual(@as(u64, 31), out[1][0]);
++    try std.testing.expectEqual(@as(u64, 32), out[2][0]);
++    try std.testing.expectEqual(@as(u64, 10), out[3][0]);
++    // a tie goes to the lower id; a k past the counts stops at what there is
++    const m = hotPick(&.{ 7, 7, 0 }, &ranges, 5, out[0..]);
++    try std.testing.expectEqual(@as(usize, 2), m);
++    try std.testing.expectEqual(@as(u64, 10), out[0][0]);
++    try std.testing.expectEqual(@as(u64, 20), out[3][0]); // expert 1's gate (the tie's lower id took expert 0 first)
++    try std.testing.expectEqual(@as(usize, 0), hotPick(&.{ 0, 0, 0 }, &ranges, 2, out[0..]));
++}
+diff --git a/zig/src/families/dsv41/weights.zig b/zig/src/families/dsv41/weights.zig
+index c02d9aea474e01d74c3eb0852c3bf1370a3ef8fd..b1436affe7012ab4ac777d49ad3dbfc32e401829 100644
+--- a/zig/src/families/dsv41/weights.zig
++++ b/zig/src/families/dsv41/weights.zig
+@@ -27,6 +27,9 @@ pub const Linear = struct { words: u64, suh: u64, svh: u64, k: u32, n: u32, k2:
+ /// output columns (down_n of dims) over the half's whole intermediate.
+ pub const Experts = struct {
+     trellis: u64, // gate trellises of every expert, then up, then down (pack_trellises)
++    /// 0179 (TF_DS_EXPERT_HOT_CACHE): the host's copy of every expert's three trellis ranges (gate/up/down, id order:
++    /// expert e's are ranges[e], ranges[E + e], ranges[2E + e]), for the prefetch's hot set; the model's lifetime.
++    ranges: []const [2]u64 = &.{},
+     gate_ptr: u64, // int64 [E]
+     up_ptr: u64,
+     down_ptr: u64,
+@@ -572,6 +575,13 @@ const Loader = struct {
+         try L.w.named.append(L.gpa, .{ .name = try std.fmt.allocPrint(L.gpa, "{s}.ffn.experts.trellis", .{p}), .ptr = buf.ptr, .len = total });
+         L.w.bytes += total;
+         var x: Experts = undefined;
++        x.ranges = blk: { // (0179: the host's copy of the trellis ranges, for the prefetch's hot set)
++            const r = try L.gpa.alloc([2]u64, 3 * e_count);
++            for (0..3) |j| for (0..e_count) |e| {
++                r[j * e_count + e] = .{ ptrs[j * e_count + e], sizes[j * e_count + e] };
++            };
++            break :blk r;
++        };
+         x.trellis = buf.ptr;
+         x.shared_gate = .{ ptrs[n], sizes[n] }; // j = 0 (gate), e = n (the shared expert)
+         x.shared_up = .{ ptrs[e_count + n], sizes[e_count + n] };

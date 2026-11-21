@@ -1,0 +1,2494 @@
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index f7e9ca4..5390b05 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -5,6 +5,8 @@
+ #include <cuda_bf16.h>
+ #include <stdint.h>
+ 
++__device__ unsigned tf_ds_block_argmax_v(const float* row, int n, float* out_v);
++
+ // TF_DS_PDL: wait for the kernel this one follows (its memory flushed), then let the next one launch (programmatic
+ // dependent launches, sm_90+). Every kernel in this file takes `pdl` as its last argument (0: same instruction stream as
+ // before); the l2 prefetch kernel is the one exception: it reads the NEXT kernels' weights into L2 and must not run
+@@ -511,19 +513,24 @@ extern "C" __global__ void tf_ds_dead_rows_kernel(int* pick, float* wts, const u
+ // and slot order, ties to the lower id), and each row also its cap_min heaviest picks. apply 0 only counts. stats
+ // (nullable) u64 [6]: windows, distinct before, distinct after, dropped slots, rows, dropped weight share in millionths.
+ // pick/wts [rows, slots] (the routed slots first); one block of 64.
++// An optional dead mask clears all slots after the prune and its stats have seen the original row.
+ struct TfDsPrune { float topp; int min_k, renorm, apply, topk, slots, rows, cap, cap_min; };
+ #define TF_DS_PRUNE_ROWS 64
+ #define TF_DS_PRUNE_TOPK 8
+ #define TF_DS_PRUNE_EXPERTS 512
+-extern "C" __global__ void __launch_bounds__(TF_DS_PRUNE_ROWS) tf_ds_expert_prune_kernel(int* pick, float* wts, TfDsPrune a, unsigned long long* stats, int pdl) {
++extern "C" __global__ void __launch_bounds__(TF_DS_PRUNE_ROWS) tf_ds_expert_prune_kernel(int* pick, float* wts, TfDsPrune a, unsigned long long* stats, const unsigned char* dead, int pdl) {
+     pdl_enter(pdl);
+     __shared__ unsigned mb[16], ma[16], acc[3], ins[16];
+     __shared__ int sp[TF_DS_PRUNE_ROWS * TF_DS_PRUNE_TOPK];
+     __shared__ float sf[TF_DS_PRUNE_ROWS * TF_DS_PRUNE_TOPK], score[TF_DS_PRUNE_EXPERTS];
+     const int r = threadIdx.x;
+-    if (r < 16) { mb[r] = 0; ma[r] = 0; ins[r] = 0; }
+-    if (r < 3) acc[r] = 0;
+-    __syncthreads();
++    if (stats) {
++        if (r < 16) { mb[r] = 0; ma[r] = 0; }
++        if (r < 3) acc[r] = 0;
++    }
++    if (a.cap > 0 && r < 16) ins[r] = 0;
++    // Without stats or a cap, each thread only touches its own row.
++    if (stats || a.cap > 0) __syncthreads();
+     int* pk = pick + r * a.slots;
+     float* w = wts + r * a.slots;
+     int p[8], rank[8], live = 0;
+@@ -601,7 +608,7 @@ extern "C" __global__ void __launch_bounds__(TF_DS_PRUNE_ROWS) tf_ds_expert_prun
+                     (p[i] >= TF_DS_PRUNE_EXPERTS || !((ins[p[i] >> 5] >> (p[i] & 31)) & 1u)))
+                     keep[i] = false;
+                 if (keep[i]) { ++kept; ks = __fadd_rn(ks, w[i]); }
+-                else mass = __fadd_rn(mass, f[i]);
++                else if (stats) mass = __fadd_rn(mass, f[i]);
+             }
+             if (kept < live) {
+                 if (a.apply) {
+@@ -612,8 +619,10 @@ extern "C" __global__ void __launch_bounds__(TF_DS_PRUNE_ROWS) tf_ds_expert_prun
+                         else { pk[i] = -1; w[i] = 0.f; }
+                     }
+                 }
+-                atomicAdd(&acc[0], (unsigned)(live - kept));
+-                atomicAdd(&acc[2], (unsigned)(mass * 1e6f + 0.5f));
++                if (stats) {
++                    atomicAdd(&acc[0], (unsigned)(live - kept));
++                    atomicAdd(&acc[2], (unsigned)(mass * 1e6f + 0.5f));
++                }
+             }
+         } else if (a.cap > 0 && live > a.cap_min) {
+             // a row with no usable weight sum keeps its first cap_min live slots (route's heaviest): every row then
+@@ -625,15 +634,18 @@ extern "C" __global__ void __launch_bounds__(TF_DS_PRUNE_ROWS) tf_ds_expert_prun
+                 ++seen;
+                 if (!keep[i] && a.apply) { pk[i] = -1; w[i] = 0.f; }
+             }
+-            atomicAdd(&acc[0], (unsigned)(live - a.cap_min));
++            if (stats) atomicAdd(&acc[0], (unsigned)(live - a.cap_min));
+         }
+         if (stats) {
+             atomicAdd(&acc[1], 1u);
+             for (int i = 0; i < a.topk; ++i)
+                 if (p[i] >= 0 && keep[i] && p[i] < 512) atomicOr(&ma[p[i] >> 5], 1u << (p[i] & 31));
+         }
++        if (dead && dead[r]) {
++            for (int i = 0; i < a.slots; ++i) { pk[i] = -1; w[i] = 0.f; }
++        }
+     }
+-    __syncthreads();
++    if (stats) __syncthreads();
+     if (stats && r == 0) {
+         int before = 0, after = 0;
+         for (int i = 0; i < 16; ++i) { before += __popc(mb[i]); after += __popc(ma[i]); }
+@@ -646,6 +658,151 @@ extern "C" __global__ void __launch_bounds__(TF_DS_PRUNE_ROWS) tf_ds_expert_prun
+     }
+ }
+ 
++// The six routed picks precede the shared expert. A zero bit marks an invalid slot.
++// Higher bits win equal-share ties, which preserves the router's slot order.
++struct TfDsPruneSlot {
++    float share;
++    unsigned bit;
++};
++
++__device__ __forceinline__ void tf_ds_order_slots(TfDsPruneSlot &left, TfDsPruneSlot &right) {
++    if (right.share > left.share || (right.share == left.share && right.bit > left.bit)) {
++        const TfDsPruneSlot tmp = left;
++        left = right;
++        right = tmp;
++    }
++}
++
++__device__ __forceinline__ unsigned tf_ds_drop_six(const float (&shares)[6], const int (&ids)[6]) {
++    TfDsPruneSlot s[6];
++    #pragma unroll
++    for (int i = 0; i < 6; ++i) {
++        s[i] = {ids[i] >= 0 ? shares[i] : __int_as_float(0xff800000), ids[i] >= 0 ? 32u >> i : 0u};
++    }
++    // With bias-corrected routing, slot order may differ from weight order.
++    bool ordered = true;
++    #pragma unroll
++    for (int i = 1; i < 6; ++i) {
++        ordered &= ids[i - 1] >= 0 && s[i - 1].share >= s[i].share;
++    }
++    if (!ordered) {
++        tf_ds_order_slots(s[0], s[5]); tf_ds_order_slots(s[1], s[3]); tf_ds_order_slots(s[2], s[4]);
++        tf_ds_order_slots(s[1], s[2]); tf_ds_order_slots(s[3], s[4]);
++        tf_ds_order_slots(s[0], s[3]); tf_ds_order_slots(s[2], s[5]);
++        tf_ds_order_slots(s[0], s[1]); tf_ds_order_slots(s[2], s[3]); tf_ds_order_slots(s[4], s[5]);
++        tf_ds_order_slots(s[1], s[2]); tf_ds_order_slots(s[3], s[4]);
++    }
++    // The first three live slots are guaranteed. Only the three trailing ranks need decisions.
++    float prefix = __fadd_rn(__fadd_rn(s[0].share, s[1].share), s[2].share);
++    unsigned drop = prefix < 0.85f ? 0u : s[3].bit;
++    prefix = __fadd_rn(prefix, s[3].share);
++    if (!(prefix < 0.85f)) drop |= s[4].bit;
++    prefix = __fadd_rn(prefix, s[4].share);
++    if (!(prefix < 0.85f)) drop |= s[5].bit;
++    return drop;
++}
++
++template<bool collect>
++__device__ __forceinline__ void tf_ds_prune_six(int *pick, float *wts, int rows,
++        unsigned long long *stats, const unsigned char *dead) {
++    const int r = threadIdx.x;
++    __shared__ unsigned discarded[16], retained[16], drops[2], ppm[2];
++    if (collect) {
++        if (r < 16) discarded[r] = retained[r] = 0;
++        __syncthreads();
++    }
++
++    unsigned drop = 0;
++    float mass = 0.f;
++    if (r < rows) {
++        int *pk = pick + 7 * r;
++        float *w = wts + 7 * r;
++        const bool clear = dead && dead[r];
++        if (collect || !clear) {
++            int ids[6];
++            float weights[6], shares[6], total = 0.f;
++            #pragma unroll
++            for (int i = 0; i < 6; ++i) {
++                ids[i] = pk[i];
++                weights[i] = w[i];
++                if (ids[i] >= 0) total = __fadd_rn(total, weights[i]);
++            }
++            if (total > 0.f && !isinf(total)) {
++                #pragma unroll
++                for (int i = 0; i < 6; ++i) shares[i] = ids[i] >= 0 ? __fdiv_rn(weights[i], total) : 0.f;
++                drop = tf_ds_drop_six(shares, ids);
++                if (drop) {
++                    float kept = 0.f;
++                    #pragma unroll
++                    for (int i = 0; i < 6; ++i) {
++                        if (drop & (32u >> i)) {
++                            if (collect) mass = __fadd_rn(mass, shares[i]);
++                        } else if (ids[i] >= 0) {
++                            kept = __fadd_rn(kept, weights[i]);
++                        }
++                    }
++                    if (!clear) {
++                        const float scale = __fdiv_rn(total, kept);
++                        #pragma unroll
++                        for (int i = 0; i < 6; ++i) {
++                            if (drop & (32u >> i)) { pk[i] = -1; w[i] = 0.f; }
++                            else if (ids[i] >= 0) w[i] = __fmul_rn(weights[i], scale);
++                        }
++                    }
++                }
++            }
++            if (collect) {
++                #pragma unroll
++                for (int i = 0; i < 6; ++i) {
++                    const unsigned id = (unsigned)ids[i];
++                    if (id < 512) {
++                        const unsigned bit = 1u << (id & 31);
++                        // The union of the two sets recovers the pre-prune distinct count.
++                        unsigned *bitmap = (drop & (32u >> i)) ? discarded : retained;
++                        atomicOr(&bitmap[id >> 5], bit);
++                    }
++                }
++            }
++        }
++        if (clear) {
++            #pragma unroll
++            for (int i = 0; i < 7; ++i) { pk[i] = -1; w[i] = 0.f; }
++        }
++    }
++    if (collect) {
++        const int lane = r & 31;
++        const unsigned dropped = __reduce_add_sync(0xffffffffu, (unsigned)__popc(drop));
++        const unsigned share_ppm = __reduce_add_sync(0xffffffffu, (unsigned)(mass * 1e6f + 0.5f));
++        if (lane == 0) {
++            drops[r >> 5] = dropped;
++            ppm[r >> 5] = share_ppm;
++        }
++        __syncthreads();
++        if (r < 32) {
++            const unsigned n_before = __reduce_add_sync(0xffffffffu, r < 16 ? (unsigned)__popc(discarded[r] | retained[r]) : 0u);
++            const unsigned n_after = __reduce_add_sync(0xffffffffu, r < 16 ? (unsigned)__popc(retained[r]) : 0u);
++            if (r < 6) {
++                unsigned value = 1;
++                switch (r) {
++                    case 1: value = n_before; break;
++                    case 2: value = n_after; break;
++                    case 3: value = drops[0] + (blockDim.x > 32 ? drops[1] : 0u); break;
++                    case 4: value = rows; break;
++                    case 5: value = ppm[0] + (blockDim.x > 32 ? ppm[1] : 0u); break;
++                }
++                atomicAdd(stats + r, (unsigned long long)value);
++            }
++        }
++    }
++}
++
++extern "C" __global__ void __launch_bounds__(64) tf_ds_prune_six_kernel(int *pick, float *wts, TfDsPrune a,
++        unsigned long long *stats, const unsigned char *dead, int pdl) {
++    pdl_enter(pdl);
++    if (stats) tf_ds_prune_six<true>(pick, wts, a.rows, stats, dead);
++    else tf_ds_prune_six<false>(pick, wts, a.rows, stats, dead);
++}
++
+ // rounds.py _candidates_fast where the pool takes every block (contexts up to nblocks * bsize keys): a row's block mask
+ // (torch's bool, as u8) = the block's maximum (amax: a NaN wins) above -inf, or the block is the row's newest,
+ // (vis - 1) // bsize (floor division). score [rows, nb * bsize] fp32 (row stride ss), vis [rows], out [rows, nb] (row
+@@ -727,6 +884,126 @@ extern "C" __global__ void tf_ds_apply_pool_kernel(float* score, long long ss, i
+     }
+ }
+ 
++// An inclusive cutoff on the unique score/column keys for a pool of at most 8192 blocks.
++__device__ __forceinline__ unsigned long long tf_ds_pool_kth(const float* row, int n, int k) {
++    __shared__ unsigned int hist[256];
++    __shared__ unsigned long long prefix_s, mask_s;
++    __shared__ int want_s;
++    if (threadIdx.x == 0) {
++        // Inverted columns below 8192 have two constant high bytes.
++        prefix_s = mask_s = 0xffff0000ull;
++        want_s = k;
++    }
++    __syncthreads();
++    for (int d = 7; d >= 0; --d) {
++        if (d == 3 || d == 2) continue;
++        for (int b = threadIdx.x; b < 256; b += blockDim.x) hist[b] = 0;
++        __syncthreads();
++        const unsigned long long prefix = prefix_s, mask = mask_s;
++        for (int i = threadIdx.x; i < n; i += blockDim.x) {
++            const unsigned long long u = tf_ds_score_key(row[i], i);
++            if ((u & mask) == prefix) atomicAdd(&hist[(u >> (8 * d)) & 0xff], 1u);
++        }
++        __syncthreads();
++        // Each lane covers eight descending bins. Only the lane containing the target
++        // rank scans its eight counts. A complete final bin already gives an inclusive cutoff.
++        if (threadIdx.x < 32) {
++            const int lane = threadIdx.x;
++            const int hi = 255 - 8 * lane;
++            const int target = want_s;
++            int count = 0;
++            #pragma unroll
++            for (int j = 0; j < 8; ++j) count += hist[hi - j];
++            int end = count;
++            #pragma unroll
++            for (int off = 1; off < 32; off <<= 1) {
++                const int prev = __shfl_up_sync(0xffffffffu, end, off);
++                if (lane >= off) end += prev;
++            }
++            int rank = target - (end - count);
++            if (rank > 0 && rank <= count) {
++                int digit = hi;
++                while (rank > (int)hist[digit]) {
++                    rank -= hist[digit];
++                    --digit;
++                }
++                want_s = rank == (int)hist[digit] ? 0 : rank;
++                prefix_s = prefix | ((unsigned long long)digit << (8 * d));
++                mask_s = mask | (0xffull << (8 * d));
++            }
++        }
++        __syncthreads();
++        if (want_s == 0) break;
++    }
++    return prefix_s;
++}
++
++// One CTA owns a candidate row. Keep the maxima on chip for radix selection.
++// Compact selected columns in input order so neither the mask nor the list needs a sort. The maxima and the selection
++// live only on chip: the call sites read the mask (the prompt arm) or the block list (decode), never bmax/pidx, so the
++// fused launch writes neither (the unfused blockMax/topkIndices/poolPick sequence still does).
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const float* score, long long ss, int width,
++                                                                          int bsize, const long long* vis,
++                                                                          const long long* every, int k,
++                                                                          uint8_t* mask, long long ms, int* cblk,
++                                                                          int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    const int nb = 1 + (width - 1) / bsize;
++    extern __shared__ float maxima[];
++    const float ninf = -__int_as_float(0x7f800000);
++    const float* row = score + (long long)r * ss;
++    // phase 1: the block maxima (tf_ds_block_max_kernel's rule, one thread a block)
++    const long long visible = vis[r];
++    const long long last = visible > 0 ? (visible - 1) / bsize : -1;
++    for (int b = threadIdx.x; b < nb; b += blockDim.x) {
++        const float* s = row + (long long)b * bsize;
++        float m = ninf;
++        bool nan = false;
++        for (int j = 0; j < bsize && b * bsize + j < width; ++j) {
++            const float x = s[j];
++            if (x != x) nan = true;
++            else if (x > m) m = x;
++        }
++        float v = nan ? __int_as_float(0x7fc00000) : m;
++        if (b == last) v = __int_as_float(0x7f800000);
++        maxima[b] = v;
++    }
++    __syncthreads();
++    const unsigned long long kth = k == nb ? 0 : tf_ds_pool_kth(maxima, nb, k);
++    const long long limit = every[r];
++    const int lane = threadIdx.x & 31;
++    const int warp = threadIdx.x >> 5;
++    __shared__ int warp_end[32];
++    int base = 0;
++    for (int first = 0; first < nb; first += blockDim.x) {
++        const int col = first + threadIdx.x;
++        const float value = col < nb ? maxima[col] : ninf;
++        const bool picked = col < nb && tf_ds_score_key(value, col) >= kth;
++        const unsigned bits = __ballot_sync(0xffffffffu, picked);
++        if (lane == 0) warp_end[warp] = __popc(bits);
++        __syncthreads();
++        if (warp == 0) {
++            int total = warp_end[lane];
++            #pragma unroll
++            for (int step = 1; step < 32; step <<= 1) {
++                const int prev = __shfl_up_sync(0xffffffffu, total, step);
++                if (lane >= step) total += prev;
++            }
++            warp_end[lane] = total;
++        }
++        __syncthreads();
++        const bool valid = picked && col < limit && value > ninf;
++        if (mask && col < nb) mask[(long long)r * ms + col] = valid;
++        if (picked && cblk) {
++            const int rank = base + (warp ? warp_end[warp - 1] : 0) + __popc(bits & ((1u << lane) - 1));
++            cblk[(long long)r * k + rank] = valid ? col : -1;
++        }
++        base += warp_end[31];
++        __syncthreads();  // all warps consumed the offsets before the next tile
++    }
++}
++
+ // Rows of n16 16-byte words: dst row r = src row r (row strides in words). torch_ops' tf_strided_copy takes a block a
+ // row and a byte a thread; this one a word a thread over grid (ceil(n16 / blockDim), rows). Every pointer, stride and
+ // row length a multiple of 16 bytes (ops.copyRows checks).
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index 304439a..2850847 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -5,6 +5,7 @@
+ // the ones torch's own build makes. Built like torch_ops (--fmad=false --ftz=false).
+ #include <cuda_runtime.h>
+ #include <cuda_bf16.h>
++#include <cuda_fp8.h>
+ #include <stdint.h>
+ 
+ // TF_DS_PDL: wait for the kernel this one follows (its memory flushed), then let the next one launch (programmatic
+@@ -259,3 +260,567 @@ extern "C" __global__ void tf_ds_hc_mean4_kernel(const __nv_bfloat16* h, __nv_bf
+         out[r * os + d] = __float2bfloat16_rn(__fmul_rn(s, 0.25f));
+     }
+ }
++
++// These three steps mirror the instructions and reduction order of the pinned kit.
++__device__ __forceinline__ float tf_ds_kit_squares4(float a, float b, float c, float d) {
++    float sum = __fmul_rn(b, b);
++    sum = __fmaf_rn(a, a, sum);
++    sum = __fmaf_rn(c, c, sum);
++    return __fmaf_rn(d, d, sum);
++}
++
++__device__ __forceinline__ float tf_ds_kit_warp_sum(float sum) {
++    #pragma unroll
++    for (int offset = 16; offset > 0; offset >>= 1)
++        sum = __fadd_rn(sum, __shfl_xor_sync(0xffffffffu, sum, offset));
++    return sum;
++}
++
++template<int D>
++__device__ __forceinline__ float tf_ds_kit_inverse_rms(float sum, float eps) {
++    const float mean_eps = __fmaf_rn(sum, 1.0f / D, eps);
++    float root, inv;
++    asm("sqrt.approx.ftz.f32 %0, %1;" : "=f"(root) : "f"(mean_eps));
++    asm("div.approx.f32 %0, %1, %2;" : "=f"(inv) : "f"(1.0f), "f"(root));
++    return inv;
++}
++
++// Decode RMSNorm, specialized to the two matching _rmsnorm cubins in kit abe07c7d.
++// Each of the 128 threads loads one contiguous group. The 512-wide cubin starts with
++// lane element 1 squared, then contracts elements 0, 2 and 3 into that sum.
++template<int D>
++__device__ __forceinline__ void tf_ds_triton_rmsnorm_row(const __nv_bfloat16* src, const __nv_bfloat16* w,
++                                                         __nv_bfloat16* dst, float eps) {
++    static_assert(D == 128 || D == 512, "missing kit specialization");
++    constexpr int items = D / 128;
++    const int tid = threadIdx.x;
++    const int base = tid * items;
++    float x[items];
++    #pragma unroll
++    for (int j = 0; j < items; ++j) x[j] = __bfloat162float(src[base + j]);
++    float sum;
++    if (D == 512) sum = tf_ds_kit_squares4(x[0], x[1], x[2], x[3]);
++    else sum = __fmul_rn(x[0], x[0]);
++    sum = tf_ds_kit_warp_sum(sum);
++    __shared__ float warp_sum[4];
++    __shared__ float inv;
++    if ((tid & 31) == 0) warp_sum[tid >> 5] = sum;
++    __syncthreads();
++    if (tid < 4) {
++        sum = warp_sum[tid];
++        sum = __fadd_rn(sum, __shfl_xor_sync(0xfu, sum, 2));
++        sum = __fadd_rn(sum, __shfl_xor_sync(0xfu, sum, 1));
++        if (tid == 0) inv = tf_ds_kit_inverse_rms<D>(sum, eps);
++    }
++    __syncthreads();
++    #pragma unroll
++    for (int j = 0; j < items; ++j) {
++        const float y = __fmul_rn(x[j], inv);
++        dst[base + j] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[base + j]), y));
++    }
++}
++
++// tf_ds_rms_norm_kernel's reduction on one row held in `src` (bf16), L = blockDim.x matches rmsLanes(D, rows): the
++// four per-lane accumulators, the L > 32 shared fold, the shuffle down, and torch's mean/epsilon/rsqrt. Returns the
++// row's reciprocal, which the shared `rs` publishes to every thread. Extra y lanes help produce and store the row;
++// only y == 0 participates in the sum.
++__device__ __forceinline__ float tf_ds_torch_rmsnorm_inv(const __nv_bfloat16* src, int D, float factor, float eps) {
++    __shared__ float red[512];
++    __shared__ float rs;
++    const int L = blockDim.x;
++    const int lane = threadIdx.x + L * threadIdx.y;
++    float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
++    for (int idx = lane < L ? lane : D / 4; idx * 4 + 3 < D; idx += L) {
++        const float a = __bfloat162float(src[idx * 4 + 0]);
++        const float b = __bfloat162float(src[idx * 4 + 1]);
++        const float c = __bfloat162float(src[idx * 4 + 2]);
++        const float d = __bfloat162float(src[idx * 4 + 3]);
++        acc0 = __fadd_rn(acc0, __fmul_rn(a, a));
++        acc1 = __fadd_rn(acc1, __fmul_rn(b, b));
++        acc2 = __fadd_rn(acc2, __fmul_rn(c, c));
++        acc3 = __fadd_rn(acc3, __fmul_rn(d, d));
++    }
++    float v = __fadd_rn(__fadd_rn(__fadd_rn(acc0, acc1), acc2), acc3);
++    int dim_x = L;
++    if (L > 32) {
++        if (lane < L) red[lane] = v;
++        for (int offset = L / 2; offset >= 32; offset >>= 1) {
++            __syncthreads();
++            if (lane < offset && lane + offset < L) {
++                v = __fadd_rn(v, red[lane + offset]);
++                red[lane] = v;
++            }
++        }
++        dim_x = 32;
++        // Shared `red` is read only by the fold above and the reduction below is registers and shuffles, so the
++        // barrier is kept only for the folded shapes (whose last iteration ends on a shared write): at L == 32 no
++        // thread writes `red` at all. The `rs` publication barrier below stays for every shape.
++        __syncthreads();
++    }
++    for (int offset = dim_x >> 1; offset > 0; offset >>= 1) v = __fadd_rn(v, __shfl_down_sync(TF_FULL_MASK, v, offset));
++    if (lane == 0) rs = rsqrtf(__fadd_rn(__fmul_rn(v, factor), eps));
++    __syncthreads();
++    return rs;
++}
++
++// The same norm's store over `src`, one element a loop step from `lane` by `threads` (the caller's flattened index).
++__device__ __forceinline__ void tf_ds_torch_rmsnorm_row(const __nv_bfloat16* src, const __nv_bfloat16* w,
++                                                        __nv_bfloat16* dst, int D, float factor, float eps) {
++    const float r = tf_ds_torch_rmsnorm_inv(src, D, factor, eps);
++    const int lane = threadIdx.x + blockDim.x * threadIdx.y;
++    const int threads = blockDim.x * blockDim.y;
++    for (int j = lane; j < D; j += threads) {
++        const float y = __fmul_rn(__bfloat162float(src[j]), r);
++        dst[j] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[j]), y));
++    }
++}
++
++// The same reduction and store, with the caller's own bf16 values (held in registers) standing in for `src` at its
++// flattened indices `lane + i * threads`: the output reads no shared memory. ITEMS is the caller's D / (blockDim.x *
++// blockDim.y), so the loop unrolls to registers with no local-memory array.
++template<int ITEMS>
++__device__ __forceinline__ void tf_ds_torch_rmsnorm_row_held(const __nv_bfloat16* src, const __nv_bfloat16* w,
++                                                             __nv_bfloat16* dst, int D, float factor, float eps,
++                                                             const __nv_bfloat16* held) {
++    const float r = tf_ds_torch_rmsnorm_inv(src, D, factor, eps);
++    const int lane = threadIdx.x + blockDim.x * threadIdx.y;
++    const int threads = blockDim.x * blockDim.y;
++    #pragma unroll
++    for (int i = 0; i < ITEMS; ++i) {
++        const int j = lane + i * threads;
++        if (j < D) {
++            const float y = __fmul_rn(__bfloat162float(held[i]), r);
++            dst[j] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[j]), y));
++        }
++    }
++}
++
++// The pair-sum arithmetic of tf_ds_compress2_kernel / tf_ds_compress2x_kernel, verbatim (kv/score addressed by the
++// caller): the pair's softmax (max, the two expf, the sum from 0), the products, the pair's sum as compress2 adds it.
++__device__ __forceinline__ float tf_ds_compress2_pair(float s0, float s1, float kv0, float kv1) {
++    float m = -3.402823466e+38f;   // numeric_limits<float>::lowest()
++    m = m < s0 ? s0 : m;
++    m = m < s1 ? s1 : m;
++    float sum = 0.f;
++    sum = __fadd_rn(sum, expf(__fsub_rn(s0, m)));
++    sum = __fadd_rn(sum, expf(__fsub_rn(s1, m)));
++    const float p0 = __fdiv_rn(expf(__fsub_rn(s0, m)), sum);
++    const float p1 = __fdiv_rn(expf(__fsub_rn(s1, m)), sum);
++    const float y0 = __fmul_rn(kv0, p0);
++    const float y1 = __fmul_rn(kv1, p1);
++    float t = __fadd_rn(__fadd_rn(0.f, y0), __fadd_rn(0.f, y1));
++    t = __fadd_rn(t, 0.f);
++    t = __fadd_rn(t, 0.f);
++    return t;
++}
++
++// -- TF_DS_FUSED_COMPRESS2_NORM (0197) -------------------------------------------------------------------------------
++
++// The prompt path's ratio-2 chain: tf_ds_compress2_kernel (grid-stride over G*C, here one block per group, the pair
++// sums staged through shared memory as bf16 exactly as the unfused launch round-trips them through global memory)
++// followed by tf_ds_rms_norm_kernel's arithmetic (torch's reduce order, the block's lane count passed as blockDim.x,
++// the same `factor` the unfused launch computes). One block per group g, grid.x = G. `factor` is rows/(rows*D) as
++// float, computed by the caller exactly as Exact.rmsNorm does.
++// The pair pass over ITEMS channels a thread, keeping each channel's bf16 result: the norm's output is the same
++// flattened `lane + i * threads` index, so the store reads the register value instead of shared srow (srow still feeds
++// the reduction, whose four-channel mapping differs).
++template<int ITEMS>
++__device__ __forceinline__ void tf_ds_compress2_norm_items(const float* kv, const float* score, const __nv_bfloat16* w,
++                                                           __nv_bfloat16* out, __nv_bfloat16* srow, long long ldo,
++                                                           int D, float factor, float eps) {
++    const long long g = blockIdx.x;
++    const int lane = threadIdx.x + blockDim.x * threadIdx.y;
++    const int threads = blockDim.x * blockDim.y;
++    __nv_bfloat16 held[ITEMS];
++    #pragma unroll
++    for (int i = 0; i < ITEMS; ++i) {
++        const int c = lane + i * threads;
++        if (c < D) {
++            const float s0 = score[(g * 2) * D + c];
++            const float s1 = score[(g * 2 + 1) * D + c];
++            held[i] = __float2bfloat16_rn(tf_ds_compress2_pair(s0, s1, kv[(g * 2) * D + c], kv[(g * 2 + 1) * D + c]));
++            srow[c] = held[i];
++        }
++    }
++    __syncthreads();
++    tf_ds_torch_rmsnorm_row_held<ITEMS>(srow, w, out + g * ldo, D, factor, eps, held);
++}
++
++extern "C" __global__ void tf_ds_compress2_norm_kernel(const float* kv, const float* score,
++                                                       const __nv_bfloat16* w, __nv_bfloat16* out,
++                                                       long long ldo, int G, int D, float factor, float eps, int pdl) {
++    pdl_enter(pdl);
++    const int g = blockIdx.x;
++    __shared__ __nv_bfloat16 srow[2048];   // D <= 2048
++    const int threads = blockDim.x * blockDim.y;
++    // the launcher's block is min(D, target) lanes over a whole number of channels a thread: 1, 2, 4, 8 or 16 items
++    if (threads > 0 && threads <= D && (D % threads) == 0) {
++        switch (D / threads) {
++            case 1: tf_ds_compress2_norm_items<1>(kv, score, w, out, srow, ldo, D, factor, eps); return;
++            case 2: tf_ds_compress2_norm_items<2>(kv, score, w, out, srow, ldo, D, factor, eps); return;
++            case 4: tf_ds_compress2_norm_items<4>(kv, score, w, out, srow, ldo, D, factor, eps); return;
++            case 8: tf_ds_compress2_norm_items<8>(kv, score, w, out, srow, ldo, D, factor, eps); return;
++            case 16: tf_ds_compress2_norm_items<16>(kv, score, w, out, srow, ldo, D, factor, eps); return;
++            default: break;
++        }
++    }
++    // any other geometry: the pair pass, then the norm's own store over srow
++    for (int c = threadIdx.x + blockDim.x * threadIdx.y; c < D; c += threads) {
++        const float s0 = score[((long long)g * 2) * D + c];
++        const float s1 = score[((long long)g * 2 + 1) * D + c];
++        srow[c] = __float2bfloat16_rn(tf_ds_compress2_pair(s0, s1, kv[((long long)g * 2) * D + c], kv[((long long)g * 2 + 1) * D + c]));
++    }
++    __syncthreads();
++    tf_ds_torch_rmsnorm_row(srow, w, out + (long long)g * ldo, D, factor, eps);
++}
++
++// Each warp resolves both partners before reading any ring data. Use the first
++// matching current row, including when that row belongs to another block.
++__device__ __forceinline__ int2 tf_ds_compress2_partners(const long long* slots, int rows,
++                                                        long long own, long long q0, long long q1) {
++    if (rows == 1) return make_int2(own == q0 ? 0 : -1, own == q1 ? 0 : -1);
++    int2 found = make_int2(-1, -1);
++    for (int first = 0; first < rows; first += 32) {
++        const int r = first + (threadIdx.x & 31);
++        const long long slot = r < rows ? slots[r] : -1;
++        const unsigned m0 = __ballot_sync(0xffffffffu, r < rows && slot == q0);
++        const unsigned m1 = __ballot_sync(0xffffffffu, r < rows && slot == q1);
++        if (found.x < 0 && m0) found.x = first + __ffs(m0) - 1;
++        if (found.y < 0 && m1) found.y = first + __ffs(m1) - 1;
++        if (found.x >= 0 && found.y >= 0) break;
++    }
++    return found;
++}
++
++template<int D>
++__device__ __forceinline__ void tf_ds_compress2_decode(float value, const __nv_bfloat16* w, __nv_bfloat16* dst, float eps) {
++    const int tid = threadIdx.x;
++    const float x = __bfloat162float(__float2bfloat16_rn(value));
++    // Keep the rounded channel in a register for the final multiply. At width 512
++    // the kit first reduces four adjacent channels per logical lane.
++    __shared__ float row[D == 512 ? 512 : 1];
++    if (D == 512) {
++        row[tid] = x;
++        __syncthreads();
++    }
++    __shared__ float warp_sum[4];
++    if (tid < 128) {
++        float sum;
++        if (D == 512) {
++            const int base = tid * 4;
++            sum = tf_ds_kit_squares4(row[base], row[base + 1], row[base + 2], row[base + 3]);
++        } else {
++            sum = __fmul_rn(x, x);
++        }
++        sum = tf_ds_kit_warp_sum(sum);
++        if ((tid & 31) == 0) warp_sum[tid >> 5] = sum;
++    }
++    __syncthreads();
++    const float sum = __fadd_rn(__fadd_rn(warp_sum[0], warp_sum[2]), __fadd_rn(warp_sum[1], warp_sum[3]));
++    const float inv = tf_ds_kit_inverse_rms<D>(sum, eps);
++    const float y = __fmul_rn(x, inv);
++    dst[tid] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[tid]), y));
++}
++
++// Decode ratio-2 scatter, pair compression and kit RMSNorm. Launch exactly D threads per row.
++extern "C" __global__ void __launch_bounds__(512) tf_ds_compress2x_norm_kernel(const float* ckv, long long ckv_ld,
++                                                                               const float* cgate, long long cgate_ld,
++                                                                               const long long* rslot,
++                                                                               float* ring_kv,
++                                                                               float* ring_score,
++                                                                               const long long* gi, long long src_rows,
++                                                                               const __nv_bfloat16* w,
++                                                                               __nv_bfloat16* out, long long ldo,
++                                                                               int G, int D, float eps,
++                                                                               unsigned* invalid, int pdl) {
++    pdl_enter(pdl);
++    const int g = blockIdx.x;
++    const long long own = rslot[g];
++    const int c = threadIdx.x;
++    const float own_kv = ckv[g * ckv_ld + c], own_score = cgate[g * cgate_ld + c];
++    ring_kv[own * D + c] = own_kv;
++    ring_score[own * D + c] = own_score;
++    const long long q0 = gi[2 * g], q1 = gi[2 * g + 1];
++    const int2 pr = tf_ds_compress2_partners(rslot, G, own, q0, q1);
++    const bool ok0 = q0 >= 0 && q0 < src_rows, ok1 = q1 >= 0 && q1 < src_rows;
++    if ((!ok0 || !ok1) && threadIdx.x == 0 && invalid) atomicExch(invalid, 1u);
++    float kv[2], score[2];
++    #pragma unroll
++    for (int i = 0; i < 2; ++i) {
++        const bool ok = i == 0 ? ok0 : ok1;
++        const int row = i == 0 ? pr.x : pr.y;
++        const long long q = i == 0 ? q0 : q1;
++        if (!ok) {
++            kv[i] = score[i] = 0.f;
++        } else if (row == g) {
++            kv[i] = own_kv;
++            score[i] = own_score;
++        } else if (row >= 0) {
++            kv[i] = ckv[row * ckv_ld + c];
++            score[i] = cgate[row * cgate_ld + c];
++        } else {
++            kv[i] = ring_kv[q * D + c];
++            score[i] = ring_score[q * D + c];
++        }
++    }
++    const float value = tf_ds_compress2_pair(score[0], score[1], kv[0], kv[1]);
++    if (D == 512) tf_ds_compress2_decode<512>(value, w, out + g * ldo, eps);
++    else tf_ds_compress2_decode<128>(value, w, out + g * ldo, eps);
++}
++
++// ===================================================================================================================
++// TF_DS_FUSED_ROPE_STORE (0198, off by default).
++//
++// These kernels combine the following operations at their original bf16 rounding boundaries:
++//   - the kit's `_rmsnorm` (see tf_ds_triton_rmsnorm_row above),
++//   - the kit's `_rope_heads` (Triton contracts the first product into the add: re = fma(xe, cs, -(xo*sn)),
++//     im = fma(xe, sn, xo*cs); the torch ops.rope_ equivalent is re = fma(xe, cs, -(xo*sn)), im = fma(xo, cs, xe*sn)) -
++//     both forms live in tf_ds_latent_element, which the key and latent passes call,
++//   - the kit's `_fp4_store` (E2M1 codes, the E4M3 or the pow2/E8M0 scale, byte packing),
++//   - the kit's `_fp4qd_p2` (E2M1 codes with the pow2 scale, the dequantized bf16 out).
++// The decode norm and rotary contraction follow the pinned SM121 kit.
++// ===================================================================================================================
++
++// E2M1 magnitude of an already-clamped t (|t| <= 6), ties to the even code (kernels.py `_e2m1_round`).
++__device__ __forceinline__ unsigned tf_ds_e2m1_code(float t) {
++    const float a = fabsf(t);
++    const unsigned idx = (a > 0.25f) + (a >= 0.75f) + (a > 1.25f) + (a >= 1.75f)
++                       + (a > 2.5f) + (a >= 3.5f) + (a > 5.0f);
++    return idx | ((t < 0.0f && idx > 0u) ? 8u : 0u);
++}
++
++// The E2M1 magnitude as a float (kernels.py's g table).
++__device__ __forceinline__ float tf_ds_e2m1_mag(unsigned idx) {
++    switch (idx) {
++        case 0: return 0.0f;
++        case 1: return 0.5f;
++        case 2: return 1.0f;
++        case 3: return 1.5f;
++        case 4: return 2.0f;
++        case 5: return 3.0f;
++        case 6: return 4.0f;
++        default: return 6.0f;
++    }
++}
++
++// E4M3 byte -> float (the scale the codes are dequantized with).
++__device__ __forceinline__ float tf_ds_e4m3_to_float(unsigned b) {
++    const unsigned exp = (b >> 3) & 15u, mantissa = b & 7u;
++    // The encoder returns positive scale bytes through 0x7e.
++    return exp ? __uint_as_float(((exp + 120u) << 23) | (mantissa << 20)) : mantissa * 0x1p-9f;
++}
++
++// The kit's FMNMX instructions select the numeric operand for a NaN.
++__device__ __forceinline__ float tf_ds_clamp6(float v) { return fminf(fmaxf(v, -6.f), 6.f); }
++
++template<int BLOCK>
++__device__ __forceinline__ float tf_ds_fp4_amax(float x) {
++    float m = fmaxf(0.f, fabsf(x));
++    #pragma unroll
++    for (int delta = BLOCK / 2; delta; delta >>= 1)
++        m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, delta, BLOCK));
++    return m;
++}
++
++__device__ __forceinline__ unsigned tf_ds_pow2_exponent(float amax) {
++    const unsigned bits = __float_as_uint(__fdiv_rn(fmaxf(amax, 6.f * 0x1p-126f), 6.f));
++    return ((bits >> 23) & 255u) + ((bits & 0x7fffffu) != 0);
++}
++
++// One rotary element as the fused chains rotate it: the pair partner is the neighbour lane's value (xor 1), the result
++// is rounded to bf16 once. PROMPT takes torch's odd-element contraction (re = fma(xe, cs, -(xo*sn)), im = fma(xo, cs,
++// xe*sn)); otherwise the kit's Triton form (im = fma(xe, sn, xo*cs)). `i < start` (the unrotated prefix) passes the
++// value through, and a caller outside the row passes start = D.
++template<bool PROMPT>
++__device__ __forceinline__ __nv_bfloat16 tf_ds_latent_element(__nv_bfloat16 x, int i, int start,
++                                                             const float* cs, const float* sn) {
++    const float v = __bfloat162float(x);
++    const float other = __shfl_xor_sync(0xffffffffu, v, 1);
++    if (i < start) return x;
++    const int j = (i - start) >> 1;
++    float rotated;
++    if ((i & 1) == 0) rotated = __fmaf_rn(v, cs[j], -__fmul_rn(other, sn[j]));
++    else if (PROMPT) rotated = __fmaf_rn(v, cs[j], __fmul_rn(other, sn[j]));
++    else rotated = __fmaf_rn(other, sn[j], __fmul_rn(v, cs[j]));
++    return __float2bfloat16_rn(rotated);
++}
++
++// One subgroup per scale. Preserve the kit's low/high half-row packing and target row indirection.
++// One pass, one lane a packed column: element i and element i + D/2 are loaded, rotated in registers (PROMPT picks
++// torch's odd-element contraction over the kit's), and their 32-key scale groups' maxima come from those same register
++// values - a lane's low and high elements are each the first element of their group at i % 32 == 0, so the lane that
++// writes a group's byte is the lane that quantizes it. No shared scale array, no barrier, and no second srow read.
++// The tail of the last iteration (D/2 not a multiple of blockDim.x) is whole 32-lane groups: those lanes run the
++// shuffles with 0 and write nothing, which keeps every full-mask shuffle whole-warp.
++template<bool PROMPT>
++__device__ __forceinline__ void tf_ds_key_store_row(const __nv_bfloat16* srow, const float* cos, const float* sin,
++                                                    long long pos, uint8_t* codes, uint8_t* scales, long long row,
++                                                    int D, int RD) {
++    constexpr int BLOCK = 32;
++    const int nb = D / BLOCK;
++    const int half = D / 2, start = D - RD;
++    cos += pos * (RD / 2);
++    sin += pos * (RD / 2);
++    scales += row * nb;
++    codes += row * half;
++    const __nv_bfloat16 zero = __float2bfloat16_rn(0.f);
++    const int lane = threadIdx.x + blockDim.x * threadIdx.y;
++    const int threads = blockDim.x * blockDim.y;
++    for (int first = 0; first < half; first += threads) {
++        const int i = first + lane;
++        const bool live = i < half;
++        // dead lanes read nothing and rotate nothing (start = D keeps the helper off the rope table)
++        const float x = __bfloat162float(tf_ds_latent_element<PROMPT>(live ? srow[i] : zero, i, live ? start : D, cos, sin));
++        const float y = __bfloat162float(tf_ds_latent_element<PROMPT>(live ? srow[i + half] : zero, i + half, live ? start : D, cos, sin));
++        const float ax = tf_ds_fp4_amax<BLOCK>(x);
++        const float ay = tf_ds_fp4_amax<BLOCK>(y);
++        if (!live) continue;
++        const unsigned bx = tf_ds_pow2_exponent(ax), by = tf_ds_pow2_exponent(ay);
++        if ((i % BLOCK) == 0) {
++            scales[i / BLOCK] = (uint8_t)bx;
++            scales[(i + half) / BLOCK] = (uint8_t)by;
++        }
++        const float lo = tf_ds_clamp6(__fdiv_rn(x, __uint_as_float(bx << 23)));
++        const float hi = tf_ds_clamp6(__fdiv_rn(y, __uint_as_float(by << 23)));
++        codes[i] = (uint8_t)(tf_ds_e2m1_code(lo) | (tf_ds_e2m1_code(hi) << 4));
++    }
++}
++
++// -- TF_DS_FUSED_ROPE_STORE (0198) ----------------------------------------------------------------------------------
++
++// The decode indexer key (round.zig's kv-source layers): the kit's `_rmsnorm` (D=128) + `_rope_heads` (RD=64, H=1,
++// forward) + `_fp4_store` (D=128, BLOCK=32, E4M3=false) in one launch. grid.x = rows, block = 128 (the _rmsnorm
++// num_warps=4 layout). The packed codes/scales go to rows_idx[r] (the ctarget row), exactly as _fp4_store's ROWS
++// indirection; the rotated row stays in shared memory (rd.ik's store had no reader, so nothing writes it).
++extern "C" __global__ void __launch_bounds__(128) tf_ds_fused_idx_key_kernel(const __nv_bfloat16* x, long long ldx,
++                                                                             const __nv_bfloat16* w,
++                                                                             const float* cos, const float* sin,
++                                                                             const long long* pos,
++                                                                             uint8_t* codes, uint8_t* scales,
++                                                                             const long long* rows_idx,
++                                                                             int D, int RD, float eps, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    __shared__ __nv_bfloat16 srow[512];   // D <= 512
++    // phase 1: _rmsnorm (x row -> srow, bf16)
++    tf_ds_triton_rmsnorm_row<128>(x + (long long)r * ldx, w, srow, eps);
++    __syncthreads();
++    // phases 2+3: _rope_heads (RD/2 pairs, head base = D - RD) and _fp4_store in one packed-column pass
++    tf_ds_key_store_row<false>(srow, cos, sin, pos[r], codes, scales, rows_idx[r], D, RD);
++}
++
++__device__ __forceinline__ unsigned tf_ds_latent_code(__nv_bfloat16 x, uint8_t* scales, int i) {
++    const float v = __bfloat162float(x);
++    const float m = tf_ds_fp4_amax<16>(v);
++    const float f = __fdiv_rn(fmaxf(m, 6.f * 0x1p-9f), 6.f);
++    const unsigned byte = __nv_cvt_float_to_fp8(f, __NV_SATFINITE, __NV_E4M3);
++    if ((i & 15) == 0) scales[i >> 4] = byte;
++    const float sc = tf_ds_e4m3_to_float(byte);
++    // With bf16 inputs and positive E4M3 scales every scaled midpoint is exactly
++    // representable in fp32. Adjacent bf16 values cannot round onto a midpoint after
++    // division. Comparing against the midpoint in input units preserves all seven ties.
++    const float a = fabsf(v);
++    const unsigned idx = (a > .25f * sc) + (a >= .75f * sc) + (a > 1.25f * sc)
++                       + (a >= 1.75f * sc) + (a > 2.5f * sc) + (a >= 3.5f * sc) + (a > 5.f * sc);
++    if (isnan(v)) return 15u; // kit clamps NaN to -6
++    return idx | ((v < 0.f && idx) ? 8u : 0u);
++}
++
++template<bool PROMPT>
++__device__ __forceinline__ void tf_ds_latent_row(const __nv_bfloat16* src, const float* cos, const float* sin,
++                                                 long long pos, uint8_t* codes, uint8_t* scales, long long row,
++                                                 int D, int RD) {
++    const int half = D / 2, start = D - RD;
++    const long long base = (long long)blockIdx.x * D;
++    const int lane = threadIdx.x + blockDim.x * threadIdx.y;
++    const int threads = blockDim.x * blockDim.y;
++    cos += pos * (RD / 2);
++    sin += pos * (RD / 2);
++    scales += row * (D / 16);
++    for (int i = lane; i < half; i += threads) {
++        const auto lo = tf_ds_latent_element<PROMPT>(src[base+i], i, start, cos, sin);
++        const auto hi = tf_ds_latent_element<PROMPT>(src[base+i+half], i+half, start, cos, sin);
++        const unsigned l = tf_ds_latent_code(lo, scales, i);
++        const unsigned h = tf_ds_latent_code(hi, scales, i+half);
++        codes[row * half + i] = (uint8_t)(l | (h << 4));
++    }
++}
++
++// The decode latent (round.zig's kv-source layers): `_rope_heads` (RD=64, H=1, forward) + `_fp4_store`
++// (D=512, BLOCK=16, E4M3=true) in one launch. x is rd.lat, read only: the rotation is a register value here and the
++// in-place store had no reader after the pack. The packed codes/scales go to rows_idx[r] (the ltarget row; under
++// TF_DS_KV_SHARD the rank's plane or the trash row).
++extern "C" __global__ void __launch_bounds__(256) tf_ds_fused_rope_store_kernel(const __nv_bfloat16* x,
++                                                                                const float* cos, const float* sin,
++                                                                                const long long* pos,
++                                                                                uint8_t* codes, uint8_t* scales,
++                                                                                const long long* rows_idx,
++                                                                                int D, int RD, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    tf_ds_latent_row<false>(x, cos, sin, pos[r], codes, scales, rows_idx[r], D, RD);
++}
++
++// The decode indexer query (round.zig's index-source layers): `_rope_heads` (RD=64, H=index_heads, forward) +
++// `_fp4qd_p2` (32-element blocks, E2M1 codes with a pow2 scale, the dequantized bf16 written back out) in one launch.
++// grid.x = rows * H, block = 128. out (rd.iq4) gets the dequantized values; the rotated value is a register input to
++// its quantization (x is read only: the in-place rotation had no reader).
++extern "C" __global__ void __launch_bounds__(128) tf_ds_fused_rope_qd_kernel(const __nv_bfloat16* x, __nv_bfloat16* out,
++                                                                             const float* cos, const float* sin,
++                                                                             const long long* pos,
++                                                                             int H, int HD, int RD, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x / H, h = blockIdx.x % H;
++    const long long base = ((long long)r * H + h) * HD;
++    const long long p = pos[r];
++    for (int i = threadIdx.x; i < HD; i += blockDim.x) {
++        float v = __bfloat162float(x[base + i]);
++        const float other = __shfl_xor_sync(0xffffffffu, v, 1);
++        if (i >= HD - RD) {
++            const int j = (i - (HD - RD)) / 2;
++            const float cs = cos[p * (RD / 2) + j], sn = sin[p * (RD / 2) + j];
++            const float rot = (i & 1) ? __fmaf_rn(other, sn, __fmul_rn(v, cs))
++                                      : __fmaf_rn(v, cs, -__fmul_rn(other, sn));
++            v = __bfloat162float(__float2bfloat16_rn(rot));
++        }
++        const float scale = __uint_as_float(tf_ds_pow2_exponent(tf_ds_fp4_amax<32>(v)) << 23);
++        const float t = tf_ds_clamp6(__fdiv_rn(v, scale));
++        const float q = copysignf(tf_ds_e2m1_mag(tf_ds_e2m1_code(t) & 7u), t);
++        out[base + i] = __float2bfloat16_rn(__fmul_rn(q, scale));
++    }
++}
++
++// The prompt indexer key (prompt.zig's kv-source layers): torch's ops.rms_norm (the Exact kernel's arithmetic) +
++// ops.rope_ (tf_ds_rope_kernel's arithmetic) + the kit's `_fp4_store` (D=128, BLOCK=32, E4M3=false) in one launch.
++// grid.x = rows, block = { x = rmsLanes(D, rows), y = packLanes } (the x lane count the unfused rmsNorm launch uses,
++// so the reduction order is unchanged; the y lanes only share the packed-column pass, which strides on the flattened
++// threadIdx.x + blockDim.x * threadIdx.y). codes/scales go to rows_idx[r] (the group's slot); the rotated row stays in
++// shared memory (ch.ik's store had no reader).
++extern "C" __global__ void tf_ds_fused_prompt_idx_key_kernel(const __nv_bfloat16* x, long long ldx,
++                                                             const __nv_bfloat16* w, float eps, float factor,
++                                                             const float* cos, const float* sin, const long long* pos,
++                                                             uint8_t* codes, uint8_t* scales, const long long* rows_idx,
++                                                             int D, int RD, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    __shared__ __nv_bfloat16 srow[512];   // D <= 512
++    tf_ds_torch_rmsnorm_row(x + (long long)r * ldx, w, srow, D, factor, eps);
++    __syncthreads();
++    // ops.rope_ (torch's contraction) and the kit's _fp4_store in one packed-column pass
++    tf_ds_key_store_row<true>(srow, cos, sin, pos[r], codes, scales, rows_idx[r], D, RD);
++}
++
++// The prompt latent (prompt.zig's kv-source layers): ops.rope_ (tf_ds_rope_kernel's arithmetic) + the kit's
++// `_fp4_store` (D=512, BLOCK=16, E4M3=true) in one launch. x is ch.lat, read only: the copy into ch.lat2 with its
++// rotation had no reader after the pack. codes/scales go to rows_idx[r] (the group's slot). block = { x =
++// min(D/2, 256), y = 1 }: blockDim.x already covers the packed half row, so no extra y lanes are passed.
++extern "C" __global__ void __launch_bounds__(256) tf_ds_fused_prompt_latent_kernel(const __nv_bfloat16* x,
++                                                                                   const float* cos, const float* sin,
++                                                                                   const long long* pos,
++                                                                                   uint8_t* codes, uint8_t* scales,
++                                                                                   const long long* rows_idx,
++                                                                                   int D, int RD, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    tf_ds_latent_row<true>(x, cos, sin, pos[r], codes, scales, rows_idx[r], D, RD);
++}
+diff --git a/zig/src/families/dsv41/compress2_norm.zig b/zig/src/families/dsv41/compress2_norm.zig
+new file mode 100644
+index 0000000..56663a4
+--- /dev/null
++++ b/zig/src/families/dsv41/compress2_norm.zig
+@@ -0,0 +1,220 @@
++//! TF_DS_FUSED_COMPRESS2_NORM (off by default): the ratio-2 compressor chain and the RMSNorm after it in ONE launch.
++//!
++//! Prompt follows Exact.compress2 and Exact.rmsNorm, including bf16 staging and the row-dependent lane count.
++//! Decode combines the 0127 scatter/gather/compress2 with the pinned kit RMSNorm for the recorded widths.
++//! TF_DS_FUSED_COMPRESS2 alone keeps its separate kit norm. Other widths retain the existing decode path.
++const std = @import("std");
++
++pub const env_name: [:0]const u8 = "TF_DS_FUSED_COMPRESS2_NORM";
++
++/// The switch's value: unset, "" or "0" off; "1" on; anything else is a refusal to start (the message is on stderr).
++pub fn parse(text: ?[]const u8) ?bool {
++    const t = text orelse return false;
++    if (t.len == 0 or std.mem.eql(u8, t, "0")) return false;
++    if (std.mem.eql(u8, t, "1")) return true;
++    std.debug.print("{s}: expected 1 or 0\n", .{env_name});
++    return null;
++}
++
++pub fn fromText(text: ?[]const u8) error{BadCompress2Norm}!bool {
++    return parse(text) orelse error.BadCompress2Norm;
++}
++
++fn isPow2(n: usize) bool {
++    return n > 0 and (n & (n - 1)) == 0;
++}
++
++/// Prompt uses the vectorized torch norm. Decode additionally requires a matching kit specialization.
++pub fn fuseOk(fused: bool, rows: usize, d: usize) bool {
++    return fused and rows > 0 and isPow2(d) and d >= 128 and d <= 2048;
++}
++
++pub fn decodeOk(fused: bool, rows: usize, d: usize) bool {
++    return fused and rows > 0 and (d == 128 or d == 512);
++}
++
++test "decode fusion uses recorded four-warp kit widths" {
++    for ([_]usize{ 128, 512 }) |d| try std.testing.expect(decodeOk(true, 1, d));
++    for ([_]usize{ 256, 1024, 2048 }) |d| try std.testing.expect(!decodeOk(true, 1, d));
++}
++
++// -- host reference --------------------------------------------------------------------------------------------------
++
++/// Round-to-nearest-even f32 -> bf16 -> f32 (the rounding the kernels apply at every bf16 store).
++pub fn bf16Round(x: f32) f32 {
++    if (std.math.isNan(x)) return x;
++    const b: u32 = @bitCast(x);
++    return @bitCast((b + 0x7FFF + ((b >> 16) & 1)) & 0xFFFF0000);
++}
++
++/// The pair's softmax-weighted sum (tf_ds_compress2_kernel's arithmetic), the raw fp32 value.
++pub fn pairSum(kv0: f32, kv1: f32, s0: f32, s1: f32) f32 {
++    var m: f32 = -3.402823466e+38; // numeric_limits<float>::lowest()
++    if (s0 > m) m = s0;
++    if (s1 > m) m = s1;
++    var sum: f32 = 0;
++    sum += @exp(s0 - m);
++    sum += @exp(s1 - m);
++    const p0 = @exp(s0 - m) / sum;
++    const p1 = @exp(s1 - m) / sum;
++    const y0 = kv0 * p0;
++    const y1 = kv1 * p1;
++    return ((0.0 + y0) + (0.0 + y1)) + 0.0 + 0.0;
++}
++
++/// The pair sum as the kernels store it: bf16-rounded.
++pub fn pairSumBf16(kv0: f32, kv1: f32, s0: f32, s1: f32) f32 {
++    return bf16Round(pairSum(kv0, kv1, s0, s1));
++}
++
++/// The torch rms_norm lane count (exact.zig's rmsLanes; replicated here so this module stands alone — the test below
++/// asserts the two agree).
++pub fn rmsLanes(d: usize, rows: usize) usize {
++    const dim0 = d / 4;
++    const d0 = if (dim0 < 512) lastPow2(dim0) else 512;
++    const d1 = if (rows < 512) lastPow2(rows) else 512;
++    const bw: usize = @min(d0, 32);
++    const bh: usize = @min(d1, 512 / bw);
++    return @min(d0, 512 / bh);
++}
++
++fn lastPow2(n: usize) usize {
++    return if (n == 0) 0 else @as(usize, 1) << @intCast(std.math.log2_int(usize, n));
++}
++
++/// The pair pass's thread count (exact.compress2Norm's block: rmsLanes lanes over `groups` y lanes).
++pub fn pairThreads(d: usize, rows: usize) usize {
++    const lanes = rmsLanes(d, rows);
++    const target: usize = if (rows <= 32) 512 else if (rows <= 128) 256 else 128;
++    return @max(1, @min(d, target) / lanes) * lanes;
++}
++
++/// The channels one thread produces and then stores: tf_ds_compress2_norm_kernel's held-values specialization is
++/// unrolled per item count (1, 2, 4, 8, 16); any other count takes the generic path that rereads srow.
++pub fn pairItems(d: usize, rows: usize) usize {
++    return d / pairThreads(d, rows);
++}
++
++/// The norm of one bf16-valued row, torch's lane structure (per-lane 4-wide vector accumulators combined in order,
++/// the L>32 fold, the shuffle down), returning bf16-valued f32. `factor` is torch's rows/(rows*D) as f32. Not
++/// bit-identical to the kernel (rsqrtf vs 1/@sqrt); used for the property tests, not for bitwise checks.
++pub fn rmsNormRef(x: []const f32, w: []const f32, out: []f32, lanes: usize, factor: f32, eps: f32) void {
++    const d = x.len;
++    const l = lanes;
++    var part: [512]f32 = @splat(0);
++    var lane: usize = 0;
++    while (lane < l) : (lane += 1) {
++        var a0: f32 = 0;
++        var a1: f32 = 0;
++        var a2: f32 = 0;
++        var a3: f32 = 0;
++        var idx = lane;
++        while (idx * 4 + 3 < d) : (idx += l) {
++            a0 += x[idx * 4 + 0] * x[idx * 4 + 0];
++            a1 += x[idx * 4 + 1] * x[idx * 4 + 1];
++            a2 += x[idx * 4 + 2] * x[idx * 4 + 2];
++            a3 += x[idx * 4 + 3] * x[idx * 4 + 3];
++        }
++        part[lane] = ((a0 + a1) + a2) + a3;
++    }
++    var dim_x = l;
++    if (l > 32) {
++        var offset = l / 2;
++        while (offset >= 32) : (offset >>= 1) {
++            var lane2: usize = 0;
++            while (lane2 < offset) : (lane2 += 1) {
++                if (lane2 + offset < l) part[lane2] = part[lane2] + part[lane2 + offset];
++            }
++        }
++        dim_x = 32;
++    }
++    var offset = dim_x / 2;
++    while (offset > 0) : (offset >>= 1) {
++        var lane2: usize = 0;
++        while (lane2 < dim_x) : (lane2 += 1) {
++            if (lane2 + offset < dim_x) part[lane2] = part[lane2] + part[lane2 + offset];
++        }
++    }
++    const r = 1.0 / @sqrt(part[0] * factor + eps);
++    var j: usize = 0;
++    while (j < d) : (j += 1) out[j] = bf16Round(w[j] * (x[j] * r));
++}
++
++// -- tests -----------------------------------------------------------------------------------------------------------
++
++const expectEqual = std.testing.expectEqual;
++const exact = @import("exact.zig");
++
++test "the switch parses its forms and nothing else" {
++    try expectEqual(false, parse(null).?);
++    try expectEqual(false, parse("").?);
++    try expectEqual(false, parse("0").?);
++    try expectEqual(true, parse("1").?);
++    try expectEqual(@as(?bool, null), parse("2"));
++    try expectEqual(@as(?bool, null), parse("yes"));
++    try expectEqual(@as(?bool, null), parse("01"));
++    try std.testing.expectEqual(@as(bool, true), try fromText("1"));
++    try std.testing.expectError(error.BadCompress2Norm, fromText("2"));
++}
++
++test "fuseOk takes pow2 channel counts in [128, 2048] and any nonzero rows" {
++    try std.testing.expect(fuseOk(true, 1, 512));
++    try std.testing.expect(fuseOk(true, 16, 128));
++    try std.testing.expect(fuseOk(true, 2048, 2048));
++    try std.testing.expect(!fuseOk(true, 0, 512));
++    try std.testing.expect(!fuseOk(false, 16, 512));
++    try std.testing.expect(!fuseOk(true, 16, 96)); // not pow2
++    try std.testing.expect(!fuseOk(true, 16, 64)); // too narrow for the torch norm's vectorization
++    try std.testing.expect(!fuseOk(true, 16, 4096));
++    try std.testing.expect(!fuseOk(true, 16, 500)); // not pow2
++}
++
++test "rmsLanes matches exact.zig's" {
++    for ([_]usize{ 128, 256, 512, 1024, 2048 }) |d| {
++        for ([_]usize{ 1, 2, 3, 4, 5, 8, 9, 16, 17, 33, 512, 2048 }) |rows| {
++            try expectEqual(exact.rmsLanes(d, rows), rmsLanes(d, rows));
++        }
++    }
++}
++
++test "pairItems: every served geometry is a held-values specialization power of two" {
++    for ([_]usize{ 128, 256, 512, 1024, 2048 }) |d| {
++        for ([_]usize{ 1, 2, 7, 16, 32, 33, 64, 128, 129, 512, 1024, 2048 }) |rows| {
++            const threads = pairThreads(d, rows);
++            try std.testing.expect(threads > 0 and threads <= d);
++            try std.testing.expectEqual(@as(usize, 0), d % threads); // whole channels a thread
++            const items = pairItems(d, rows);
++            try std.testing.expect(items == 1 or items == 2 or items == 4 or items == 8 or items == 16);
++        }
++    }
++}
++
++test "pairSum: the softmax pair, bf16 rounding at the store" {
++    // s0 == s1: the softmax splits 0.5/0.5; the pair sum is the mean of the kv values
++    const v = pairSum(2.0, 4.0, 1.0, 1.0);
++    try std.testing.expectApproxEqAbs(@as(f32, 3.0), v, 1e-6);
++    try expectEqual(@as(f32, 3.0), pairSumBf16(2.0, 4.0, 1.0, 1.0));
++    // one score far above the other: the pair sum is that side's kv (to bf16)
++    try expectEqual(bf16Round(4.0), pairSumBf16(2.0, 4.0, -100.0, 100.0));
++    // a tie at the -inf floor: both weights equal
++    const v2 = pairSum(2.0, 6.0, -3.4e38, -3.4e38);
++    try std.testing.expectApproxEqAbs(@as(f32, 4.0), v2, 1e-3);
++}
++
++test "bf16Round rounds to nearest even at the 16-bit boundary" {
++    try expectEqual(@as(f32, 1.0), bf16Round(1.0));
++    try expectEqual(@as(f32, 1.0), bf16Round(1.00390625)); // halfway between 1.0 and 1.0078125 -> ties to even (1.0)
++    try expectEqual(@as(f32, 1.015625), bf16Round(1.01171875)); // halfway -> ties to even (1.015625)
++    try expectEqual(@as(f32, 0.0), bf16Round(0.0));
++    try expectEqual(@as(f32, -0.0), bf16Round(-0.0));
++}
++
++test "rmsNormRef: a constant row normalizes to w * sign (x * rinv)" {
++    // x = c (all ones): sum = d * c^2; rinv = rsqrt(c^2 + eps); out = bf16(w * c * rinv)
++    var x: [512]f32 = @splat(2.0);
++    var w: [512]f32 = @splat(1.5);
++    var out: [512]f32 = undefined;
++    rmsNormRef(&x, &w, &out, 32, 1.0 / 512.0, 1e-20);
++    const expect_v = bf16Round(1.5 * (2.0 / @sqrt(4.0 + 1e-20)));
++    for (out) |v| try expectEqual(expect_v, v);
++}
+diff --git a/zig/src/families/dsv41/dsv41.zig b/zig/src/families/dsv41/dsv41.zig
+index 290f9c1..fe9dc53 100644
+--- a/zig/src/families/dsv41/dsv41.zig
++++ b/zig/src/families/dsv41/dsv41.zig
+@@ -53,6 +53,9 @@ pub const model = @import("model.zig");
+ pub const prompt_rows = @import("prompt_rows.zig");
+ pub const prefill_prof = @import("prefill_prof.zig");
+ pub const expert_prune = @import("expert_prune.zig");
++pub const idx_fused = @import("idx_fused.zig");
++pub const compress2_norm = @import("compress2_norm.zig");
++pub const rope_store = @import("rope_store.zig");
+ pub const lanes = @import("lanes.zig");
+ pub const pool = @import("pool.zig");
+ pub const spill_state = @import("spill_state.zig");
+@@ -113,6 +116,9 @@ test {
+     refAll(prompt_rows);
+     refAll(prefill_prof);
+     refAll(expert_prune);
++    refAll(idx_fused);
++    refAll(compress2_norm);
++    refAll(rope_store);
+     refAll(lanes);
+     refAll(pool);
+     refAll(spill_state);
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index e3979c0..fd13f0b 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -26,6 +26,18 @@ pub fn rmsLanes(d: usize, rows: usize) usize {
+     return @min(d0, 512 / bh);
+ }
+ 
++/// The y lanes the prompt key's packed-column pass shares: the block's x dimension must stay the norm's lane count (the
++/// reduction order), so the extra lanes are whole warps over the packing loop's length D / 2 - `y` is the largest count
++/// whose threads (x * y) divide that length, at most 512 threads a block and at least one. A shape whose lane count
++/// does not divide D / 2 keeps y = 1 (the pass then strides, as before).
++pub fn packLanes(lanes: usize, half: usize) usize {
++    if (lanes == 0 or half == 0 or half % lanes != 0) return 1;
++    const most = @max(1, 512 / lanes);
++    var y: usize = @min(half / lanes, most);
++    while (y > 1 and half % (lanes * y) != 0) y -= 1;
++    return y;
++}
++
+ pub const Exact = struct {
+     module: cuda.Module,
+     k_rms_norm: cuda.Function,
+@@ -34,6 +46,13 @@ pub const Exact = struct {
+     k_rope: cuda.Function,
+     k_bf16_scale: cuda.Function,
+     k_hc_mean4: cuda.Function,
++    k_compress2_norm: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (prompt half): compress2 + rmsNorm, one launch
++    k_compress2x_norm: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half): the 0127 chain + the kit's _rmsnorm
++    k_fused_idx_key: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rmsnorm + _rope_heads + _fp4_store (decode indexer key)
++    k_fused_rope_store: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4_store (decode latent)
++    k_fused_rope_qd: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 (decode indexer query)
++    k_fused_prompt_idx_key: cuda.Function, // TF_DS_FUSED_ROPE_STORE: Exact.rmsNorm + Exact.rope + _fp4_store (prompt indexer key)
++    k_fused_prompt_latent: cuda.Function, // TF_DS_FUSED_ROPE_STORE: Exact.rope + _fp4_store (prompt latent)
+     pdl: bool = false, // TF_DS_PDL (ops.pdl_env)
+ 
+     /// cuda.kernels.dsv41_torch (or the fatbin's bytes).
+@@ -50,6 +69,13 @@ pub const Exact = struct {
+             .k_rope = try m.function("tf_ds_rope_kernel"),
+             .k_bf16_scale = try m.function("tf_ds_bf16_scale_kernel"),
+             .k_hc_mean4 = try m.function("tf_ds_hc_mean4_kernel"),
++            .k_compress2_norm = try m.function("tf_ds_compress2_norm_kernel"),
++            .k_compress2x_norm = try m.function("tf_ds_compress2x_norm_kernel"),
++            .k_fused_idx_key = try m.function("tf_ds_fused_idx_key_kernel"),
++            .k_fused_rope_store = try m.function("tf_ds_fused_rope_store_kernel"),
++            .k_fused_rope_qd = try m.function("tf_ds_fused_rope_qd_kernel"),
++            .k_fused_prompt_idx_key = try m.function("tf_ds_fused_prompt_idx_key_kernel"),
++            .k_fused_prompt_latent = try m.function("tf_ds_fused_prompt_latent_kernel"),
+         };
+     }
+ 
+@@ -124,6 +150,173 @@ pub const Exact = struct {
+         try cuda.launch.launch(e.k_compress2x, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = 256 }, .pdl = e.pdl }, s, &a);
+     }
+ 
++    /// TF_DS_FUSED_COMPRESS2_NORM, prompt half: tf_ds_compress2_norm_kernel — Exact.compress2's pair sum and
++    /// Exact.rmsNorm's arithmetic in one launch (one block a row; block.x = rmsLanes(d, rows), the lane count the
++    /// unfused rmsNorm launch would use). `factor` is computed as rmsNorm does (rows/(rows*d) as f32).
++    pub fn compress2Norm(e: *const Exact, s: cuda.Stream, kv: u64, score: u64, w: u64, out: u64, ldo: usize, rows: usize, d: usize, eps: f32) !void {
++        if (rows == 0) return;
++        if (d % 4 != 0 or d < 128 or d > 2048 or (d & (d - 1)) != 0) return error.UnsupportedShape;
++        const lanes = rmsLanes(d, rows);
++        // GB10: wide CTAs shorten the small-row chain. At larger grids more resident CTAs win.
++        // The x dimension stays identical to rmsNorm so the sum's rounding order is invariant. The y dimension makes
++        // blockDim.x * blockDim.y = min(d, target): D / threads (compress2_norm.pairItems) is the channels one thread
++        // produces and keeps for the norm's store, which the kernel specialises on.
++        const target: usize = if (rows <= 32) 512 else if (rows <= 128) 256 else 128;
++        const groups = @max(1, @min(d, target) / lanes);
++        const factor: f32 = @as(f32, @floatFromInt(rows)) / @as(f32, @floatFromInt(rows * d));
++        var a: cuda.Args = .{};
++        a.add(kv);
++        a.add(score);
++        a.add(w);
++        a.add(out);
++        a.add(@as(c_longlong, @intCast(ldo)));
++        a.add(@as(c_int, @intCast(rows)));
++        a.add(@as(c_int, @intCast(d)));
++        a.add(factor);
++        a.add(eps);
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
++    }
++
++    /// TF_DS_FUSED_COMPRESS2_NORM, decode half: tf_ds_compress2x_norm_kernel — the 0127 chain (scatter, resolve,
++    /// pair sum) and the kit's `_rmsnorm` in one launch. `w` is the comp_norm weight; `out` is rd.lat (the unfused
++    /// path's lat2 intermediate is not written). Grid = g blocks of d threads, one per channel.
++    pub fn compress2xNorm(e: *const Exact, s: cuda.Stream, ckv: u64, ckv_ld: usize, cgate: u64, cgate_ld: usize, rslot: u64, ring_kv: u64, ring_score: u64, gi: u64, src_rows: usize, w: u64, out: u64, ldo: usize, g: usize, d: usize, eps: f32, invalid: u64) !void {
++        if (g == 0) return;
++        if (d != 128 and d != 512) return error.UnsupportedShape;
++        var a: cuda.Args = .{};
++        a.add(ckv);
++        a.add(@as(c_longlong, @intCast(ckv_ld)));
++        a.add(cgate);
++        a.add(@as(c_longlong, @intCast(cgate_ld)));
++        a.add(rslot);
++        a.add(ring_kv);
++        a.add(ring_score);
++        a.add(gi);
++        a.add(@as(c_longlong, @intCast(src_rows)));
++        a.add(w);
++        a.add(out);
++        a.add(@as(c_longlong, @intCast(ldo)));
++        a.add(@as(c_int, @intCast(g)));
++        a.add(@as(c_int, @intCast(d)));
++        a.add(eps);
++        a.add(invalid);
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_compress2x_norm, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = @intCast(d) }, .pdl = e.pdl }, s, &a);
++    }
++
++    /// TF_DS_FUSED_ROPE_STORE, decode indexer key: the kit's `_rmsnorm` (D = 128) + `_rope_heads`
++    /// (RD = rope_dim, H = 1, forward) + `_fp4_store` (BLOCK = 32, E4M3 = false) in one launch. `x` is rd.ikp
++    /// (row stride ldx); the codes/scales go to row `rows_idx[r]` of the packed caches (the ctarget row) and the
++    /// rotated row stays on chip (rd.ik's store has no reader). Grid = rows, block = 128 (the num_warps=4 layout).
++    pub fn idxKeyFused(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, w: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize, eps: f32) !void {
++        if (rows == 0) return;
++        if (d != 128 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
++        var a: cuda.Args = .{};
++        a.add(x);
++        a.add(@as(c_longlong, @intCast(ldx)));
++        a.add(w);
++        a.add(cos);
++        a.add(sin);
++        a.add(pos);
++        a.add(codes);
++        a.add(scales);
++        a.add(rows_idx);
++        a.add(@as(c_int, @intCast(d)));
++        a.add(@as(c_int, @intCast(rd)));
++        a.add(eps);
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_fused_idx_key, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 128 }, .pdl = e.pdl }, s, &a);
++    }
++
++    /// TF_DS_FUSED_ROPE_STORE, decode latent: `_rope_heads` (RD = rope_dim, H = 1, forward) +
++    /// `_fp4_store` (D = head_dim, BLOCK = 16, E4M3 = true) in one launch. Codes/scales to row `rows_idx[r]`; rd.lat is
++    /// read only (the in-place rotation has no reader after the pack).
++    pub fn ropeStore(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize) !void {
++        if (rows == 0) return;
++        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
++        var a: cuda.Args = .{};
++        a.add(x);
++        a.add(cos);
++        a.add(sin);
++        a.add(pos);
++        a.add(codes);
++        a.add(scales);
++        a.add(rows_idx);
++        a.add(@as(c_int, @intCast(d)));
++        a.add(@as(c_int, @intCast(rd)));
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_fused_rope_store, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(@min(d / 2, 256)) }, .pdl = e.pdl }, s, &a);
++    }
++
++    /// TF_DS_FUSED_ROPE_STORE, decode indexer query: `_rope_heads` (RD = rope_dim, H = heads, forward) + `_fp4qd_p2`
++    /// (32-element blocks, pow2 scale, dequantized bf16 out) in one launch. Grid = rows * heads; `out` is rd.iq4 and
++    /// rd.iq is read only (the in-place rotation has no reader).
++    pub fn ropeQd(e: *const Exact, s: cuda.Stream, x: u64, out: u64, cos: u64, sin: u64, pos: u64, rows: usize, heads: usize, hd: usize, rd: usize) !void {
++        if (rows == 0 or heads == 0) return;
++        if (hd < 32 or hd > 512 or (hd & (hd - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > hd or hd % 32 != 0) return error.UnsupportedShape;
++        var a: cuda.Args = .{};
++        a.add(x);
++        a.add(out);
++        a.add(cos);
++        a.add(sin);
++        a.add(pos);
++        a.add(@as(c_int, @intCast(heads)));
++        a.add(@as(c_int, @intCast(hd)));
++        a.add(@as(c_int, @intCast(rd)));
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_fused_rope_qd, .{ .grid = .{ .x = @intCast(rows * heads) }, .block = .{ .x = 128 }, .pdl = e.pdl }, s, &a);
++    }
++
++    /// TF_DS_FUSED_ROPE_STORE, prompt indexer key: Exact.rmsNorm (torch's arithmetic; block.x = rmsLanes(d, rows), the
++    /// lane count the unfused launch uses, so the sum's order is unchanged; block.y = packLanes shares only the
++    /// packed-column pass) + Exact.rope (tf_ds_rope_kernel's arithmetic) + the kit's `_fp4_store`
++    /// (BLOCK = 32, E4M3 = false) in one launch. `x` is ch.lat2; codes/scales go to row `rows_idx[r]` (the group's
++    /// slot) and the rotated row stays on chip (ch.ik's store has no reader).
++    pub fn promptIdxKey(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, w: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize, eps: f32) !void {
++        if (rows == 0) return;
++        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or d % 4 != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
++        const lanes = rmsLanes(d, rows);
++        const y = packLanes(lanes, d / 2);
++        const factor: f32 = @as(f32, @floatFromInt(rows)) / @as(f32, @floatFromInt(rows * d));
++        var a: cuda.Args = .{};
++        a.add(x);
++        a.add(@as(c_longlong, @intCast(ldx)));
++        a.add(w);
++        a.add(eps);
++        a.add(factor);
++        a.add(cos);
++        a.add(sin);
++        a.add(pos);
++        a.add(codes);
++        a.add(scales);
++        a.add(rows_idx);
++        a.add(@as(c_int, @intCast(d)));
++        a.add(@as(c_int, @intCast(rd)));
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_fused_prompt_idx_key, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(lanes), .y = @intCast(y) }, .pdl = e.pdl }, s, &a);
++    }
++
++    /// TF_DS_FUSED_ROPE_STORE, prompt latent: Exact.rope + the kit's `_fp4_store` (D = head_dim, BLOCK = 16, E4M3 =
++    /// true) in one launch. Codes/scales to row `rows_idx[r]`; ch.lat is read only and the rotated row never reaches
++    /// ch.lat2 (nothing reads it there).
++    pub fn promptLatent(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize) !void {
++        if (rows == 0) return;
++        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
++        var a: cuda.Args = .{};
++        a.add(x);
++        a.add(cos);
++        a.add(sin);
++        a.add(pos);
++        a.add(codes);
++        a.add(scales);
++        a.add(rows_idx);
++        a.add(@as(c_int, @intCast(d)));
++        a.add(@as(c_int, @intCast(rd)));
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_fused_prompt_latent, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(@min(d / 2, 256)) }, .pdl = e.pdl }, s, &a);
++    }
++
+     /// ops.rope_(x[..., off : off + 2 * half], complex(cos, sin)[pos]) of n rows of x bf16 (row stride ldx), in place;
+     /// `inverse` rotates back (f.conj()).
+     pub fn rope(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, off: usize, cos: u64, sin: u64, pos: u64, n: usize, half: usize, inverse: bool) !void {
+@@ -186,6 +379,26 @@ test "torch's reduction block widths for the norms the forward takes" {
+     try std.testing.expectEqual(@as(usize, 32), rmsLanes(128, 2048));
+ }
+ 
++test "packLanes: whole warps over the packed half row, the served key taking two" {
++    // the served 128-wide prompt key: 32 norm lanes over a 64-element half row -> two warps, one pass
++    try std.testing.expectEqual(@as(usize, 2), packLanes(32, 64));
++    try std.testing.expectEqual(@as(usize, 2), packLanes(128, 256));
++    try std.testing.expectEqual(@as(usize, 1), packLanes(32, 32));
++    try std.testing.expectEqual(@as(usize, 1), packLanes(32, 100)); // half not a multiple of the lane count
++    try std.testing.expectEqual(@as(usize, 1), packLanes(0, 64));
++    // every served geometry: threads divide the half row, are a multiple of a warp, and stay within 512 a block
++    for ([_]usize{ 128, 512 }) |d| {
++        for ([_]usize{ 1, 4, 8, 16, 32, 64, 128, 512, 1024 }) |rows| {
++            const lanes = rmsLanes(d, rows);
++            const y = packLanes(lanes, d / 2);
++            const threads = lanes * y;
++            try std.testing.expect(y >= 1 and threads <= 512);
++            try std.testing.expectEqual(@as(usize, 0), threads % 32);
++            try std.testing.expectEqual(@as(usize, 0), (d / 2) % threads);
++        }
++    }
++}
++
+ test "the indexer's weight scale: 128 ** -0.5 * 32 ** -0.5 in fp32" {
+     try std.testing.expectEqual(@as(u32, 0x3c800000), @as(u32, @bitCast(indexScale(128, 32))));
+ }
+diff --git a/zig/src/families/dsv41/expert_prune.zig b/zig/src/families/dsv41/expert_prune.zig
+index 4846816..f021928 100644
+--- a/zig/src/families/dsv41/expert_prune.zig
++++ b/zig/src/families/dsv41/expert_prune.zig
+@@ -111,6 +111,12 @@ pub fn fromEnv() error{BadExpertPrune}!?Mode {
+     return fromText(p, c);
+ }
+ 
++/// Keep the counters by default and always collect them in stats-only mode.
++pub fn collectStats(m: Mode) bool {
++    const value = std.c.getenv("TF_DS_T13_PRUNE_STATS") orelse return true;
++    return !m.apply or !std.mem.eql(u8, std.mem.span(value), "0");
++}
++
+ /// Whether the model's shape fits the kernel's arrays; the caller refuses to start otherwise.
+ pub fn fits(topk: usize, experts: usize, rows: usize, m: Mode) bool {
+     const floor_ok = if (m.cap) |c| c.floor <= m.rule.min_k else true;
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+new file mode 100644
+index 0000000..2a89710
+--- /dev/null
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -0,0 +1,225 @@
++//! TF_DS_IDX_FUSED (off by default): the indexer's candidate pool in one launch - the block maxima
++//! (tf_ds_block_max_kernel), the top-k over them (tf_ds_topk_indices_kernel's selection) and the pool's mask / block
++//! list (tf_ds_pool_pick_kernel), one block per row. Pure: no cuda import; the launcher is Ops.idxFused and the call
++//! sites are round.zig's candidate-source arm (the decode rows) and prompt.zig's chunk path (the pooled source layer).
++//!
++//! The fused path selects a cutoff on chip and compacts the selected columns in ascending order. It writes only the
++//! mask (the prompt arm) or the block list (decode): the global block maxima and the selected-column list had no reader
++//! on the fused path, so the kernel keeps both on chip (the unfused launches still write them, and the host reference
++//! below still describes them). Past max_nbk the call sites use the unfused launches. A malformed switch refuses startup.
++const std = @import("std");
++
++pub const env_name: [:0]const u8 = "TF_DS_IDX_FUSED";
++
++/// The switch's value: unset, "" or "0" off; "1" on; anything else is a refusal to start (the message is on stderr).
++pub fn parse(text: ?[]const u8) ?bool {
++    const t = text orelse return false;
++    if (t.len == 0 or std.mem.eql(u8, t, "0")) return false;
++    if (std.mem.eql(u8, t, "1")) return true;
++    std.debug.print("{s}: expected 1 or 0\n", .{env_name});
++    return null;
++}
++
++pub fn fromText(text: ?[]const u8) error{BadIdxFused}!bool {
++    return parse(text) orelse error.BadIdxFused;
++}
++
++/// The selection's k bound (the pool's top blocks: candidate_blocks at both call sites, 2048 on this checkpoint).
++pub const max_k = 2048;
++/// The maxima's block count past which the fused launch keeps one block a row for work the unfused launches spread
++/// over a 2D grid: the fused path covers the pool's regime (nbk > candidate_blocks) up to 8192 blocks (64K keys at
++/// the served block size); past it the unfused sequence runs.
++pub const max_nbk = 8192;
++
++/// Whether the fused launch supports this configuration. The call sites fall back to the unfused sequence when it
++/// does not. k > nbk (the selection's own bound) and nbk <= 0 refuse; `width` must agree with `bsize`.
++pub fn fuseOk(fused: bool, rows: usize, width: usize, bsize: usize, nbk: usize, k: usize) bool {
++    return fused and rows > 0 and width > 0 and width <= std.math.maxInt(c_int) and bsize >= 1 and bsize <= std.math.maxInt(c_int) and nbk == 1 + (width - 1) / bsize and nbk >= 1 and nbk <= max_nbk and k >= 1 and k <= max_k and k <= nbk;
++}
++
++// -- host reference -------------------------------------------------------------------------------------------------
++//
++// The kernel's arithmetic on the host, written to the same spec (used by the tests below). fp32 with IEEE semantics;
++// the selection is keyed on the same 64-bit key and is computed by sorting (the kernel's radix select is the same
++// total order, which is what the tests check the fused arm against semantically, not algorithmically).
++
++const ninf: f32 = -std.math.inf(f32);
++
++/// The key tf_ds_score_key makes: the score's bits (-0 as +0) ordered as signed integers, above the inverted column.
++pub fn scoreKey(x: f32, j: usize) u64 {
++    var bits: u32 = @bitCast(x);
++    if (bits == 0x80000000) bits = 0; // score + 0.0
++    const sb: i32 = @bitCast(bits);
++    const ordered: i32 = if (sb < 0) sb ^ 0x7FFFFFFF else sb;
++    const key = (@as(u64, @bitCast(@as(i64, ordered))) << 32) | @as(u64, 0xFFFFFFFF - @as(u64, @intCast(j)));
++    return key ^ 0x8000000000000000;
++}
++
++/// The block maxima (tf_ds_block_max_kernel's rule): an amax over each block of `bsize` scores (a NaN wins, the NaN is
++/// quiet 0x7fc00000), the row's newest block (floor((vis - 1) / bsize), floor division on negatives) +inf.
++pub fn blockMaxima(score: []const f32, width: usize, bsize: usize, vis: i64, out: []f32) void {
++    std.debug.assert(score.len >= width and out.len >= (width + bsize - 1) / bsize);
++    const nb = (width + bsize - 1) / bsize;
++    const t = vis - 1;
++    const last: i64 = if (t >= 0) @divFloor(t, @as(i64, @intCast(bsize))) else -@divFloor(-t + @as(i64, @intCast(bsize)) - 1, @as(i64, @intCast(bsize)));
++    for (0..nb) |b| {
++        var m: f32 = ninf;
++        var nan = false;
++        for (0..bsize) |j| {
++            if (b * bsize + j >= width) break;
++            const x = score[b * bsize + j];
++            if (x != x) nan = true else if (x > m) m = x;
++        }
++        var v: f32 = if (nan) @bitCast(@as(u32, 0x7fc00000)) else m;
++        if (@as(i64, @intCast(b)) == last) v = std.math.inf(f32);
++        out[b] = v;
++    }
++}
++
++/// The top-k of the maxima by the key order (ties to the lower column; k <= nb), ascending columns, a column at or
++/// past `every` as -1. Independent of the kernel's radix select (a sort, the same total order).
++pub fn topCols(bmax: []const f32, every: i64, k: usize, out: []i64) void {
++    std.debug.assert(bmax.len >= k and out.len >= k and k >= 1 and bmax.len <= max_nbk);
++    var keys: [max_nbk]u64 = undefined;
++    var cols: [max_nbk]usize = undefined;
++    for (0..bmax.len) |i| {
++        keys[i] = scoreKey(bmax[i], i);
++        cols[i] = i;
++    }
++    // selection sort of the k largest keys (descending); the keys are unique, so this is stable on columns
++    for (0..k) |n| {
++        var best = n;
++        for (n + 1..bmax.len) |i| {
++            if (keys[i] > keys[best]) best = i;
++        }
++        std.mem.swap(u64, &keys[n], &keys[best]);
++        std.mem.swap(usize, &cols[n], &cols[best]);
++    }
++    // the k largest, columns ascending (the kernel's bitonic sort of the same set)
++    std.mem.sort(usize, cols[0..k], {}, std.sort.asc(usize));
++    for (0..k) |n| {
++        const c: i64 = @intCast(cols[n]);
++        out[n] = if (c < every) c else -1;
++    }
++}
++
++/// The pool pick (tf_ds_pool_pick_kernel's rule): `mask` (if given) is zeroed and each picked block whose maximum is
++/// above -inf sets its byte; `cblk` (if given) lists the block, or -1 when its maximum is not above -inf (a NaN
++/// maximum is not above -inf either). A negative column is not picked (the unfused launch reads bmax before the row
++/// there, unreachable today: every is every_vis).
++pub fn poolPick(bmax: []const f32, idx: []const i64, mask: ?[]u8, cblk: ?[]i32) void {
++    if (mask) |m| @memset(m, 0);
++    for (idx, 0..) |c, j| {
++        const ok = c >= 0 and bmax[@intCast(c)] > ninf;
++        if (mask) |m| {
++            if (ok) m[@intCast(c)] = 1;
++        }
++        if (cblk) |cb| cb[j] = if (ok) @intCast(c) else -1;
++    }
++}
++
++// -- tests -----------------------------------------------------------------------------------------------------------
++
++const expectEqual = std.testing.expectEqual;
++
++test "the switch parses its forms and nothing else" {
++    try expectEqual(false, parse(null).?);
++    try expectEqual(false, parse("").?);
++    try expectEqual(false, parse("0").?);
++    try expectEqual(true, parse("1").?);
++    try expectEqual(@as(?bool, null), parse("2"));
++    try expectEqual(@as(?bool, null), parse("yes"));
++    try expectEqual(@as(?bool, null), parse("01"));
++    try std.testing.expectEqual(@as(bool, true), try fromText("1"));
++    try std.testing.expectError(error.BadIdxFused, fromText("2"));
++}
++
++test "fuseOk takes the pool's bounds" {
++    try std.testing.expect(fuseOk(true, 16, 16392, 8, 2049, 2048)); // the smallest pooled case
++    try std.testing.expect(fuseOk(true, 1, 64, 8, 8, 4));
++    try std.testing.expect(fuseOk(true, 2048, 65536, 8, 8192, 2048)); // the nbk cap, inclusive
++    try std.testing.expect(!fuseOk(true, 16, 65544, 8, 8193, 2048)); // past the cap
++    try std.testing.expect(!fuseOk(false, 16, 16392, 8, 2049, 2048));
++    try std.testing.expect(!fuseOk(true, 0, 16392, 8, 2049, 2048));
++    try std.testing.expect(!fuseOk(true, 16, 16392, 8, 2050, 2048)); // nbk disagrees with width/bsize
++    try std.testing.expect(!fuseOk(true, 16, 16392, 8, 2049, 3000)); // k past the 2048 cap
++    try std.testing.expect(!fuseOk(true, 16, 16392, 8, 2049, 2050)); // k past nbk
++    try std.testing.expect(!fuseOk(true, 16, 16392, 0, 16392, 4));
++    try std.testing.expect(fuseOk(true, 16, 100, 8, 13, 13)); // k == nbk is fine
++    try std.testing.expect(!fuseOk(true, 16, 100, 8, 13, 14)); // k > nbk is not
++}
++
++test "scoreKey matches the -0/+0 rule and orders scores like signed integers" {
++    // +0.0 and -0.0 get the same key modulo the column; a larger score always wins a smaller column
++    const a = scoreKey(5.0, 0);
++    const b = scoreKey(-5.0, 0);
++    try std.testing.expect(a > b);
++    const key_neg_zero = scoreKey(-0.0, 3);
++    const key_pos_zero = scoreKey(0.0, 3);
++    try expectEqual(key_pos_zero, key_neg_zero); // the -0 to +0 rule
++    // an inverted column: a tie breaks to the lower column
++    try std.testing.expect(scoreKey(1.0, 0) > scoreKey(1.0, 1));
++    // NaN above +inf, as the bit order makes it
++    try std.testing.expect(scoreKey(@bitCast(@as(u32, 0x7fc00000)), 1) > scoreKey(std.math.inf(f32), 1));
++    // -inf floor: the smallest key class
++    try std.testing.expect(scoreKey(0.0, 0) > scoreKey(-std.math.inf(f32), 0));
++}
++
++test "blockMaxima: NaN wins, the newest block is pinned, short blocks are padded -inf" {
++    var s = [_]f32{ 1, 2, 3, @as(f32, @bitCast(@as(u32, 0x7fc00000))), -std.math.inf(f32), 4, 5, 6, 7 };
++    var bmax: [3]f32 = undefined;
++    blockMaxima(&s, 9, 4, 100, &bmax); // vis past the row: nothing pinned (100's newest block is 24)
++    try expectEqual(@as(u32, 0x7fc00000), @as(u32, @bitCast(bmax[0]))); // block 0 holds the NaN: it wins
++    try expectEqual(@as(f32, 6), bmax[1]); // islands: idx 4..7 = -inf, 4, 5, 6
++    try expectEqual(@as(f32, 7), bmax[2]); // the short last block (idx 8), padded with -inf
++    // the newest block pinned to +inf whatever its scores
++    blockMaxima(&s, 9, 4, 7, &bmax); // vis = 7: the newest key is 6: block 1 pinned
++    try expectEqual(std.math.inf(f32), bmax[1]);
++    try expectEqual(@as(u32, 0x7fc00000), @as(u32, @bitCast(bmax[0])));
++    // vis at or below 0: t < 0, floor division pins nothing (a negative block index)
++    blockMaxima(&s, 9, 4, 0, &bmax);
++    try expectEqual(@as(f32, 6), bmax[1]);
++}
++
++test "topCols picks the k largest by key, ties to the lower block, every masks the tail" {
++    const bmax = [_]f32{ 1, 2, 2, -std.math.inf(f32), 9, 9, 0, 7 };
++    var out: [3]i64 = undefined;
++    topCols(&bmax, 100, 3, &out);
++    try expectEqual([_]i64{ 4, 5, 7 }, out); // 9, 9, 7 (ties between the two 9s: the lower column first)
++    // every = 5: columns at or past 5 become -1
++    topCols(&bmax, 5, 3, &out);
++    try expectEqual([_]i64{ 4, -1, -1 }, out);
++    // -inf columns rank last (they are still selected when k > the count of finite maxima)
++    const flat = [_]f32{ -std.math.inf(f32), -std.math.inf(f32) };
++    var o2: [2]i64 = undefined;
++    topCols(&flat, 100, 2, &o2);
++    try expectEqual([_]i64{ 0, 1 }, o2);
++}
++
++test "poolPick zeroes the mask, sets picked blocks above -inf, lists -1 otherwise" {
++    const bmax = [_]f32{ 5, -std.math.inf(f32), @bitCast(@as(u32, 0x7fc00000)) };
++    const idx = [_]i64{ 0, 1, 2 };
++    var mask = [_]u8{ 9, 9, 9 };
++    var cblk = [_]i32{ 99, 99, 99 };
++    poolPick(&bmax, &idx, &mask, &cblk);
++    try expectEqual([_]u8{ 1, 0, 0 }, mask); // only block 0 is above -inf; the NaN and -inf blocks are not picked
++    try expectEqual([_]i32{ 0, -1, -1 }, cblk);
++    // a negative column (an every-masked selection) is not picked
++    const idx2 = [_]i64{ -1, 0 };
++    var cblk2 = [_]i32{ 99, 99 };
++    poolPick(&bmax, &idx2, &mask, &cblk2);
++    try expectEqual([_]i32{ -1, 0 }, cblk2);
++}
++
++test "key negative-column rule: a column at or past every is -1 in the list and not in the pool" {
++    // end-to-end through the host reference: an every below some selected column
++    const bmax = [_]f32{ 3, 7, 8, 1 };
++    var out: [2]i64 = undefined;
++    topCols(&bmax, 2, 2, &out); // selects blocks 2 and 1; ascending columns; block 2 >= every -> -1
++    try expectEqual([_]i64{ 1, -1 }, out);
++    var mask = [_]u8{ 9, 9, 9, 9 };
++    var cblk = [_]i32{ 99, 99 };
++    poolPick(&bmax, &out, &mask, &cblk);
++    try expectEqual([_]u8{ 0, 1, 0, 0 }, mask); // only block 1 lands
++    try expectEqual([_]i32{ 1, -1 }, cblk);
++}
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 028416b..c97d5c4 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -7,6 +7,9 @@
+ const std = @import("std");
+ const cuda = @import("cuda");
+ const expert_prune = @import("expert_prune.zig");
++const idx_fused = @import("idx_fused.zig");
++const compress2_norm = @import("compress2_norm.zig");
++const rope_store = @import("rope_store.zig");
+ 
+ /// launch_shape.h's tf_launch_blocks: a block a `threads` elements, at most 65535.
+ fn blocks(count: usize, threads: usize) u32 {
+@@ -116,7 +119,13 @@ pub const Ops = struct {
+     accept_chain: cuda.Function, // TF_DS_DEVICE_ACCEPT (only launched under it)
+     gpu_clock: cuda.Function,
+     prune: ?expert_prune.Mode = null, // TF_DS_T13_EXPERT_PRUNE and _EXPERT_CAP, read at load
++    prune_six_fn: ?cuda.Function = null,
+     prune_fn: ?cuda.Function = null, // looked up only when the switch is on
++    fused_route: bool = false, // TF_DS_FUSED_ROUTE combines pruning and dead-row masking
++    idx_fused: bool = false, // TF_DS_IDX_FUSED, read at load; off by default
++    idx_fused_fn: ?cuda.Function = null, // looked up only when the switch is on
++    compress2_norm: bool = false, // TF_DS_FUSED_COMPRESS2_NORM, read at load; off by default
++    rope_store: bool = false, // TF_DS_FUSED_ROPE_STORE, read at load; off by default
+     dead_rows: cuda.Function, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' picks emptied
+     hot_track: cuda.Function, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picks counted per layer for the prefetch
+     keyed_noise: ?cuda.Function = null, // TF_DS_T26_KEYED_DRAFT or TF_DS_SPEC_SAMPLE, looked up only when on
+@@ -137,10 +146,14 @@ pub const Ops = struct {
+         var fm = try cuda.Module.load(d, family);
+         errdefer fm.unload();
+         const prune = try expert_prune.fromEnv();
++        const fused_route = try fusedRoute(envSpan("TF_DS_FUSED_ROUTE"));
+         const spec = specSample(envSpan(spec_env), envSpan(keyed_env)) catch |err| {
+             std.log.err("dsv41: {s}", .{spec_keyed_why});
+             return err;
+         };
++        const idx_fused_on = try idx_fused.fromText(envSpan(idx_fused.env_name));
++        const compress2_norm_on = try compress2_norm.fromText(envSpan(compress2_norm.env_name));
++        const rope_store_on = try rope_store.fromText(envSpan(rope_store.env_name));
+         const pdl = onValue(envSpan(pdl_env));
+         const topk_fast = onValue(envSpan(topk_fast_env));
+         return .{
+@@ -170,7 +183,13 @@ pub const Ops = struct {
+             .accept_chain = try fm.function("tf_ds_accept_chain_kernel"),
+             .gpu_clock = try fm.function("tf_ds_clock_kernel"),
+             .prune = prune,
++            .fused_route = fused_route,
++            .prune_six_fn = if (fused_route and prune != null) try fm.function("tf_ds_prune_six_kernel") else null,
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
++            .idx_fused = idx_fused_on,
++            .idx_fused_fn = if (idx_fused_on) try fm.function("tf_ds_idx_fused_kernel") else null,
++            .compress2_norm = compress2_norm_on,
++            .rope_store = rope_store_on,
+             .dead_rows = try fm.function("tf_ds_dead_rows_kernel"),
+             .hot_track = try fm.function("tf_ds_hot_track_kernel"),
+             .keyed_noise = if (envOn(keyed_env) or spec) try fm.function("tf_ds_keyed_noise_kernel") else null,
+@@ -352,14 +371,24 @@ pub const Ops = struct {
+     /// The routed-expert prune of `pick` / `wts` [rows, slots] in place (m.apply: else it only counts); `stats`: the
+     /// device's expert_prune.Stats, or 0.
+     pub fn expertPrune(o: *const Ops, s: cuda.Stream, m: expert_prune.Mode, pick: u64, wts: u64, stats: u64, rows: usize, topk: usize, slots: usize) !void {
++        try o.expertPruneDead(s, m, pick, wts, stats, 0, rows, topk, slots);
++    }
++
++    /// Prune and collect stats before clearing dead rows in the same launch.
++    /// A zero dead pointer enables pruning alone.
++    pub fn expertPruneDead(o: *const Ops, s: cuda.Stream, m: expert_prune.Mode, pick: u64, wts: u64, stats: u64, dead: u64, rows: usize, topk: usize, slots: usize) !void {
+         if (rows == 0) return;
+         var a: cuda.Args = .{};
+         a.add(pick);
+         a.add(wts);
+         a.add(expert_prune.kargs(m, rows, topk, slots));
+         a.add(stats);
++        a.add(dead);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
+-        try cuda.launch.launch(o.prune_fn orelse return error.ExpertPruneOff, .{ .grid = .{ .x = 1 }, .block = .{ .x = expert_prune.max_rows }, .pdl = o.pdl }, s, &a);
++        const six = if (useSixSlotPrune(m, rows, topk, slots)) o.prune_six_fn else null;
++        const kernel = six orelse o.prune_fn orelse return error.ExpertPruneOff;
++        const threads: u32 = if (six != null and rows <= 32) 32 else expert_prune.max_rows;
++        try cuda.launch.launch(kernel, .{ .grid = .{ .x = 1 }, .block = .{ .x = threads }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// 0177 (TF_DS_DRAFT_TRIAGE): the dead draft rows' picks emptied - every slot of a dead row becomes pick -1,
+@@ -436,6 +465,32 @@ pub const Ops = struct {
+         try cuda.launch.launch(o.pool_pick, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
+     }
+ 
++    /// TF_DS_IDX_FUSED: the candidate pool's blockMax -> topk_indices -> poolPick in one launch (tf_ds_idx_fused_kernel),
++    /// one block per row. `mask` / `cblk` 0 leave one out (like poolPick) and are the only outputs the fused launch
++    /// writes (its maxima and selection stay on chip; the unfused sequence still writes bmax/pidx); `every` is the vis
++    /// the selection applies (the call sites pass every_vis). The wrapper refuses (rather than falls back) when the
++    /// bounds the caller passed to fuseOk are not met - the call sites only call it after `idx_fused.fuseOk` agrees.
++    pub fn idxFused(o: *const Ops, s: cuda.Stream, score: u64, ss: usize, width: usize, bsize: usize, vis: u64, every: u64, k: usize, mask: u64, ms: usize, cblk: u64, rows: usize) !void {
++        if (rows == 0) return;
++        if (score == 0 or vis == 0 or every == 0) return error.BadIdxFusedArgs;
++        if (width == 0 or width > std.math.maxInt(c_int) or bsize == 0 or bsize > std.math.maxInt(c_int)) return error.BadIdxFusedArgs;
++        const nbk = 1 + (width - 1) / bsize;
++        if (ss < width or (mask != 0 and ms < nbk) or nbk > idx_fused.max_nbk or k < 1 or k > idx_fused.max_k or k > nbk) return error.BadIdxFusedArgs;
++        var a: cuda.Args = .{};
++        a.add(score);
++        a.add(@as(c_longlong, @intCast(ss)));
++        a.add(@as(c_int, @intCast(width)));
++        a.add(@as(c_int, @intCast(bsize)));
++        a.add(vis);
++        a.add(every);
++        a.add(@as(c_int, @intCast(k)));
++        a.add(mask);
++        a.add(@as(c_longlong, @intCast(ms)));
++        a.add(cblk);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.idx_fused_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
++    }
++
+     /// model.py apply_candidates, in place: -inf at every column of score [rows, width] (row stride ss) whose block of
+     /// bsize the row's pool mask (u8, row stride ms) leaves out.
+     pub fn applyPool(o: *const Ops, s: cuda.Stream, score: u64, ss: usize, width: usize, bsize: usize, mask: u64, ms: usize, rows: usize) !void {
+@@ -660,3 +715,65 @@ test "TF_DS_PDL parses like the series' switches" {
+     try std.testing.expect(onValue("1") and onValue("on"));
+     for ([_]?[]const u8{ null, "0", "off", "", "ON", "yes", "01", "true" }) |v| try std.testing.expect(!onValue(v));
+ }
++
++fn fusedRoute(text: ?[]const u8) error{BadFusedRoute}!bool {
++    const value = text orelse return false;
++    if (value.len == 0 or std.mem.eql(u8, value, "0")) return false;
++    if (std.mem.eql(u8, value, "1")) return true;
++    std.log.err("TF_DS_FUSED_ROUTE: expected 1 or 0", .{});
++    return error.BadFusedRoute;
++}
++
++test "TF_DS_FUSED_ROUTE defaults off and accepts 0 or 1" {
++    for ([_]?[]const u8{ null, "", "0" }) |value| {
++        try std.testing.expect(!try fusedRoute(value));
++    }
++    try std.testing.expect(try fusedRoute("1"));
++}
++
++test "TF_DS_IDX_FUSED parses: unset/0/empty off, 1 on, else refused" {
++    try std.testing.expectEqualStrings("TF_DS_IDX_FUSED", idx_fused.env_name);
++    try std.testing.expectEqual(@as(bool, false), try idx_fused.fromText(null));
++    try std.testing.expectEqual(@as(bool, false), try idx_fused.fromText(""));
++    try std.testing.expectEqual(@as(bool, false), try idx_fused.fromText("0"));
++    try std.testing.expectEqual(@as(bool, true), try idx_fused.fromText("1"));
++    try std.testing.expectError(error.BadIdxFused, idx_fused.fromText("2"));
++}
++
++test "TF_DS_FUSED_COMPRESS2_NORM parses: unset/0/empty off, 1 on, else refused" {
++    try std.testing.expectEqualStrings("TF_DS_FUSED_COMPRESS2_NORM", compress2_norm.env_name);
++    try std.testing.expectEqual(@as(bool, false), try compress2_norm.fromText(null));
++    try std.testing.expectEqual(@as(bool, false), try compress2_norm.fromText(""));
++    try std.testing.expectEqual(@as(bool, false), try compress2_norm.fromText("0"));
++    try std.testing.expectEqual(@as(bool, true), try compress2_norm.fromText("1"));
++    try std.testing.expectError(error.BadCompress2Norm, compress2_norm.fromText("2"));
++}
++
++test "TF_DS_FUSED_ROPE_STORE parses: unset/0/empty off, 1 on, else refused" {
++    try std.testing.expectEqualStrings("TF_DS_FUSED_ROPE_STORE", rope_store.env_name);
++    try std.testing.expectEqual(@as(bool, false), try rope_store.fromText(null));
++    try std.testing.expectEqual(@as(bool, false), try rope_store.fromText(""));
++    try std.testing.expectEqual(@as(bool, false), try rope_store.fromText("0"));
++    try std.testing.expectEqual(@as(bool, true), try rope_store.fromText("1"));
++    try std.testing.expectError(error.BadRopeStore, rope_store.fromText("2"));
++}
++
++fn useSixSlotPrune(m: expert_prune.Mode, rows: usize, topk: usize, slots: usize) bool {
++    return topk == 6 and slots == 7 and rows > 0 and rows <= 64 and m.cap == null and m.apply and
++        m.rule.topp == 0.85 and m.rule.min_k == 3 and m.rule.renorm == .kept;
++}
++
++test "six-slot prune dispatch requires the implemented rule and row layout" {
++    const m = expert_prune.Mode{ .rule = expert_prune.default_rule, .apply = true };
++    try std.testing.expect(useSixSlotPrune(m, 1, 6, 7));
++    try std.testing.expect(useSixSlotPrune(m, 64, 6, 7));
++    try std.testing.expect(!useSixSlotPrune(m, 65, 6, 7));
++    try std.testing.expect(!useSixSlotPrune(m, 7, 5, 7));
++    try std.testing.expect(!useSixSlotPrune(m, 7, 6, 8));
++    for ([_][]const u8{ "stats", "0.8,3", "0.85,2", "0.85,3,orig" }) |rule| {
++        try std.testing.expect(!useSixSlotPrune(expert_prune.parse(rule).?, 7, 6, 7));
++    }
++    var capped = m;
++    capped.cap = .{ .experts = 32 };
++    try std.testing.expect(!useSixSlotPrune(capped, 7, 6, 7));
++}
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 4c0f0d7..703f90a 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -39,6 +39,9 @@ const shard = @import("shard.zig");
+ const shard_ops = @import("shard_ops.zig");
+ const prompt_rows = @import("prompt_rows.zig");
+ const prefill_prof = @import("prefill_prof.zig");
++const idx_fused = @import("idx_fused.zig");
++const compress2_norm = @import("compress2_norm.zig");
++const rope_store = @import("rope_store.zig");
+ 
+ comptime {
+     std.debug.assert(prompt_rows.default_window == exl3_experts.exact_rows and prompt_rows.max_window == exl3_experts.max_window_rows);
+@@ -1331,8 +1334,14 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+             sh.kv_layer = li;
+             return;
+         }
+-        try e.exact.compress2(e.s, ch.kvc, ch.scc, ch.lat2, full, hd);
+-        try e.exact.rmsNorm(e.s, ch.lat2, hd, lay.comp_norm, ch.lat, hd, full, hd, c.eps);
++        if (e.ops.compress2_norm and compress2_norm.fuseOk(true, full, hd)) {
++            // TF_DS_FUSED_COMPRESS2_NORM: compress2 and the RMSNorm in one launch (tf_ds_compress2_norm_kernel;
++            // torch's arithmetic both times, the norm's lane count the unfused launch would use)
++            try e.exact.compress2Norm(e.s, ch.kvc, ch.scc, lay.comp_norm, ch.lat, hd, full, hd, c.eps);
++        } else {
++            try e.exact.compress2(e.s, ch.kvc, ch.scc, ch.lat2, full, hd);
++            try e.exact.rmsNorm(e.s, ch.lat2, hd, lay.comp_norm, ch.lat, hd, full, hd, c.eps);
++        }
+     }
+     sh.kv_layer = li;
+     // groups first // r .. and their positions group * r (the rotations _rot reads)
+@@ -1349,16 +1358,28 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+     if (lay.idx_wk) |iwk| {
+         const id = c.index_head_dim;
+         try mmRows(e, ch, full, iwk, ch.lat, hd, ch.lat2, .bf16, id);
+-        try e.exact.rmsNorm(e.s, ch.lat2, id, lay.idx_k_norm, ch.ik, id, full, id, c.eps);
+-        try e.exact.rope(e.s, ch.ik, id, id - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);
+-        // switch "comp": the packed cache's rows in one launch (fp4_store: store_rows' bytes)
+-        try tri_attn.fp4Store(e.t, ch.ik, id, cs.idx_codes[li], cs.idx_scales[li], ch.groups, full, id, 32, false);
++        if (e.ops.rope_store and rope_store.fuseOk(true, full, id, rd, 1)) {
++            // TF_DS_FUSED_ROPE_STORE: rmsNorm + rope + fp4_store in one launch (torch's rms_norm/rope arithmetic,
++            // the kit's _fp4_store; the rotation stays on chip - nothing reads a rotated ch.ik)
++            try e.exact.promptIdxKey(e.s, ch.lat2, id, lay.idx_k_norm, rot.cos, rot.sin, ch.gpos, cs.idx_codes[li], cs.idx_scales[li], ch.groups, full, id, rd, c.eps);
++        } else {
++            try e.exact.rmsNorm(e.s, ch.lat2, id, lay.idx_k_norm, ch.ik, id, full, id, c.eps);
++            try e.exact.rope(e.s, ch.ik, id, id - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);
++            // switch "comp": the packed cache's rows in one launch (fp4_store: store_rows' bytes)
++            try tri_attn.fp4Store(e.t, ch.ik, id, cs.idx_codes[li], cs.idx_scales[li], ch.groups, full, id, 32, false);
++        }
+     }
+     // TF_DS_KV_SHARD: only the extent's owner holds (and stores) its compressed rows; the other rank's view has none
+     if (cs.own != null and !cs.own.?) return;
+-    try e.ops.copyRows(e.s, ch.lat, hd * 2, ch.lat2, hd * 2, hd * 2, full);
+-    try e.exact.rope(e.s, ch.lat2, hd, hd - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);
+-    try tri_attn.fp4Store(e.t, ch.lat2, hd, cs.comp_codes[li], cs.comp_scales[li], ch.groups, full, hd, 16, true);
++    if (e.ops.rope_store and rope_store.fuseOk(true, full, hd, rd, 1)) {
++        // TF_DS_FUSED_ROPE_STORE: rope + fp4_store in one launch (torch's rope arithmetic, the kit's _fp4_store;
++        // the rotation stays on chip - nothing reads a rotated ch.lat2)
++        try e.exact.promptLatent(e.s, ch.lat, rot.cos, rot.sin, ch.gpos, cs.comp_codes[li], cs.comp_scales[li], ch.groups, full, hd, rd);
++    } else {
++        try e.ops.copyRows(e.s, ch.lat, hd * 2, ch.lat2, hd * 2, hd * 2, full);
++        try e.exact.rope(e.s, ch.lat2, hd, hd - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);
++        try tri_attn.fp4Store(e.t, ch.lat2, hd, cs.comp_codes[li], cs.comp_scales[li], ch.groups, full, hd, 16, true);
++    }
+ }
+ 
+ /// vis[r0..][0..m] at a 16-byte-aligned address, as the kit's indexer variants take VIS: the view, else a copy.
+@@ -1385,9 +1406,15 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+     }
+     if (n_comp_end > ch.max_comp) return error.ChunkTooLong;
+     try mm(e, ch, wqb, ch.qr, lay.wq_a.n, ch.iq, .bf16, ih * id);
+-    try tri_norm.ropeHeads(e.t, ch.iq, rope.cos, rope.sin, ch.pos, c.rope_dim, false, n, ih, id);
+-    // switch "idx": fp4_qd's bytes in one launch
+-    try tri_attn.fp4QdP2(e.t, ch.iq, ch.iq4, n * ih * id);
++    if (e.ops.rope_store and rope_store.fuseOk(true, n, id, c.rope_dim, ih)) {
++        // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 in one launch (the decode arm's kernel: the same Triton
++        // arithmetic over the same [rows, heads, head_dim] layout, with the prompt's own positions, ch.pos)
++        try e.exact.ropeQd(e.t.stream, ch.iq, ch.iq4, rope.cos, rope.sin, ch.pos, n, ih, id, c.rope_dim);
++    } else {
++        try tri_norm.ropeHeads(e.t, ch.iq, rope.cos, rope.sin, ch.pos, c.rope_dim, false, n, ih, id);
++        // switch "idx": fp4_qd's bytes in one launch
++        try tri_attn.fp4QdP2(e.t, ch.iq, ch.iq4, n * ih * id);
++    }
+     if (n <= tri.decode_rows) {
+         // a decode-sized chunk: the row-invariant matmul of the fp16 projection (rowmm2)
+         try tri_norm.rowmm2(e.t, ch.x, c.hidden, lay.idx_proj_h, ch.wl, n, c.hidden, ih);
+@@ -1444,9 +1471,14 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+             try tri_index.indexScore(e.t, q, k, wb, vr, n_comp_end, ch.score, null, false, null, false, m, ih, id);
+             const mrows = ch.pool + r0 * ch.pool_ms;
+             if (pooled and li == c.candidate_source) {
+-                try e.ops.blockMax(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.bmax, nbk, m);
+-                try e.ops.topkIndices(e.s, ch.bmax, nbk, m, nbk, pk, ch.every, ch.pidx);
+-                try e.ops.poolPick(e.s, ch.bmax, nbk, nbk, ch.pidx, pk, mrows, ch.pool_ms, 0, m);
++                // TF_DS_IDX_FUSED: the same three launches in one (off by default); the mask keeps its offset (mrows)
++                if (idx_fused.fuseOk(e.ops.idx_fused, m, n_comp_end, cb, nbk, pk)) {
++                    try e.ops.idxFused(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.every, pk, mrows, ch.pool_ms, 0, m);
++                } else {
++                    try e.ops.blockMax(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.bmax, nbk, m);
++                    try e.ops.topkIndices(e.s, ch.bmax, nbk, m, nbk, pk, ch.every, ch.pidx);
++                    try e.ops.poolPick(e.s, ch.bmax, nbk, nbk, ch.pidx, pk, mrows, ch.pool_ms, 0, m);
++                }
+             } else if (pooled and c.candidate_source < li) {
+                 if (!sh.pool) return error.NoCandidatePool;
+                 try e.ops.applyPool(e.s, ch.score, n_comp_end, n_comp_end, cb, mrows, ch.pool_ms, m);
+diff --git a/zig/src/families/dsv41/rope_store.zig b/zig/src/families/dsv41/rope_store.zig
+new file mode 100644
+index 0000000..a6331dd
+--- /dev/null
++++ b/zig/src/families/dsv41/rope_store.zig
+@@ -0,0 +1,363 @@
++//! TF_DS_FUSED_ROPE_STORE (off by default): the rope+store chains of the kv-source and index-source layers in ONE
++//! launch each. Five kernels (dsv41_torch.cu), one switch:
++//!   * decode indexer key (round.zig's kv-source layers): the kit's `_rmsnorm` (D=index_head_dim) + `_rope_heads`
++//!     (RD=rope_dim, H=1) + `_fp4_store` (BLOCK=32, E4M3=false) — tf_ds_fused_idx_key_kernel.
++//!   * decode latent (the same layers): `_rope_heads` + `_fp4_store` (D=head_dim, BLOCK=16, E4M3=true) —
++//!     tf_ds_fused_rope_store_kernel.
++//!   * indexer query (round.zig's index-source layers and prompt.zig's indexer: the same Triton arithmetic and
++//!     [rows, heads, head_dim] layout on both paths): `_rope_heads` (RD=rope_dim, H=index_heads) + `_fp4qd_p2`
++//!     (32-element blocks, pow2 scale, dequantized bf16 out) — tf_ds_fused_rope_qd_kernel.
++//!   * prompt indexer key (prompt.zig's kv-source layers): Exact.rmsNorm + Exact.rope (torch's arithmetic) + the
++//!     kit's `_fp4_store` — tf_ds_fused_prompt_idx_key_kernel.
++//!   * prompt latent (prompt.zig's kv-source layers): Exact.rope + `_fp4_store` — tf_ds_fused_prompt_latent_kernel.
++//!
++//! Decode uses the kit's 128-wide RMSNorm for keys. Scale reductions and E2M1 rounding
++//! follow the recorded _fp4_store and _fp4qd_p2 kernels. The fused launches write the packed codes/scales (and, for
++//! the query, the dequantized iq4) only: the rotated row each unfused chain leaves in rd.ik/rd.lat/ch.ik/ch.lat2 has no
++//! reader on the fused path, so the fused kernels keep it in registers/shared memory. The unfused fallbacks still
++//! write their rotated buffers, so a replay that compares them must compare packed bytes, not those rows.
++const std = @import("std");
++
++pub const env_name: [:0]const u8 = "TF_DS_FUSED_ROPE_STORE";
++
++/// The switch's value: unset, "" or "0" off; "1" on; anything else is a refusal to start (the message is on stderr).
++pub fn parse(text: ?[]const u8) ?bool {
++    const t = text orelse return false;
++    if (t.len == 0 or std.mem.eql(u8, t, "0")) return false;
++    if (std.mem.eql(u8, t, "1")) return true;
++    std.debug.print("{s}: expected 1 or 0\n", .{env_name});
++    return null;
++}
++
++pub fn fromText(text: ?[]const u8) error{BadRopeStore}!bool {
++    return parse(text) orelse error.BadRopeStore;
++}
++
++fn isPow2(n: usize) bool {
++    return n > 0 and (n & (n - 1)) == 0;
++}
++
++/// Whether the fused launch supports this configuration: rows, the head dim (pow2 in [128, 512]: the kernels' srow
++/// is 512 bf16 and the fp4 blocks divide it), the rope dim (pow2, <= d) and the head count.
++pub fn fuseOk(fused: bool, rows: usize, d: usize, rd: usize, heads: usize) bool {
++    return fused and rows > 0 and isPow2(d) and d >= 128 and d <= 512 and isPow2(rd) and rd >= 2 and rd <= d and heads >= 1;
++}
++
++// -- host reference (tests) ------------------------------------------------------------------------------------------
++//
++// The kernels' arithmetic on the host, written to the same spec. fp32 IEEE; every operation in the kernel's order.
++// Not bit-identical to the kernels (expf/sqrtf are not reproducible in Zig); the fuzz harness (p0197) is the bitwise
++// check. These exist for the known-answer tests below.
++
++/// One E2M1 code (the `_e2m1_round` thresholds, ties to the even code), sign bit included.
++pub fn e2m1Code(t: f32) u8 {
++    const a = @abs(t);
++    var idx: u8 = 0;
++    if (a > 0.25) idx += 1;
++    if (a > 0.75) idx += 1;
++    if (a > 1.25) idx += 1;
++    if (a > 1.75) idx += 1;
++    if (a > 2.5) idx += 1;
++    if (a > 3.5) idx += 1;
++    if (a > 5.0) idx += 1;
++    if (a == 0.75 or a == 1.75 or a == 3.5) idx += 1;
++    if (t < 0.0 and idx > 0) idx |= 8;
++    return idx;
++}
++
++/// The E2M1 magnitude of a code (the g table of `_fp4qd_p2`).
++pub fn e2m1Mag(idx: u8) f32 {
++    return switch (idx & 7) {
++        0 => 0.0,
++        1 => 0.5,
++        2 => 1.0,
++        3 => 1.5,
++        4 => 2.0,
++        5 => 3.0,
++        6 => 4.0,
++        else => 6.0,
++    };
++}
++
++/// The pow2 (E8M0) scale of _fp4_store's non-E4M3 path: f = max(amax, 6*2^-126) / 6 (IEEE div), the byte is the
++/// biased exponent rounded up by one when f has a mantissa, the scale is 2^(byte - 127).
++pub fn pow2Scale(amax: f32) struct { sc: f32, byte: u8 } {
++    const m = @max(amax, 6.0 * 0x1p-126);
++    const f = m / 6.0;
++    const bits: u32 = @bitCast(f);
++    const e: u32 = ((bits >> 23) & 0xFF) + (if ((bits & 0x7FFFFF) != 0) @as(u32, 1) else 0);
++    return .{ .sc = @bitCast(e << 23), .byte = @truncate(e) };
++}
++
++/// The E4M3 scale of _fp4_store's E4M3 path: f = max(amax, 6*2^-9) / 6, the byte is f rounded to E4M3 (RNE,
++/// saturation to 0x7E) by the Triton bit twiddle, replicated exactly.
++pub fn e4m3Scale(amax: f32) struct { sc: f32, byte: u8 } {
++    const m = @max(amax, 6.0 * 0x1p-9);
++    const f = m / 6.0;
++    const byte = e4m3Byte(f);
++    return .{ .sc = e4m3ToFloat(byte), .byte = byte };
++}
++
++fn e4m3Byte(f: f32) u8 {
++    const fb: i32 = @bitCast(f);
++    const sub: i32 = @as(i32, @bitCast(f + 16384.0)) -% (141 << 23);
++    var nor: i32 = (fb +% (-120 << 23) +% 0x7FFFF +% ((fb >> 20) & 1)) >> 20;
++    if (nor == 0x7F) nor = 0x7E;
++    const sb: i32 = if (fb >= (1087 << 20)) 0x7E else if (fb < (121 << 23)) sub else nor;
++    return @truncate(@as(u32, @bitCast(sb & 0xFF)));
++}
++
++fn e4m3ToFloat(b: u8) f32 {
++    const sign: u32 = (@as(u32, b) >> 7) & 1;
++    const exp: u32 = (b >> 3) & 0xF;
++    const man: u32 = b & 7;
++    if (exp == 0) return (if (sign == 1) @as(f32, -1.0) else 1.0) * @as(f32, @floatFromInt(man)) * 0x1p-9;
++    const bits: u32 = ((exp + 120) << 23) | (man << 20) | (sign << 31);
++    return @bitCast(bits);
++}
++
++/// One rotary pair, the kit's `_rope_heads` arithmetic (Triton contracts the first product into the add).
++pub fn ropePairTriton(x0: f32, x1: f32, cs: f32, sn: f32, inv: bool) [2]f32 {
++    const s = if (inv) -sn else sn;
++    return .{ @mulAdd(f32, x0, cs, -(x1 * s)), @mulAdd(f32, x0, s, x1 * cs) };
++}
++
++/// One rotary pair, ops.rope_'s arithmetic (tf_ds_rope_kernel: fma(a, c, -(b*d)), fma(b, c, a*d)).
++pub fn ropePairTorch(x0: f32, x1: f32, cs: f32, sn: f32, inv: bool) [2]f32 {
++    const s = if (inv) -sn else sn;
++    return .{ @mulAdd(f32, x0, cs, -(x1 * s)), @mulAdd(f32, x1, cs, x0 * s) };
++}
++
++/// Round-to-nearest-even f32 -> bf16 -> f32 (the kernel's store, widened back: the low 16 bits are zero).
++fn bf16Value(x: f32) f32 {
++    if (std.math.isNan(x)) return x;
++    const b: u32 = @bitCast(x);
++    return @bitCast((b + 0x7FFF + ((b >> 16) & 1)) & 0xFFFF0000);
++}
++
++/// tf_ds_key_store_row's bytes the old way: srow already holds the rotated row (the separate rotation pass wrote it),
++/// then a 32-key amax a group, then the low/high packed codes. `codes` [d/2], `scales` [d/32].
++pub fn keyStoreRotated(srow: []const f32, d: usize, codes: []u8, scales: []u8) void {
++    const half = d / 2;
++    for (0..d / 32) |b| {
++        var a: f32 = 0;
++        for (srow[b * 32 ..][0..32]) |x| a = @max(a, @abs(x));
++        scales[b] = pow2Scale(a).byte;
++    }
++    for (0..half) |i| {
++        const lo = clamp6(srow[i] / scaleFloat(scales[i / 32]));
++        const hi = clamp6(srow[i + half] / scaleFloat(scales[(i + half) / 32]));
++        codes[i] = e2m1Code(lo) | (e2m1Code(hi) << 4);
++    }
++}
++
++fn scaleFloat(byte: u8) f32 {
++    return @bitCast(@as(u32, byte) << 23);
++}
++
++fn clamp6(x: f32) f32 {
++    return @min(@max(x, -6.0), 6.0);
++}
++
++/// One element as the fused pass rotates it (tf_ds_latent_element): the pair partner is `row[i ^ 1]`, the result is
++/// rounded to bf16 once. `torch_odd` picks ops.rope_'s odd contraction over the kit's.
++pub fn rotateOne(row: []const f32, i: usize, start: usize, cos: []const f32, sin: []const f32, torch_odd: bool) f32 {
++    if (i < start) return row[i];
++    const j = (i - start) >> 1;
++    const v = row[i];
++    const other = row[i ^ 1];
++    const rotated = if ((i & 1) == 0) @mulAdd(f32, v, cos[j], -(other * sin[j])) else if (torch_odd) @mulAdd(f32, v, cos[j], other * sin[j]) else @mulAdd(f32, other, sin[j], v * cos[j]);
++    return bf16Value(rotated);
++}
++
++/// tf_ds_key_store_row's bytes the fused way: one lane a packed column, both halves rotated in registers and each
++/// group's amax taken from those values (no shared scale array, no barrier).
++pub fn keyStoreFused(srow: []const f32, d: usize, rd: usize, cos: []const f32, sin: []const f32, torch_odd: bool, codes: []u8, scales: []u8) void {
++    const half = d / 2;
++    const start = d - rd;
++    var rot: [512]f32 = @splat(0);
++    for (0..half) |i| {
++        rot[i] = rotateOne(srow, i, start, cos, sin, torch_odd);
++        rot[i + half] = rotateOne(srow, i + half, start, cos, sin, torch_odd);
++    }
++    keyStoreRotated(&rot, d, codes, scales);
++}
++
++// -- tests -----------------------------------------------------------------------------------------------------------
++
++const expectEqual = std.testing.expectEqual;
++
++test "the switch parses its forms and nothing else" {
++    try expectEqual(false, parse(null).?);
++    try expectEqual(false, parse("").?);
++    try expectEqual(false, parse("0").?);
++    try expectEqual(true, parse("1").?);
++    try expectEqual(@as(?bool, null), parse("2"));
++    try expectEqual(@as(?bool, null), parse("yes"));
++    try expectEqual(@as(?bool, null), parse("01"));
++    try std.testing.expectEqual(@as(bool, true), try fromText("1"));
++    try std.testing.expectError(error.BadRopeStore, fromText("2"));
++}
++
++test "fuseOk takes pow2 head dims in [128, 512], pow2 rope dims <= d, any nonzero heads/rows" {
++    try std.testing.expect(fuseOk(true, 1, 512, 64, 1));
++    try std.testing.expect(fuseOk(true, 16, 128, 64, 32));
++    try std.testing.expect(fuseOk(true, 16, 512, 512, 1));
++    try std.testing.expect(!fuseOk(true, 0, 512, 64, 1));
++    try std.testing.expect(!fuseOk(false, 16, 512, 64, 1));
++    try std.testing.expect(!fuseOk(true, 16, 96, 64, 1)); // not pow2
++    try std.testing.expect(!fuseOk(true, 16, 1024, 64, 1)); // too wide for srow
++    try std.testing.expect(!fuseOk(true, 16, 512, 48, 1)); // rope dim not pow2
++    try std.testing.expect(!fuseOk(true, 16, 512, 1024, 1)); // rope dim wider than the head
++    try std.testing.expect(!fuseOk(true, 16, 512, 64, 0)); // no heads
++}
++
++test "e2m1Code: thresholds, ties to even, sign bit" {
++    try expectEqual(@as(u8, 0), e2m1Code(0.0));
++    try expectEqual(@as(u8, 0), e2m1Code(0.25)); // at the boundary, not above it
++    try expectEqual(@as(u8, 1), e2m1Code(0.5));
++    try expectEqual(@as(u8, 2), e2m1Code(0.75)); // tie -> even code (2)
++    try expectEqual(@as(u8, 2), e2m1Code(1.0));
++    try expectEqual(@as(u8, 3), e2m1Code(1.5));
++    try expectEqual(@as(u8, 4), e2m1Code(1.75)); // tie -> even code (4)
++    try expectEqual(@as(u8, 4), e2m1Code(2.0));
++    try expectEqual(@as(u8, 4), e2m1Code(2.5)); // tie at 2.5 stays 4 (even)
++    try expectEqual(@as(u8, 6), e2m1Code(3.5)); // tie -> even code (6)
++    try expectEqual(@as(u8, 7), e2m1Code(6.0));
++    try expectEqual(@as(u8, 7), e2m1Code(6.0));
++    try expectEqual(@as(u8, 0x9), e2m1Code(-0.5)); // idx 1 | sign
++    try expectEqual(@as(u8, 0x0), e2m1Code(-0.0)); // t < 0 is false for -0.0: no sign bit
++    try expectEqual(@as(u8, 0xC), e2m1Code(-2.0)); // idx 4 | sign
++    try expectEqual(@as(u8, 0xF), e2m1Code(-6.0));
++}
++
++test "pow2Scale: exact powers of two and the mantissa bump" {
++    // amax = 6 -> f = 1.0 -> exp 127, mantissa 0 -> byte 127, sc = 1.0
++    const a = pow2Scale(6.0);
++    try expectEqual(@as(u8, 127), a.byte);
++    try expectEqual(@as(f32, 1.0), a.sc);
++    // amax = 3 -> f = 0.5 -> exp 126 -> byte 126, sc = 0.5
++    const b = pow2Scale(3.0);
++    try expectEqual(@as(u8, 126), b.byte);
++    try expectEqual(@as(f32, 0.5), b.sc);
++    // amax = 7 -> f = 7/6 = 1.1666.. -> mantissa nonzero -> byte 128, sc = 2.0
++    const c = pow2Scale(7.0);
++    try expectEqual(@as(u8, 128), c.byte);
++    try expectEqual(@as(f32, 2.0), c.sc);
++    // amax = 0 -> f = 2^-126 -> byte 1, sc = 2^-126
++    const d = pow2Scale(0.0);
++    try expectEqual(@as(u8, 1), d.byte);
++    try expectEqual(@as(f32, 0x1p-126), d.sc);
++}
++
++test "e4m3Scale: known values and the byte encoding" {
++    // amax = 6 -> f = 1.0 -> E4M3 0x38 (exp 7, man 0), sc = 1.0
++    const a = e4m3Scale(6.0);
++    try expectEqual(@as(u8, 0x38), a.byte);
++    try expectEqual(@as(f32, 1.0), a.sc);
++    // amax = 100 -> f = 16.6667 -> rounds to 16 (E4M3 0x58), sc = 16.0
++    const b = e4m3Scale(100.0);
++    try expectEqual(@as(u8, 0x58), b.byte);
++    try expectEqual(@as(f32, 16.0), b.sc);
++    // amax = 0 -> f = 2^-9 (the floor) -> denormal boundary: exp field 0, man = 1 -> byte 0x01, sc = 2^-9
++    const c = e4m3Scale(0.0);
++    try expectEqual(@as(u8, 0x01), c.byte);
++    try expectEqual(@as(f32, 0x1p-9), c.sc);
++    // f = 460 (amax = 2760): RNE saturates to 448 (0x7E)
++    const d = e4m3Scale(2760.0);
++    try expectEqual(@as(u8, 0x7E), d.byte);
++    try expectEqual(@as(f32, 448.0), d.sc);
++    // the explicit saturation arm starts where bits(f) reaches 1087 << 20 = bits(480.0f): amax 2879 is still the
++    // 0x7F->0x7E clamp's, amax 2880 needs the arm - without it `nor` runs past 0x7F and encodes 0x80 (a
++    // negative-zero scale)
++    try expectEqual(@as(u8, 0x7E), e4m3Scale(2879.0).byte);
++    const e = e4m3Scale(2880.0);
++    try expectEqual(@as(u8, 0x7E), e.byte);
++    try expectEqual(@as(f32, 448.0), e.sc);
++    const g = e4m3Scale(1e4);
++    try expectEqual(@as(u8, 0x7E), g.byte);
++    try expectEqual(@as(f32, 448.0), g.sc);
++}
++
++test "e4m3ToFloat decodes the byte layout" {
++    try expectEqual(@as(f32, 0.0), e4m3ToFloat(0x00));
++    try expectEqual(@as(f32, 0x1p-9), e4m3ToFloat(0x01)); // min denormal
++    try expectEqual(@as(f32, 1.0), e4m3ToFloat(0x38));
++    try expectEqual(@as(f32, -2.0), e4m3ToFloat(0xC0));
++    try expectEqual(@as(f32, 448.0), e4m3ToFloat(0x7E));
++    try expectEqual(@as(f32, 0.75), e4m3ToFloat(0x34)); // exp 6 (2^-1), man 4 -> 1.5 * 0.5
++}
++
++test "keyStore: the fused packed-column pass writes the separate-pass pipeline's very bytes" {
++    // D = 128 with RD = 2 (the smallest suffix) and RD = 64 (the served decode key), then D = 512 / RD = 64 (the prompt
++    // key's multi-iteration case at 32 lanes) and RD == D (the whole row rotates). Five rows a shape: random, small
++    // integers, underflowing, signed zeros, and past the clamp / E2M1 top code.
++    var cos: [256]f32 = undefined; // RD/2 entries at most
++    var sin: [256]f32 = undefined;
++    for (&cos, &sin, 0..) |*c, *sn, j| {
++        const t = @as(f32, @floatFromInt(j)) * 0.11;
++        c.* = @cos(t);
++        sn.* = @sin(t);
++    }
++    var row: [512]f32 = undefined;
++    var prng = std.Random.DefaultPrng.init(0x5EED);
++    const rnd = prng.random();
++    for ([_]struct { d: usize, rd: usize, torch: bool }{
++        .{ .d = 128, .rd = 2, .torch = false },
++        .{ .d = 128, .rd = 64, .torch = false },
++        .{ .d = 128, .rd = 64, .torch = true },
++        .{ .d = 512, .rd = 64, .torch = true },
++        .{ .d = 512, .rd = 512, .torch = false },
++    }) |case| {
++        for (0..5) |round| {
++            for (row[0..case.d], 0..) |*x, i| {
++                x.* = switch (round) {
++                    0 => rnd.float(f32) * 2.0 - 1.0,
++                    1 => @as(f32, @floatFromInt(i % 7)) - 3.0,
++                    2 => if (i % 11 == 0) 0.0 else rnd.float(f32) * 1e-8, // underflowing scales
++                    3 => if (i % 13 == 0) -0.0 else @as(f32, @floatFromInt(@as(i32, @intCast(i % 5)) - 2)),
++                    else => rnd.float(f32) * 60.0 - 30.0, // past clamp6 and the E2M1 top code
++                };
++                x.* = bf16Value(x.*); // the row the norm wrote is bf16
++            }
++            // the old pipeline: the separate rotation pass's srow (the pair-wise kit/torch helpers, not rotateOne),
++            // then a 32-key amax a group, then the packed codes
++            var rot: [512]f32 = undefined;
++            const start = case.d - case.rd;
++            for (rot[0..case.d], 0..) |*r, i| r.* = row[i];
++            for (0..case.rd / 2) |j| {
++                const pair = if (case.torch)
++                    ropePairTorch(row[start + 2 * j], row[start + 2 * j + 1], cos[j], sin[j], false)
++                else
++                    ropePairTriton(row[start + 2 * j], row[start + 2 * j + 1], cos[j], sin[j], false);
++                rot[start + 2 * j] = bf16Value(pair[0]);
++                rot[start + 2 * j + 1] = bf16Value(pair[1]);
++            }
++            var codes_a: [256]u8 = undefined;
++            var codes_b: [256]u8 = undefined;
++            var scales_a: [16]u8 = undefined;
++            var scales_b: [16]u8 = undefined;
++            keyStoreRotated(rot[0..case.d], case.d, codes_a[0 .. case.d / 2], scales_a[0 .. case.d / 32]);
++            keyStoreFused(row[0..case.d], case.d, case.rd, &cos, &sin, case.torch, codes_b[0 .. case.d / 2], scales_b[0 .. case.d / 32]);
++            try std.testing.expectEqualSlices(u8, codes_a[0 .. case.d / 2], codes_b[0 .. case.d / 2]);
++            try std.testing.expectEqualSlices(u8, scales_a[0 .. case.d / 32], scales_b[0 .. case.d / 32]);
++        }
++    }
++}
++
++test "ropePair: cos=1/sin=0 is the identity, cos=0/sin=1 rotates by a quarter turn" {
++    const a = ropePairTriton(1.5, -2.0, 1.0, 0.0, false);
++    try expectEqual(@as(f32, 1.5), a[0]);
++    try expectEqual(@as(f32, -2.0), a[1]);
++    const b = ropePairTriton(1.5, -2.0, 0.0, 1.0, false);
++    try expectEqual(@as(f32, 2.0), b[0]);
++    try expectEqual(@as(f32, 1.5), b[1]);
++    const c = ropePairTorch(1.5, -2.0, 0.0, 1.0, false);
++    try expectEqual(@as(f32, 2.0), c[0]);
++    try expectEqual(@as(f32, 1.5), c[1]);
++    // the inverse rotation undoes the forward one (up to fp rounding)
++    const fwd = ropePairTriton(1.5, -2.0, 0.6, 0.8, false);
++    const back = ropePairTriton(fwd[0], fwd[1], 0.6, 0.8, true);
++    try std.testing.expectApproxEqAbs(@as(f32, 1.5), back[0], 1e-6);
++    try std.testing.expectApproxEqAbs(@as(f32, -2.0), back[1], 1e-6);
++}
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index a2d55ed..6c97710 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -32,6 +32,9 @@ const shard_ops = @import("shard_ops.zig");
+ const shard_ring = @import("shard_ring.zig");
+ const graph_cache = @import("graph_cache.zig");
+ const expert_prune = @import("expert_prune.zig");
++const idx_fused = @import("idx_fused.zig");
++const compress2_norm = @import("compress2_norm.zig");
++const rope_store = @import("rope_store.zig");
+ 
+ const Engine = prompt.Engine;
+ const Chunk = prompt.Chunk;
+@@ -268,7 +271,7 @@ pub const Round = struct {
+     mw: u64, // fp32 [R, slots]
+     pm: u64, // fp32 [R, D]
+     prune: ?expert_prune.Mode, // TF_DS_T13_EXPERT_PRUNE (TP2 only); fixed for the process, so a captured graph never differs from an eager round
+-    pstat: u64, // expert_prune.Stats on the device, 0 unless prune
++    pstat: u64, // expert_prune.Stats on the device, 0 when disabled
+     place_bound: bool, // TF_DS_T15_PLACE_BOUND under an applied cap: the experts' grids stop at placeBound
+     moe_bytes: ?ExpertBytes = null, // TF_DS_EXPERT_BYTES (a profile): the windows' places and trellis bytes; null: off
+     dead: u64 = 0, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' mask u8 [max_rows] on the device (0: off)
+@@ -489,8 +492,10 @@ pub const Round = struct {
+             } else {
+                 rd.prune = m;
+                 rd.place_bound = expert_prune.boundOn() and expert_prune.placeBound(m, R) != null;
+-                rd.pstat = try a.take(expert_prune.stats_bytes);
+-                try prompt.fill(e, rd.pstat, 0, expert_prune.stats_bytes);
++                if (expert_prune.collectStats(m)) {
++                    rd.pstat = try a.take(expert_prune.stats_bytes);
++                    try prompt.fill(e, rd.pstat, 0, expert_prune.stats_bytes);
++                }
+             }
+         }
+         // TF_DS_EXPERT_BYTES (a profile): the window's places at fixed rows and their trellis bytes; unset, null and
+@@ -1018,6 +1023,11 @@ fn compressorChain(e: *const Engine, rd: *const Round, ch: *const Chunk, t: tri.
+         return;
+     }
+     if (ratio == 2) {
++        if (compress2_norm.decodeOk(e.ops.compress2_norm, R, hd)) {
++            // Same stream and ring writes as compress2x. Stage the bf16 pair sum on chip for the kit norm.
++            try e.exact.compress2xNorm(s, rd.ckv, hd, rd.cgate, hd, rd.g(.rslot), caches.raw_kv[li], caches.raw_score[li], rd.g(.gi), caches.slots * raw_rows, lay.comp_norm, rd.lat, hd, R, hd, c.eps, ch.invalid);
++            return;
++        }
+         if (rd.fused_compress2) {
+             // TF_DS_FUSED_COMPRESS2: the scatter of the rows into the raw slots, the pair's rows back and compress2's
+             // weighted sum in one launch (LDs in elements of the buffer's dtype; the memset stays out — ch.invalid's
+@@ -1173,15 +1183,25 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+             if (lay.idx_wk) |iwk| {
+                 const id = c.index_head_dim;
+                 try prompt.grouped(e, ch, R, &.{iwk}, &.{rd.lat}, &.{hd}, &.{rd.ikp}, &.{id}, &.{.bf16});
+-                try tri_basic.rmsnorm(t, rd.ikp, id, lay.idx_k_norm, rd.ik, id, c.eps, R, id);
+-                try tri_norm.ropeHeads(t, rd.ik, rope.cos, rope.sin, gpos, rd_dim, false, R, 1, id);
+-                try tri_attn.fp4Store(t, rd.ik, id, cs.idx_codes[li], cs.idx_scales[li], ctarget, R, id, 32, false);
++                if (id == 128 and rope_store.fuseOk(e.ops.rope_store, R, id, rd_dim, 1)) {
++                    // TF_DS_FUSED_ROPE_STORE: _rmsnorm + _rope_heads + _fp4_store in one launch
++                    try e.exact.idxKeyFused(t.stream, rd.ikp, id, lay.idx_k_norm, rope.cos, rope.sin, gpos, cs.idx_codes[li], cs.idx_scales[li], ctarget, R, id, rd_dim, c.eps);
++                } else {
++                    try tri_basic.rmsnorm(t, rd.ikp, id, lay.idx_k_norm, rd.ik, id, c.eps, R, id);
++                    try tri_norm.ropeHeads(t, rd.ik, rope.cos, rope.sin, gpos, rd_dim, false, R, 1, id);
++                    try tri_attn.fp4Store(t, rd.ik, id, cs.idx_codes[li], cs.idx_scales[li], ctarget, R, id, 32, false);
++                }
+             }
+             // the latent rotated in place (it is not read again), then stored (TF_DS_KV_SHARD: into this rank's plane,
+             // the owner's row or the round row's trash row)
+-            try tri_norm.ropeHeads(t, rd.lat, rope.cos, rope.sin, gpos, rd_dim, false, R, 1, hd);
+             const ltarget = if (e.kv != null) rd.sgl(if (ratio == 1) .ltarget1 else .ltarget2) else ctarget;
+-            try tri_attn.fp4Store(t, rd.lat, hd, cs.comp_codes[li], cs.comp_scales[li], ltarget, R, hd, 16, true);
++            if (e.ops.rope_store and rope_store.fuseOk(true, R, hd, rd_dim, 1)) {
++                // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4_store in one launch (rd.lat read only)
++                try e.exact.ropeStore(t.stream, rd.lat, rope.cos, rope.sin, gpos, cs.comp_codes[li], cs.comp_scales[li], ltarget, R, hd, rd_dim);
++            } else {
++                try tri_norm.ropeHeads(t, rd.lat, rope.cos, rope.sin, gpos, rd_dim, false, R, 1, hd);
++                try tri_attn.fp4Store(t, rd.lat, hd, cs.comp_codes[li], cs.comp_scales[li], ltarget, R, hd, 16, true);
++            }
+         }
+         const src = sh.kv_layer orelse return error.NoKvSource;
+         const vis = rd.g(if (ratio == 1) .vis1 else .vis2);
+@@ -1195,8 +1215,13 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+             const ih = c.index_heads;
+             const id = c.index_head_dim;
+             const k: tri_index.IndexK = .{ .fp4 = .{ .codes = cs.idx_codes[src], .scales = cs.idx_scales[src] } };
+-            try tri_norm.ropeHeads(t, rd.iq, rope.cos, rope.sin, pos, rd_dim, false, R, ih, id);
+-            try tri_attn.fp4QdP2(t, rd.iq, rd.iq4, R * ih * id);
++            if (e.ops.rope_store and rope_store.fuseOk(true, R, id, rd_dim, ih)) {
++                // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 in one launch (rd.iq read only)
++                try e.exact.ropeQd(t.stream, rd.iq, rd.iq4, rope.cos, rope.sin, pos, R, ih, id, rd_dim);
++            } else {
++                try tri_norm.ropeHeads(t, rd.iq, rope.cos, rope.sin, pos, rd_dim, false, R, ih, id);
++                try tri_attn.fp4QdP2(t, rd.iq, rd.iq4, R * ih * id);
++            }
+             try tri_norm.rowmmWts(t, rd.x, c.hidden, lay.idx_proj_h, exact.indexScale(c.index_head_dim, c.index_heads), rd.iw, R, c.hidden, ih);
+             const kk = @min(c.index_topk, nb);
+             const pow2 = kk & (kk - 1) == 0;
+@@ -1229,9 +1254,15 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     // _candidate_blocks: the block maxima (the newest pinned), their candidate_blocks best (ties to the
+                     // lower block, ascending), those with a finite maximum as block ids, the rest -1
+                     const nbk = (nb + cb - 1) / cb;
+-                    try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
+-                    try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
+-                    try e.ops.poolPick(e.s, rd.bmax, nbk, nbk, rd.pidx, c.candidate_blocks, 0, 0, rd.cblk, R);
++                    // TF_DS_IDX_FUSED: the same three launches in one (off by default; the bounds keep the pool's
++                    // regime, past them the unfused sequence runs)
++                    if (idx_fused.fuseOk(e.ops.idx_fused, R, nb, cb, nbk, c.candidate_blocks)) {
++                        try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
++                    } else {
++                        try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
++                        try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
++                        try e.ops.poolPick(e.s, rd.bmax, nbk, nbk, rd.pidx, c.candidate_blocks, 0, 0, rd.cblk, R);
++                    }
+                     rd.has_cblk = true;
+                 } else {
+                     if (nb % cb != 0) return notPorted(@src()); // _candidates' padded path (buckets are whole blocks)
+@@ -1565,12 +1596,14 @@ fn moe(e: *const Engine, rd: *Round, ch: *const Chunk, li: usize) !void {
+     const sl = e.slots();
+     const kc = try tri_norm.rowmmGate(e.t, rd.x, c.hidden, lay.gate_w, rd.gl, R, c.hidden, c.experts);
+     try tri_norm.route(e.t, rd.gl, kc, lay.gate_b, c.top_k, c.routed_scaling, lay.experts.count - 1, rd.pick, rd.mw, R, c.experts, sl);
+-    if (rd.prune) |m| try e.ops.expertPrune(e.s, m, rd.pick, rd.mw, rd.pstat, R, c.top_k, sl);
+-    // 0177 (TF_DS_DRAFT_TRIAGE): the dead draft rows route nothing - their outputs are never emitted
+-    if (rd.dead != 0) {
+-        if (e.two != null) return error.TriageUnsupported2D; // (the 2D split is not checked to take pick -1)
+-        try e.ops.deadRows(e.s, rd.pick, rd.mw, rd.dead, R, sl);
+-    }
++    // Keep gate and routing in the kit, and let decode_prep distribute rotation across its own grid.
++    // 0177 dead rows are masked after pruning so its stats still include those rows.
++    if (rd.dead != 0 and e.two != null) return error.TriageUnsupported2D;
++    const fuse_dead = e.ops.fused_route and rd.prune != null and rd.dead != 0;
++    if (rd.prune) |m| {
++        try e.ops.expertPruneDead(e.s, m, rd.pick, rd.mw, rd.pstat, if (fuse_dead) rd.dead else 0, R, c.top_k, sl);
++    }
++    if (rd.dead != 0 and !fuse_dead) try e.ops.deadRows(e.s, rd.pick, rd.mw, rd.dead, R, sl);
+     try rd.mark(e, .m_rt);
+     if (e.two) |tw| {
+         // 2D (round2d.experts, the profile's marks between): gate / up, the intermediate's exchange, down
+@@ -1889,6 +1922,9 @@ fn stretch(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches, ri
+             if (e.two) |tw| try tw.quarters(e, rd.ek, rd.ekg, R, tw.ew, 4) else try e.gatherF32(rd.ek, rd.ekg, R * ew.n);
+             try Probe.check(probe, .engram_gather, l, rd.ekg);
+             if (e.world != 2) return notPorted(@src());
++            // TF_DS_FUSED_ROPE_STORE deliberately does not fold add2Bf16 + _engram_gate: the gate carries three
++            // tl.sum reductions over the row (sh/sk/sd) plus a tl.exp sigmoid, a reduction-order replication risk
++            // for two launches a forward pass (the engram layers), not the per-round hot path. Left unfused.
+             try e.ops.add2Bf16(e.s, rd.ekg, rd.ekg + R * en * 4, rd.ekv, R * en);
+             try tri_basic.engramGate(t, h, rd.ekv, lay.engram_qk, spare, c.eps, R, d);
+             std.mem.swap(u64, &h, &spare);

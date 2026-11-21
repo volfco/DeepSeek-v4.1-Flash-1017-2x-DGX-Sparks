@@ -1,0 +1,85 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits c3a1cd172156..e874d1713c17)
+# dsv41: TF_DS_ENGRAM_AIO_BATCH (off by default) bounds the rows one prompt AIO batch submits
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/engram_aio.zig b/zig/src/families/dsv41/engram_aio.zig
+index dcbab77a78553fdf9af4600b63b370285363bc74..a67dd6eb90b76c331153390852c08bea1939c54d 100644
+--- a/zig/src/families/dsv41/engram_aio.zig
++++ b/zig/src/families/dsv41/engram_aio.zig
+@@ -85,6 +85,8 @@ pub const Aio = struct {
+     mutex: std.Io.Mutex = .init,
+     /// TF_DS_ENGRAM_ROWCACHE_MB's row cache (null: off), consulted at `start` and filled at `wait`.
+     rc: ?*engram_io.RowCache = null,
++    /// TF_DS_ENGRAM_AIO_BATCH: the most rows a caller's batch submits (null: the caller's own size).
++    batch: ?usize = null,
+ 
+     /// The AIO context and a ring of `slots` bounce slots (8 KiB each); error.AioUnavailable when the kernel refuses.
+     pub fn init(gpa: std.mem.Allocator, io: std.Io, slots: usize) !*Aio {
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 26c92d638c416a6d31b7b545231a3f71b1821424..1f459dc02d1b7300d2c08342df1c82e0d69cdcd0 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -547,6 +547,8 @@ pub const Model = struct {
+                 m.eh.?.rc = m.rc;
+                 std.log.info("dsv41: Engram row cache: {d} MiB (rank {d})", .{ budget >> 20, o.rank });
+             }
++            // TF_DS_ENGRAM_AIO_BATCH: the most rows one prompt read batch submits (unset: the ring's quarter)
++            const aio_batch = prompt.aioBatchRows(if (std.c.getenv("TF_DS_ENGRAM_AIO_BATCH")) |v| std.mem.span(v) else null);
+             if (o.engram_aio) {
+                 // a round's reads, 2 x 12 x its rows at most: 1,024 slots for each 16 rows of the round-row setting
+                 m.aio = try engram_aio.Aio.init(gpa, io, 1024 * ((o.round_rows + 15) / 16));
+@@ -561,6 +563,7 @@ pub const Model = struct {
+                 } else 4096;
+                 m.paio = try engram_aio.Aio.init(gpa, io, slots);
+                 m.paio.?.rc = m.rc;
++                m.paio.?.batch = aio_batch;
+                 m.eh.?.paio = m.paio;
+                 m.ahead_apart = true;
+             }
+@@ -569,6 +572,7 @@ pub const Model = struct {
+                 if (m.paio) |ring| {
+                     m.paio2 = try engram_aio.Aio.init(gpa, io, 4096);
+                     m.paio2.?.rc = m.rc;
++                    m.paio2.?.batch = aio_batch;
+                     try m.eh.?.useLead(a, chunk_rows, .{ ring, m.paio2.? });
+                     std.log.info("engram-lead: on (rank {d}): each Engram layer's prompt rows read a chunk ahead", .{o.rank});
+                 } else std.log.warn("engram-lead: off (rank {d}): it needs the Engram AIO (TF_DS_ENGRAM_AIO=1; rank 1: --aio 1)", .{o.rank});
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index c071b00ee1f3f0402be5f12c410832d3d9eced70..0f0f373d23009ce6f6a3412efffe8fde1a956f92 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1875,6 +1875,12 @@ pub fn poolThreads(v: ?[]const u8) usize {
+     return n;
+ }
+ 
++/// TF_DS_ENGRAM_AIO_BATCH=<n>: the most rows one AIO batch submits; unset, unparsable or 0 keeps the caller's size.
++pub fn aioBatchRows(v: ?[]const u8) ?usize {
++    const n = std.fmt.parseInt(u32, v orelse return null, 10) catch return null;
++    return if (n == 0) null else n;
++}
++
+ /// TF_DS_ENGRAM_FAST's hash cache: forget the chunk `hashes` holds (a round's engramAhead wrote it, or a new pass started).
+ pub fn forgetHashes(eh: *EngramHost) void {
+     eh.hash_start = std.math.maxInt(usize);
+@@ -2185,6 +2191,12 @@ test "TF_DS_ENGRAM_POOL: unset or outside 1..256 reads 64, inside is the number"
+     }
+ }
+ 
++test "TF_DS_ENGRAM_AIO_BATCH: unset, 0 or unparsable is off, N is the bound" {
++    for ([_]?[]const u8{ null, "", "x", "-1", "0", " 8", "8 ", "1.5", "4294967296" }) |v| try std.testing.expectEqual(@as(?usize, null), aioBatchRows(v));
++    try std.testing.expectEqual(@as(?usize, 1), aioBatchRows("1"));
++    try std.testing.expectEqual(@as(?usize, 1024), aioBatchRows("1024"));
++}
++
+ test "TF_DS_ENGRAM_DECODE_THREADS: unset or outside 1..16 reads 8, inside is the number" {
+     try std.testing.expectEqual(@as(usize, 8), decodeThreads(null));
+     for ([_]?[]const u8{ "", "x", "-1", "0", "17", "4294967296", " 8", "8 ", "1.5" }) |v| try std.testing.expectEqual(@as(usize, 8), decodeThreads(v));
+@@ -2324,7 +2336,8 @@ fn lap(e: *const Engine, eh: *const EngramHost, t: *u64) u64 {
+ /// ~0.5 s on one GB10): batches of a quarter of the ring's slots (two reads a row), all submitted (a submit reaps while the
+ /// ring is full), then waited for in order.
+ pub fn aioGather(aio: *engram_aio.Aio, t: engram_io.Table, ids: []const i64, out_w: []u8, out_s: []u8) !void {
+-    const per = @max(aio.slots / 4, 1);
++    const def = @max(aio.slots / 4, 1);
++    const per = if (aio.batch) |b| @min(def, b) else def; // TF_DS_ENGRAM_AIO_BATCH: an upper bound on a batch's rows
+     var batch: [64]u64 = undefined;
+     var nb: usize = 0;
+     var at: usize = 0;

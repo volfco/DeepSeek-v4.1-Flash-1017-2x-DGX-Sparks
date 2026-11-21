@@ -1,4 +1,4 @@
-From a6e662295885a383f8b35d724367297bd144d855 Mon Sep 17 00:00:00 2001
+From d2f94438107c0cbf84b0675410de98e9f2454130 Mon Sep 17 00:00:00 2001
 From: colum <git@volf.co>
 Date: Sat, 14 Nov 2026 20:34:16 -0800
 Subject: [PATCH] lanes: TF_DS_SCORE=1 scores a recorded continuation through
@@ -51,25 +51,27 @@ window, a short last round, a continuation of length one and no round; a score r
 empty score list generating as ever); zig/tests/server/zig_test.sh passes, including the switch's parse and the
 field's refusals and ids. Not run on a pair: no smoke, no validate.py, no benchmark. Per-token NLLs are left out of
 the reply. (Patch 0120 of the series, plan item 2.)
+
+Review round: the NLL is logsumexp(row) - logit[recorded] (its sign was flipped, so ppl came out as 1/ppl), an unscored stream has no summary (no NaN), nothing is admitted beside a live score stream, and tensorfold_score is refused with messages, stop, thinking_budget or a grammar field.
 ---
  zig/src/core/engine_api.zig         |  10 +++
  zig/src/core/lane_host.zig          |   3 +-
- zig/src/core/lanes/engine.zig       |   9 ++-
- zig/src/core/lanes/engine_test.zig  |  84 ++++++++++++++++++++-
+ zig/src/core/lanes/engine.zig       |  19 ++++-
+ zig/src/core/lanes/engine_test.zig  |  90 +++++++++++++++++++-
  zig/src/core/lanes/fake.zig         |   3 +
  zig/src/core/lanes/lanes.zig        |   1 +
- zig/src/core/lanes/score.zig        | 111 ++++++++++++++++++++++++++++
+ zig/src/core/lanes/score.zig        | 124 ++++++++++++++++++++++++++++
  zig/src/core/lanes/stream.zig       |  12 +++
  zig/src/core/lanes/windows.zig      |   3 +-
- zig/src/families/dsv41/lanes.zig    |  17 +++++
+ zig/src/families/dsv41/lanes.zig    |  17 ++++
  zig/src/families/dsv41/native.zig   |   3 +
  zig/src/families/dsv41/sampling.zig |   8 ++
  zig/src/native/cuda.zig             |   2 +-
- zig/src/server/chat.zig             |  22 ++++++
- zig/src/server/fields.zig           |  56 ++++++++++++++
- zig/src/server/openai.zig           |   5 +-
+ zig/src/server/chat.zig             |  22 +++++
+ zig/src/server/fields.zig           |  56 +++++++++++++
+ zig/src/server/openai.zig           |  11 ++-
  zig/src/server/server.zig           |   3 +
- 17 files changed, 344 insertions(+), 8 deletions(-)
+ 17 files changed, 379 insertions(+), 8 deletions(-)
  create mode 100644 zig/src/core/lanes/score.zig
 
 diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
@@ -131,20 +133,37 @@ index e848132..f92692d 100644
              job.proposer.deinit();
              return h.drop(job, "out of memory");
 diff --git a/zig/src/core/lanes/engine.zig b/zig/src/core/lanes/engine.zig
-index b695338..7abee08 100644
+index b695338..47e335f 100644
 --- a/zig/src/core/lanes/engine.zig
 +++ b/zig/src/core/lanes/engine.zig
-@@ -95,6 +95,9 @@ pub const Engine = struct {
+@@ -82,6 +82,13 @@ pub const Engine = struct {
+         return n;
+     }
+ 
++    /// A score stream holds the lane (live and not finished, or in its prompt pass).
++    fn scoreLive(e: *const Engine) bool {
++        if (e.filling) |fs| if (fs.score != null) return true;
++        for (e.live.items) |ls| if (!ls.finished and ls.score != null) return true;
++        return false;
++    }
++
+     /// Live streams a round would advance (not finished, not paused): the prefill interleave's test.
+     pub fn runnableCount(e: *const Engine) usize {
+         var n: usize = 0;
+@@ -95,6 +102,12 @@ pub const Engine = struct {
      pub fn addStream(e: *Engine, s: *Stream) !void {
          _ = e.arena.reset(.retain_capacity);
          try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
 +        // a score stream forces the round's logits onto the host, which changes how every stream in that round gets
 +        // its tokens: it waits for the lane to be free (error.ContextFull, the lane host's requeue) and runs alone
 +        if (s.score != null and (e.activeCount() > 0 or e.filling != null)) return error.ContextFull;
++        // and the other way: nothing joins a score stream's lane (its rounds stay its own, so its NLLs repeat bit for
++        // bit and no other stream's tokens come from the host draw); with TF_DS_SCORE off no stream has a score
++        if (e.scoreLive()) return error.ContextFull;
          if (e.filling != null) {
              const at = @min(@as(usize, s.reuse.at), s.prompt_len);
              if (!e.cutsIn(s.prompt_len - at, picturesPast(s.images, at))) return error.FillBusy;
-@@ -181,7 +184,7 @@ pub const Engine = struct {
+@@ -181,7 +194,7 @@ pub const Engine = struct {
              try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = d }});
              s.dropHeld(e.gpa);
              s.next = .{ .count = d };
@@ -153,7 +172,7 @@ index b695338..7abee08 100644
              try e.queueNext(s, feed);
          }
          const value = try e.readFeed(feed);
-@@ -252,7 +255,7 @@ pub const Engine = struct {
+@@ -252,7 +265,7 @@ pub const Engine = struct {
              try e.roundStreams(chosen);
          } else {
              for (live.items) |s| {
@@ -162,7 +181,7 @@ index b695338..7abee08 100644
                  s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
              }
          }
-@@ -292,7 +295,7 @@ pub const Engine = struct {
+@@ -292,7 +305,7 @@ pub const Engine = struct {
          var rows: u64 = 0;
          for (order) |i| {
              const s = live[i];
@@ -172,7 +191,7 @@ index b695338..7abee08 100644
              try chosen.append(a, i);
              rows += need;
 diff --git a/zig/src/core/lanes/engine_test.zig b/zig/src/core/lanes/engine_test.zig
-index 6c33ca3..5589210 100644
+index 6c33ca3..d76a3d5 100644
 --- a/zig/src/core/lanes/engine_test.zig
 +++ b/zig/src/core/lanes/engine_test.zig
 @@ -15,6 +15,7 @@ const Case = struct {
@@ -192,7 +211,7 @@ index 6c33ca3..5589210 100644
      }
      defer for (streams, proposers) |*s, *p| {
          s.deinit(gpa);
-@@ -190,3 +191,84 @@ test "a cut-in needs picture rows only for a picture ending past its resume poin
+@@ -190,3 +191,90 @@ test "a cut-in needs picture rows only for a picture ending past its resume poin
      try std.testing.expect(Engine.picturesPast(&img, 0)); // a fresh pass
      try std.testing.expect(!Engine.picturesPast(&.{}, 0));
  }
@@ -267,8 +286,14 @@ index 6c33ca3..5589210 100644
 +    try std.testing.expectError(error.ContextFull, engine.addStream(&s));
 +    while (engine.activeCount() > 0) try engine.step();
 +    try engine.addStream(&s);
++    // and nothing joins the score stream's lane while it runs
++    var late = try sm.Stream.init(gpa, .{ .id = "late", .prompt = &.{ 1, 2, 3, 4 }, .max_new = 2, .eos = &.{96} });
++    defer late.deinit(gpa);
++    try std.testing.expectError(error.ContextFull, engine.addStream(&late));
 +    while (engine.activeCount() > 0) try engine.step();
 +    try std.testing.expectEqualSlices(u32, &.{ 7, 8 }, s.emitted());
++    try engine.addStream(&late);
++    while (engine.activeCount() > 0) try engine.step();
 +
 +    // a stream with an empty score list generates as it always did
 +    const plain = try run(&.{.{ .prompt = &.{ 1, 2, 3, 4, 5 }, .max_new = 6, .drafts = false }});
@@ -319,10 +344,10 @@ index f07d04e..1b32dad 100644
  pub const plan_lanes = @import("plan_lanes.zig");
 diff --git a/zig/src/core/lanes/score.zig b/zig/src/core/lanes/score.zig
 new file mode 100644
-index 0000000..680c067
+index 0000000..a768de4
 --- /dev/null
 +++ b/zig/src/core/lanes/score.zig
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,124 @@
 +//! TF_DS_SCORE's teacher-forced scoring (Baseten's `run.rs` score): a recorded continuation's mean negative
 +//! log-likelihood under the model, its standard error, its perplexity and how often the model's argmax was the
 +//! recorded token. The rows are the backend's fp32 logits; the arithmetic is float64 here.
@@ -338,10 +363,10 @@ index 0000000..680c067
 +    return top + @log(sum);
 +}
 +
-+/// The recorded token's negative log-likelihood under a row of logits: logit[recorded] - logsumexp(row).
++/// The recorded token's negative log-likelihood under a row of logits: logsumexp(row) - logit[recorded] (>= 0).
 +pub fn nll(row: []const f32, recorded: u32) !f64 {
 +    if (recorded >= row.len) return error.RecordedOutOfRange;
-+    return @as(f64, row[recorded]) - logsumexp(row);
++    return logsumexp(row) - @as(f64, row[recorded]);
 +}
 +
 +/// A scored stream's running figures: the recorded continuation and how many of its tokens have been scored, the
@@ -362,8 +387,9 @@ index 0000000..680c067
 +    }
 +
 +    /// The score's figures: the mean over the scored tokens, its standard error, the perplexity and the share of rows
-+    /// whose argmax was the recorded token.
-+    pub fn summary(s: Score) Summary {
++    /// whose argmax was the recorded token; null before any token is scored (a pass that failed or was cancelled).
++    pub fn summary(s: Score) ?Summary {
++        if (s.next == 0) return null;
 +        const n: f64 = @floatFromInt(s.next);
 +        const mean = s.nll_sum / n;
 +        // shortcut: the sum of squares gives the standard error in one pass over the rows (cancellation is at the
@@ -394,11 +420,11 @@ index 0000000..680c067
 +    // log(1 + e + e^2 + e^-1) = 2.4401896985611953
 +    const row = [_]f32{ 0.0, 1.0, 2.0, -1.0 };
 +    try std.testing.expectApproxEqAbs(@as(f64, 2.4401896985611953), logsumexp(&row), 1e-12);
-+    try std.testing.expectApproxEqAbs(@as(f64, -0.4401896985611953), try nll(&row, 2), 1e-12);
-+    try std.testing.expectApproxEqAbs(@as(f64, -3.4401896985611953), try nll(&row, 3), 1e-12);
++    try std.testing.expectApproxEqAbs(@as(f64, 0.4401896985611953), try nll(&row, 2), 1e-12);
++    try std.testing.expectApproxEqAbs(@as(f64, 3.4401896985611953), try nll(&row, 3), 1e-12);
 +    // 97 equal logits: every token's probability is 1/97
 +    const flat: [97]f32 = @splat(0.0);
-+    try std.testing.expectApproxEqAbs(@as(f64, -4.574710978503383), try nll(&flat, 0), 1e-12);
++    try std.testing.expectApproxEqAbs(@as(f64, 4.574710978503383), try nll(&flat, 0), 1e-12);
 +    try std.testing.expectError(error.RecordedOutOfRange, nll(&row, 4));
 +}
 +
@@ -407,7 +433,7 @@ index 0000000..680c067
 +    try std.testing.expect(std.math.isInf(@exp(@as(f64, 1001.0))));
 +    const row = [_]f32{ 1000.0, 1001.0 };
 +    try std.testing.expectApproxEqAbs(@as(f64, 1001.3132616875182), logsumexp(&row), 1e-9);
-+    try std.testing.expectApproxEqAbs(@as(f64, -1.3132616875182228), try nll(&row, 0), 1e-9);
++    try std.testing.expectApproxEqAbs(@as(f64, 1.3132616875182228), try nll(&row, 0), 1e-9);
 +    // a row of -inf logits has no mass
 +    const dead = [_]f32{ -std.math.inf(f32), -std.math.inf(f32) };
 +    try std.testing.expectEqual(-std.math.inf(f64), logsumexp(&dead));
@@ -418,7 +444,7 @@ index 0000000..680c067
 +    s.add(1.0, true);
 +    s.add(2.0, false);
 +    s.add(3.0, true);
-+    const out = s.summary();
++    const out = s.summary().?;
 +    try std.testing.expectEqual(@as(u32, 3), out.tokens);
 +    try std.testing.expectEqual(@as(f64, 6.0), out.nll_sum);
 +    try std.testing.expectEqual(@as(f64, 2.0), out.nll_mean);
@@ -429,10 +455,22 @@ index 0000000..680c067
 +    // one token: no spread, and its own perplexity
 +    var one: Score = .{ .ids = &.{5} };
 +    one.add(0.0, true);
-+    const single = one.summary();
++    const single = one.summary().?;
 +    try std.testing.expectEqual(@as(f64, 0.0), single.nll_se);
 +    try std.testing.expectEqual(@as(f64, 1.0), single.ppl);
 +    try std.testing.expectEqual(@as(f64, 1.0), single.argmax_match);
++}
++
++test "nll feeds the summary a positive mean and a perplexity above one; an unscored stream has no summary" {
++    const row = [_]f32{ 0.0, 1.0, 2.0, -1.0 };
++    var s: Score = .{ .ids = &.{ 1, 2 } };
++    try std.testing.expectEqual(@as(?Summary, null), s.summary());
++    s.add(try nll(&row, 1), false);
++    s.add(try nll(&row, 2), true);
++    const out = s.summary().?;
++    try std.testing.expect(out.nll_mean > 0.0);
++    try std.testing.expect(out.ppl > 1.0);
++    try std.testing.expectApproxEqAbs(@as(f64, (1.4401896985611953 + 0.4401896985611953) / 2.0), out.nll_mean, 1e-12);
 +}
 diff --git a/zig/src/core/lanes/stream.zig b/zig/src/core/lanes/stream.zig
 index a38edbc..43186f6 100644
@@ -593,7 +631,7 @@ index b7f2160..dd4b77d 100644
      return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
  }
 diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
-index d6a6aa5..1a293c3 100644
+index 7b4094a..feac38e 100644
 --- a/zig/src/server/chat.zig
 +++ b/zig/src/server/chat.zig
 @@ -37,6 +37,8 @@ pub const Input = struct {
@@ -714,20 +752,26 @@ index 7d7e8fd..833bb52 100644
  
  /// ``validate_modalities``: text in, text out.
 diff --git a/zig/src/server/openai.zig b/zig/src/server/openai.zig
-index f9baed3..43bb836 100644
+index f9baed3..84c3183 100644
 --- a/zig/src/server/openai.zig
 +++ b/zig/src/server/openai.zig
-@@ -153,6 +153,9 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
+@@ -153,6 +153,15 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
      if (body.get("temperature")) |t| if (t.truthy()) {
          input.temperature = if (t == .float) t.float else std.fmt.parseFloat(f64, t.int) catch 0;
      };
 +    const streaming = if (body.get("stream")) |s| s.truthy() else false;
 +    // TF_DS_SCORE's recorded continuation: /v1/completions, non-streamed, greedy, with the switch on
 +    if (try fields.scoreIds(cx, body, !is_chat, srv.score, srv.info.score, streaming, input.temperature, srv.text.vocabSize())) |score_ids| input.score = score_ids;
++    if (input.score.len > 0) {
++        // a score's rows must be the recorded continuation's: no chat template (its thinking budget and loop guard
++        // would push think-close tokens), no stop string or grammar to end or bend it part way
++        if (input.prompt == null) return cx.refuse("tensorfold_score needs a prompt (token ids), not messages");
++        for ([_][]const u8{ "stop", "thinking_budget" } ++ grammar.fields) |k| if (body.get(k)) |v| if (v != .null) return cx.fail(.request, "tensorfold_score cannot be combined with {s}", .{k});
++    }
      const sampling = try json.newObject(cx.a);
      for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "seed", "priority", "draft", "thinking_budget", "ignore_eos", "stop" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
      try grammar.refusal(cx, body);
-@@ -169,7 +172,7 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
+@@ -169,7 +178,7 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
      const options = body.get("stream_options");
      return .{
          .input = input,

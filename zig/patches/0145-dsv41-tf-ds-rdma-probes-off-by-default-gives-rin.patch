@@ -1,0 +1,101 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 77dc1dcf52d1..44b2cbb76857)
+# dsv41: TF_DS_RDMA_PROBES (off by default) gives Ring.probes() its caller - the ring gathers' stage, flight and copy on both profile lines
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 6e6ccd56648ee7adbe38bdecef80948075407afe..6856e18bede6f0a7003d8ac81a9c1569ab3f7b72 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -377,6 +377,12 @@ pub const Profile = struct {
+     pass: u64 = 0,
+     pass_send: u64 = 0, // the pass frame's send: from its issue to the pass timer's start (0146)
+     prefill: u64 = 0,
++    // TF_DS_RDMA_PROBES: the ring gathers' three parts (ns, summed over the probed gathers) and how many were probed:
++    // the stage, the doorbell to the peer's flags (the flight) and the copy-out
++    ring_stage: u64 = 0,
++    ring_flight: u64 = 0,
++    ring_copy: u64 = 0,
++    ring_n: u64 = 0,
+     rounds: u64 = 0,
+     rows: u64 = 0,
+     passes: u64 = 0,
+@@ -1470,6 +1476,15 @@ fn chunkRows(start: usize, len: usize) usize {
+             p.sample += m.now() - t3;
+             p.rounds += 1;
+             p.rows += rows.ids.len;
++            // TF_DS_RDMA_PROBES: the round's ring gathers, split (their sums, read back and reset). The download waits
++            // for the round's kernels, so this runs only under the profile, whose figures already include that wait.
++            if (m.ring) |r| if (r.s.probing) {
++                const q = r.probes() catch .{ 0, 0, 0, 0 }; // (stage, flight, copy: mean ns a gather; then their count)
++                p.ring_stage += @intFromFloat(q[0] * q[3]);
++                p.ring_flight += @intFromFloat(q[1] * q[3]);
++                p.ring_copy += @intFromFloat(q[2] * q[3]);
++                p.ring_n += @intFromFloat(q[3]);
++            };
+         };
+         const V = m.vocab;
+         for (windows, out, 0..) |w, *o, k| {
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 0e327a2595726adbae5f31e3303a1981aac3ad4a..b91fb530c5be757165fdae3df46aa94073a5ab65 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -438,7 +438,7 @@ pub fn main(init: std.process.Init) !u8 {
+                 return if (n == 0) 0 else @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(n)) / 1e6;
+             }
+         }.f;
+-        try w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": {d:.2}, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"pass_send_ms\": {d:.3}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}\n", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(step_ns, core.steps), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), ms(p.pass_send, p.passes), p.prefills, ms(p.prefill, p.prefills) });
++        try w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": {d:.2}, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"pass_send_ms\": {d:.3}, \"ring_stage_ms\": {d:.3}, \"ring_flight_ms\": {d:.3}, \"ring_copy_ms\": {d:.3}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}\n", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(step_ns, core.steps), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), ms(p.pass_send, p.passes), ms(p.ring_stage, p.ring_n), ms(p.ring_flight, p.ring_n), ms(p.ring_copy, p.ring_n), p.prefills, ms(p.prefill, p.prefills) });
+         try w.flush();
+         try printClock(w, 0, m);
+         try printKvShard(w, 0, m);
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index fe25256f6f1c6735528463f0050e6f35f646c382..f53c9b8457436e91cd755b5daa41e026c8795ad5 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -800,7 +800,7 @@ pub const Model = struct {
+     /// connected, and started once both are (an all-gather as the barrier).
+     pub fn openRing(gpa: std.mem.Allocator, d: *const cuda.Driver, k: rdma.Kernels, devices: []const []const u8, rank: u32, comm: *const comm_mod.Comm, stream: cuda.Stream) !*rdma.Ring {
+         if (comm.world != 2) return error.NotTwoRanks;
+-        const r = try rdma.Ring.create(gpa, d, k, devices, rank, 2, .{ .max_bytes = ring_bytes, .gid_index = try rdma_env.servedGidIndex(), .ack_timeout = try rdma_env.servedAckTimeout(), .cpu = rdma_env.proxyCpus()[0] });
++        const r = try rdma.Ring.create(gpa, d, k, devices, rank, 2, .{ .max_bytes = ring_bytes, .gid_index = try rdma_env.servedGidIndex(), .ack_timeout = try rdma_env.servedAckTimeout(), .cpu = rdma_env.proxyCpus()[0], .probing = ops_mod.onValue(envOf(rdma.probes_env)) });
+         errdefer r.destroy(gpa);
+         const per = @sizeOf(rdma.Info);
+         const mine = [2]rdma.Info{ r.info(0), r.info(1) };
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 0c169f26724eb6e319431f96b27acfa70ef20b4c..4efcfafffae5916f04b0c41e679394b7e1155ce9 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -381,7 +381,7 @@ fn printRoundProfile(ctx: *anyopaque) void {
+             return if (n == 0) 0 else @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(n)) / 1e6;
+         }
+     }.f;
+-    w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": -1, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"pass_send_ms\": {d:.3}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), ms(p.pass_send, p.passes), p.prefills, ms(p.prefill, p.prefills) }) catch return;
++    w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": -1, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"pass_send_ms\": {d:.3}, \"ring_stage_ms\": {d:.3}, \"ring_flight_ms\": {d:.3}, \"ring_copy_ms\": {d:.3}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), ms(p.pass_send, p.passes), ms(p.ring_stage, p.ring_n), ms(p.ring_flight, p.ring_n), ms(p.ring_copy, p.ring_n), p.prefills, ms(p.prefill, p.prefills) }) catch return;
+     std.log.info("{s}", .{out.written()});
+     out.clearRetainingCapacity();
+     // lanes_main.zig's printClock, ported: the rounds' GPU clock gaps and launch counts (only with useClock, i.e.
+diff --git a/zig/src/families/dsv41/rdma.zig b/zig/src/families/dsv41/rdma.zig
+index 9085c65d6ccdc8411eaa97b41a3be16c749abe8c..dac8d04060ea7575b8e4c840d212d7056f709c33 100644
+--- a/zig/src/families/dsv41/rdma.zig
++++ b/zig/src/families/dsv41/rdma.zig
+@@ -94,6 +94,12 @@ fn pathMtu(local: c_int, remote: c_int) error{BadMtu}!c_int {
+     return @min(local, remote);
+ }
+ 
++/// TF_DS_RDMA_PROBES ("1" or "on"; unset: off): the ring's kernels time each gather's stage, its doorbell's wait for
++/// the peer's flags and its copy-out into the probe words (Ring.probes), which a profile reads. Attribution only: the
++/// words and the frames are the same (a gather's own timing pays the kernel's clock reads, and nothing reads them back
++/// for a decision). Read at load, both ranks.
++pub const probes_env = "TF_DS_RDMA_PROBES";
++
+ /// The Python build's switches, with their defaults (TF_RDMA_SLOTS, TF_RDMA_STAGE_BLOCKS, ..., TF_RDMA_PDL as served).
+ pub const Settings = struct {
+     slots: u32 = 4,
+@@ -107,7 +113,7 @@ pub const Settings = struct {
+     own_early: bool = true,
+     unroll: bool = true,
+     fence: bool = true,
+-    probing: bool = false,
++    probing: bool = false, // TF_DS_RDMA_PROBES (probes_env): the gathers' probe words
+     cpu: ?u16 = null, // the proxy thread's CPU (TF_DS_RDMA_CPUS), else the affinity it inherits
+ };
+ 

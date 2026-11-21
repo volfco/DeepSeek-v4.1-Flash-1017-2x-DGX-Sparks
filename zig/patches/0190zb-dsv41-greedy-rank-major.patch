@@ -1,0 +1,52 @@
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -376,7 +376,7 @@
+ // TF_DS_GREEDY_ARGMAX: a round whose rows are all greedy consumes only the pick, so each rank's (value, index) a row
+ // travels instead of its vocabulary half. The argmax is tf_ds_block_argmax_v's (NaN skipped, ties to the lower column);
+ // its row[0] rule is NOT applied here - the reduce applies rank 0's, which is the whole row's first value - and that
+-// flag rides the pair as an index sentinel. out [rows][2]: the value's bits, then the index.
++// flag rides the high bit of the local index. out [rows][2]: the value's bits, then the index.
+ extern "C" __global__ void __launch_bounds__(1024) tf_ds_argmax_pair_kernel(const float* logits, unsigned long long ld,
+                                                                            int n, unsigned* out, int pdl) {
+     pdl_enter(pdl);
+@@ -385,11 +385,11 @@
+     const unsigned bi = tf_ds_block_argmax_v(row, n, &bv);
+     if (threadIdx.x == 0) {
+         out[2 * blockIdx.x] = __float_as_uint(bv);
+-        out[2 * blockIdx.x + 1] = row[0] != row[0] ? 0xffffffffu : bi;
+-    }
+-}
+-
+-// The ranks' pairs [rows][world][2] in rank order reduced to the round's picks: tf_ds_argmax_rows_kernel's answer for
++        out[2 * blockIdx.x + 1] = bi | (row[0] != row[0] ? 0x80000000u : 0u);
++    }
++}
++
++// The all-gather's rank-major pairs [world][rows][2] in rank order reduced to the round's picks: tf_ds_argmax_rows_kernel's answer for
+ // the whole vocabulary (the first largest, the lower rank winning a tie, rank 0's row[0] NaN rule as pick 0). A thread a
+ // row (R <= 16), the pairs as the ranks' exchange left them; `n` is a rank's columns, so rank k's local index i is the
+ // whole row's k * n + i (the logits' layout: the ranks' halves in rank order).
+@@ -397,18 +397,19 @@
+     pdl_enter(pdl);
+     const int r = blockIdx.x * blockDim.x + threadIdx.x;
+     if (r >= rows) return;
+-    const unsigned* p = pairs + (long long)r * world * 2;
+-    if (p[1] == 0xffffffffu) {   // rank 0's first value was NaN: the row's pick is 0, as the whole-row rule says
++    const unsigned* p = pairs + (long long)r * 2;
++    if ((p[1] & 0x80000000u) != 0) {   // rank 0's first value was NaN: the row's pick is 0, as the whole-row rule says
+         out[r] = 0u;
+         return;
+     }
+     float bv = __uint_as_float(p[0]);
+     unsigned bi = p[1];
+     for (int k = 1; k < world; k++) {
+-        const float v = __uint_as_float(p[2 * k]);
++        const unsigned* peer = p + (long long)k * rows * 2;
++        const float v = __uint_as_float(peer[0]);
+         if (v > bv) {   // strict: an earlier rank wins a tie (each rank's own tie already went to its lower column)
+             bv = v;
+-            bi = (unsigned)k * (unsigned)n + p[2 * k + 1];
++            bi = (unsigned)k * (unsigned)n + (peer[1] & 0x7fffffffu);
+         }
+     }
+     out[r] = bi;

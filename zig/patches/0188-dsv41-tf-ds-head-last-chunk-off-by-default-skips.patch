@@ -1,0 +1,100 @@
+# port-patches.sh: second-pass-int @ 08ffdfc31b80 over 712aa11 @ 712aa110a628 (commits 712aa110a628..08ffdfc31b80)
+# dsv41: TF_DS_HEAD_LAST_CHUNK (off by default) skips the head of a prompt chunk that is not the pass's last - the one whose logits were computed and thrown away
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index ff2836bc9b6aa6f7a40988a7b89dc006f499e6c0..4361013bee52ce30822e8ae657724591e397d041 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -67,6 +67,13 @@ pub const ChunkArgs = struct { start: usize, n: usize, replay: usize };
+ /// How a slice ended: layers remain, the chunk reached the head, or it was encoder-only and stopped at the decoder's first layer.
+ pub const SliceEnd = enum { more, head, encoder_only };
+ 
++/// Does the pass have rows after this chunk? `fill` is the pass's whole id sequence (fill_seq) and `seq` the chunk's
++/// slice of it: the same buffer, cut short. The Engram read-ahead asks it, and TF_DS_HEAD_LAST_CHUNK skips the head of
++/// every chunk it says yes for.
++fn moreRowsAfter(fill: []const i32, seq: []const i32, start: usize, n: usize) bool {
++    return fill.len > start + n and fill.ptr == seq.ptr;
++}
++
+ /// What a part-run chunk keeps between its slices; `live` while one is part run.
+ pub const Resume = struct {
+     live: bool = false,
+@@ -120,6 +127,8 @@ pub const Options = struct {
+     gather_overlap: bool = false,
+     // TF_DS_GREEDY_ARGMAX (0186): a greedy round exchanges the ranks' argmax instead of the logits
+     greedy_argmax: bool = false,
++    // TF_DS_HEAD_LAST_CHUNK (0188): skip the head of a prompt chunk that is not the pass's last ('1'/'on')
++    head_last_chunk: bool = false,
+     // TF_DS_BF16_PARTIALS (0185, LOSSY): the chunk's attention partial rounded to bf16 before its gather
+     bf16_partials: bool = false,
+     engram_aio: bool = false, // a round's Engram reads by Linux AIO on O_DIRECT (else the reader pool)
+@@ -224,6 +233,8 @@ pub const Model = struct {
+     // TF_DS_EXACT_RESUME: every slot's tail (prompt.Tail: the last window rows of a prompt pass's decoder input, a ring)
+     // and the device buffer they share; no tails with the switch off
+     exact_resume: bool = false,
++    // TF_DS_HEAD_LAST_CHUNK (0188): a chunk that is not the pass's last runs no head (its logits are discarded)
++    head_last_chunk: bool = false,
+     // TF_DS_GREEDY_ARGMAX (0186): the switch, and each round's choice (lanes.zig arms round.Round.map from it)
+     argmax_map: bool = false,
+     tails: []prompt.Tail = &.{},
+@@ -531,6 +542,7 @@ pub const Model = struct {
+         if (o.prefetch) try m.rd.usePrefetch(&m.eng);
+         if (o.gather_overlap and prompt.overlapWorks(sp.world, m.two != null)) try m.useGatherSide();
+         m.argmax_map = o.greedy_argmax;
++        m.head_last_chunk = o.head_last_chunk;
+         if (o.drafts) {
+             m.dpool = try draft.Pool.init(&m.eng, &m.arena, m.streams);
+             m.dr = try draft.Drafter.init(&m.eng, &m.arena, sp);
+@@ -1601,7 +1613,7 @@ pub const Model = struct {
+                 const ne = @min(2, c.engram_layers.slice().len);
+                 if (eh.lead_on) {
+                     // this layer's rows of the next chunk from now, a whole chunk ahead of their layer
+-                    const more = m.fill_seq.len > start + n and m.fill_seq.ptr == seq.ptr;
++                    const more = moreRowsAfter(m.fill_seq, seq, start, n);
+                     const nn = if (more) @min(chunk_rows, m.fill_seq.len - start - n) else 0;
+                     m.lead.after(eh, c, seq, start, n, j, if (more) m.fill_seq[0 .. start + n + nn] else null, nn);
+                 } else if (j + 1 < ne) {
+@@ -1646,9 +1658,15 @@ pub const Model = struct {
+         }
+         rs.next = hi;
+         if (hi < c.layers) return .more;
+-        try prompt.head(e, ch);
+-        if (pt) |t| try t.mark(m.stream, .head);
+-        prefill_prof.mark(m.stream, .head);
++        // TF_DS_HEAD_LAST_CHUNK (0188): only the pass's last chunk's head is the prompt's logits - an earlier chunk that
++        // reached the decoder (the last window's rows straddling a chunk end) had it computed and thrown away, so its
++        // fixed costs (collapse_norm, the head's own group, the gather) go. The chunk still returns .head: it reached the
++        // head, it just had nothing to keep (fill_seq's test is the Engram read-ahead's "more rows after this chunk").
++        if (!(m.head_last_chunk and moreRowsAfter(m.fill_seq, seq, start, n))) {
++            try prompt.head(e, ch);
++            if (pt) |t| try t.mark(m.stream, .head);
++            prefill_prof.mark(m.stream, .head);
++        }
+         if (m.dr) |*dr| {
+             // its taps (the tap layers side by side) into the slot's drafter rings
+             const dw = c.hidden;
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 2c4a885ab38e25573b8c91be2d801df8f3e8e2da..d8e0dd82a2bbe48b809d96cc91a595046e251307 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -86,6 +86,12 @@
+ //!                                               is in flight; the same all-gather on the same ranks, so bits identical
+ //!                                               (set alike on both ranks; no frame, no bytes, no fingerprint bit). A lone
+ //!                                               rank or the four-node 2D split keeps the main stream. Off: nothing changes
++//!   TF_DS_HEAD_LAST_CHUNK=1                   a prompt chunk that is not the pass's last runs no head: the decoder's last
++//!                                               window of rows straddling a chunk end had its logits computed and thrown
++//!                                               away (the next chunk's head is the prompt's), so collapse_norm, the
++//!                                               head's group and their gather are skipped there - the same bytes, the
++//!                                               same logits, fewer launches; off: every chunk that reaches the decoder
++//!                                               runs it, as served
+ //!   TF_DS_GREEDY_ARGMAX=1                      a round whose rows are all greedy (no sampled row, no draw rules, no score
+ //!                                               stream, no probe) exchanges each rank's (value, index) a row - R * 8 bytes
+ //!                                               - instead of the ranks' vocabulary halves (258,560 B a row a rank), and
+@@ -347,6 +353,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+         .gather_overlap = ops_mod.onValue(getenv(prompt.gather_side_env)), // 0183 (the 2D split and a lone rank keep the main stream: Model.useGatherSide)
+         .bf16_partials = ops_mod.onValue(getenv("TF_DS_BF16_PARTIALS")), // 0185, LOSSY (a lone rank and the 2D split keep fp32: Model.open)
+         .greedy_argmax = ops_mod.onValue(getenv("TF_DS_GREEDY_ARGMAX")), // 0186 (a greedy round's rule: sampling.argmaxMapWorks)
++        .head_last_chunk = ops_mod.onValue(getenv("TF_DS_HEAD_LAST_CHUNK")), // 0188 (Model.sliceRun's head)
+         .engram_aio = if (getenv("TF_DS_ENGRAM_AIO")) |v| !std.mem.eql(u8, v, "0") else false,
+         .pool = try pool_mod.resolve(o.context, getenv("TF_DS_POOL")), // may exceed the window: more kept prompts stay resident
+         .window = o.context, // (a follower takes TF_DS_WINDOW, else rank 0's: Model.open)

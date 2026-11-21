@@ -1,0 +1,134 @@
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index 2850847..d520ca2 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -571,6 +571,18 @@ extern "C" __global__ void __launch_bounds__(512) tf_ds_compress2x_norm_kernel(c
+ // ===================================================================================================================
+ // TF_DS_FUSED_ROPE_STORE (0198, off by default).
+ //
++// WARP ALIGNMENT (load-bearing, see rope_store.warpShapesOk + its tests): every full-mask shuffle below
++// (`__shfl_xor_sync(0xffffffffu, ...)` in tf_ds_fp4_amax, tf_ds_latent_element and the query kernel's per-element
++// amax) requires its participating lanes to be one whole warp (or half/quarter warp) of consecutive element indices.
++// An inactive lane inside such a shuffle is undefined behaviour, not a wrong number. It holds only because
++//   * D % 64 == 0: D/2 (the latent's packed half row) is warp-aligned, so element i's rotary partner is the neighbour
++//     lane's, and the key's 32-element _fp4_store scale groups are a warp;
++//   * RD is even: the rotary suffix starts at D - RD, an even column, so the xor-1 pair is (even, odd) inside a warp;
++//   * blockDim.x is a multiple of 32 and every stride steps in whole warps (`i += blockDim.x`,
++//     `blockDim.x * threadIdx.y`), so a loop's tail leaves whole warps idle rather than single lanes.
++// A refactor that flattens indexing, folds rotation into packing, or changes a block shape must keep all three; the
++// launchers refuse a shape that does not (error.UnsupportedShape, so the call site falls back to the unfused chain).
++//
+ // These kernels combine the following operations at their original bf16 rounding boundaries:
+ //   - the kit's `_rmsnorm` (see tf_ds_triton_rmsnorm_row above),
+ //   - the kit's `_rope_heads` (Triton contracts the first product into the add: re = fma(xe, cs, -(xo*sn)),
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index fd13f0b..1115571 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -5,6 +5,7 @@
+ const std = @import("std");
+ const cuda = @import("cuda");
+ const ops = @import("ops.zig");
++const rope_store = @import("rope_store.zig");
+ 
+ /// launch_shape.h's tf_launch_blocks: a block a `threads` elements, at most 65535.
+ fn blocks(count: usize, threads: usize) u32 {
+@@ -211,7 +212,7 @@ pub const Exact = struct {
+     /// rotated row stays on chip (rd.ik's store has no reader). Grid = rows, block = 128 (the num_warps=4 layout).
+     pub fn idxKeyFused(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, w: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize, eps: f32) !void {
+         if (rows == 0) return;
+-        if (d != 128 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
++        if (d != 128 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d or !rope_store.warpShapesOk(d, rd, 128)) return error.UnsupportedShape;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(@as(c_longlong, @intCast(ldx)));
+@@ -234,7 +235,8 @@ pub const Exact = struct {
+     /// read only (the in-place rotation has no reader after the pack).
+     pub fn ropeStore(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize) !void {
+         if (rows == 0) return;
+-        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
++        const block = @min(d / 2, 256);
++        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d or !rope_store.warpShapesOk(d, rd, block)) return error.UnsupportedShape;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(cos);
+@@ -254,7 +256,7 @@ pub const Exact = struct {
+     /// rd.iq is read only (the in-place rotation has no reader).
+     pub fn ropeQd(e: *const Exact, s: cuda.Stream, x: u64, out: u64, cos: u64, sin: u64, pos: u64, rows: usize, heads: usize, hd: usize, rd: usize) !void {
+         if (rows == 0 or heads == 0) return;
+-        if (hd < 32 or hd > 512 or (hd & (hd - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > hd or hd % 32 != 0) return error.UnsupportedShape;
++        if (hd < 32 or hd > 512 or (hd & (hd - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > hd or hd % 32 != 0 or !rope_store.warpShapesOk(hd, rd, 128)) return error.UnsupportedShape;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(out);
+@@ -278,6 +280,7 @@ pub const Exact = struct {
+         if (d < 128 or d > 512 or (d & (d - 1)) != 0 or d % 4 != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
+         const lanes = rmsLanes(d, rows);
+         const y = packLanes(lanes, d / 2);
++        if (!rope_store.warpShapesOk(d, rd, lanes * y)) return error.UnsupportedShape;
+         const factor: f32 = @as(f32, @floatFromInt(rows)) / @as(f32, @floatFromInt(rows * d));
+         var a: cuda.Args = .{};
+         a.add(x);
+@@ -302,7 +305,8 @@ pub const Exact = struct {
+     /// ch.lat2 (nothing reads it there).
+     pub fn promptLatent(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize) !void {
+         if (rows == 0) return;
+-        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
++        const block = @min(d / 2, 256);
++        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d or !rope_store.warpShapesOk(d, rd, block)) return error.UnsupportedShape;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(cos);
+diff --git a/zig/src/families/dsv41/rope_store.zig b/zig/src/families/dsv41/rope_store.zig
+index a6331dd..97df2d9 100644
+--- a/zig/src/families/dsv41/rope_store.zig
++++ b/zig/src/families/dsv41/rope_store.zig
+@@ -38,11 +38,27 @@ fn isPow2(n: usize) bool {
+ }
+ 
+ /// Whether the fused launch supports this configuration: rows, the head dim (pow2 in [128, 512]: the kernels' srow
+-/// is 512 bf16 and the fp4 blocks divide it), the rope dim (pow2, <= d) and the head count.
++/// is 512 bf16 and the fp4 blocks divide it), the rope dim (pow2, <= d) and the head count. Every shape this accepts
++/// with the block sizes the launchers derive from it also satisfies `warpShapesOk` (the kernels' full-mask shuffles).
+ pub fn fuseOk(fused: bool, rows: usize, d: usize, rd: usize, heads: usize) bool {
+     return fused and rows > 0 and isPow2(d) and d >= 128 and d <= 512 and isPow2(rd) and rd >= 2 and rd <= d and heads >= 1;
+ }
+ 
++/// The launch-shape invariant every full-mask shuffle in the five kernels rests on (dsv41_torch.cu's "WARP ALIGNMENT"
++/// note): the participating lanes are whole warps of consecutive element indices, so no lane is inactive inside a
++/// `__shfl_xor_sync(0xffffffffu, ...)` (undefined behaviour, not a wrong number). It holds because:
++///   * `d % 64 == 0` tiles a warp: `d / 2` (the latent's packed half row) is warp-aligned, so element i's rotary
++///     partner is the neighbour lane's, and the key's 32-element `_fp4_store` scale group is exactly one warp;
++///   * `rd` even keeps the rotary suffix's first pair at an even column (`d - rd`), so the xor-1 exchange stays inside
++///     the (even, odd) pair;
++///   * `block % 32 == 0` makes every stride a whole number of warps (`i += blockDim.x`, `blockDim.x * threadIdx.y`), so
++///     a loop's tail leaves whole warps idle rather than single lanes.
++/// `block` is the `blockDim.x` the launcher passes. The launchers refuse a shape this rejects, so the call sites fall
++/// back to the unfused chain; the query kernel's `hd % 32 == 0` (one head a warp) is checked beside this.
++pub fn warpShapesOk(d: usize, rd: usize, block: usize) bool {
++    return d % 64 == 0 and rd >= 2 and rd % 2 == 0 and (d - rd) % 2 == 0 and block % 32 == 0;
++}
++
+ // -- host reference (tests) ------------------------------------------------------------------------------------------
+ //
+ // The kernels' arithmetic on the host, written to the same spec. fp32 IEEE; every operation in the kernel's order.
+@@ -288,6 +304,19 @@ test "e4m3ToFloat decodes the byte layout" {
+     try expectEqual(@as(f32, 0.75), e4m3ToFloat(0x34)); // exp 6 (2^-1), man 4 -> 1.5 * 0.5
+ }
+ 
++test "warpShapesOk: the served shapes hold, a warp-splitting shape does not" {
++    // the launchers' shapes: prompt key 128/64 at 32 lanes, decode key 128/64 at 128, the latents 512/64 at 256 and
++    // 128/64 at 64, the query 128/64 at 128
++    try std.testing.expect(warpShapesOk(128, 64, 32));
++    try std.testing.expect(warpShapesOk(128, 64, 128));
++    try std.testing.expect(warpShapesOk(512, 64, 256));
++    try std.testing.expect(warpShapesOk(128, 64, 64));
++    try std.testing.expect(warpShapesOk(128, 128, 128)); // rd == d: the whole head rotates, still pair-aligned
++    try std.testing.expect(!warpShapesOk(128, 64, 48)); // a block that is not whole warps strands lanes mid-warp
++    try std.testing.expect(!warpShapesOk(96, 64, 32)); // d/2 = 48: the half-row packing splits a warp
++    try std.testing.expect(!warpShapesOk(128, 3, 32)); // odd rd: the rotary suffix starts on an odd column
++}
++
+ test "keyStore: the fused packed-column pass writes the separate-pass pipeline's very bytes" {
+     // D = 128 with RD = 2 (the smallest suffix) and RD = 64 (the served decode key), then D = 512 / RD = 64 (the prompt
+     // key's multi-iteration case at 32 lanes) and RD == D (the whole row rotates). Five rows a shape: random, small

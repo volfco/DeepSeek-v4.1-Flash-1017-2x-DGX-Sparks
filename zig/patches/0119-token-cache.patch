@@ -1,4 +1,4 @@
-From 9a9494794fbeecefb8e4e6320cd8c2174b16fd4c Mon Sep 17 00:00:00 2001
+From 84c7df52dfdce961f19f9054fe31292a5b5be889 Mon Sep 17 00:00:00 2001
 From: colum <git@volf.co>
 Date: Sat, 14 Nov 2026 20:18:51 -0800
 Subject: [PATCH] server: TENSORFOLD_TOKEN_CACHE_MB (rank 0 only, off by
@@ -50,14 +50,16 @@ switch off consulting no cache. zig/tests/server/zig_test.sh passes too (186
 server tests, including HfText.encode's cache wiring and its off path). Not run
 on a pair and not benchmarked: this is the implementation only; step 0's numbers
 come from the new render_s/encode_s fields.
+
+Review round: hf_text reads the switch through std.mem.span (the image's build did not compile), an entry is charged 160 bytes over its text and ids (many short pieces held far more than the cap), the map is rehashed after an eviction (tombstones made every miss probe the table), and encode_s/render_s count both renders.
 ---
  zig/build/cuda.zig                   |   2 +-
- zig/src/core/tokenizer/cache.zig     | 150 ++++++++++++++++++++++++
- zig/src/core/tokenizer/tokenizer.zig | 169 ++++++++++++++++++++++++++-
- zig/src/server/chat.zig              |  14 ++-
+ zig/src/core/tokenizer/cache.zig     | 178 +++++++++++++++++++++++++++
+ zig/src/core/tokenizer/tokenizer.zig | 169 ++++++++++++++++++++++++-
+ zig/src/server/chat.zig              |  16 ++-
  zig/src/server/hf_text.zig           |  48 +++++++-
- zig/src/server/prompt.zig            |  43 +++++--
- 6 files changed, 407 insertions(+), 19 deletions(-)
+ zig/src/server/prompt.zig            |  45 +++++--
+ 6 files changed, 437 insertions(+), 21 deletions(-)
  create mode 100644 zig/src/core/tokenizer/cache.zig
 
 diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
@@ -75,10 +77,10 @@ index 57f7750..fa95008 100644
      cli.addImport("core", mods.core);
 diff --git a/zig/src/core/tokenizer/cache.zig b/zig/src/core/tokenizer/cache.zig
 new file mode 100644
-index 0000000..946262b
+index 0000000..b10e5d5
 --- /dev/null
 +++ b/zig/src/core/tokenizer/cache.zig
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,178 @@
 +//! TENSORFOLD_TOKEN_CACHE_MB (rank 0's server; off by default): an LRU of encoded plain pieces, keyed by the bytes the
 +//! added-token split hands the encoder. `Tokenizer.encodeWith` consults it for pieces whose ids cannot depend on their
 +//! neighbours; with the switch off there is no cache and the encoder is the one it was.
@@ -137,7 +139,7 @@ index 0000000..946262b
 +    /// `text`'s ids. A piece larger than a quarter of the cap is not cached; when the cap would be passed, the older
 +    /// half by last use goes first. A failed allocation drops the entry, never the encode.
 +    pub fn put(c: *PieceCache, text: []const u8, ids: []const u32) void {
-+        const cost = text.len + 4 * ids.len;
++        const cost = entryCost(text.len, ids.len);
 +        if (cost > c.limit / 4) return;
 +        c.mutex.lockUncancelable(c.io);
 +        defer c.mutex.unlock(c.io);
@@ -146,13 +148,18 @@ index 0000000..946262b
 +            c.lru.append(&e.node);
 +            return;
 +        }
++        var evicted = false;
 +        while (c.used + cost > c.limit and c.used > c.limit / 2) {
 +            const n = c.lru.popFirst() orelse break;
 +            const e: *Entry = @fieldParentPtr("node", n);
 +            _ = c.map.remove(e.text);
 +            c.used -= e.cost;
 +            freeEntry(c.gpa, e);
++            evicted = true;
 +        }
++        // a removal leaves a tombstone and the map never grows at a steady count, so without this every miss would
++        // come to probe the whole table under the mutex (std's rehash() names this insert/delete pattern)
++        if (evicted) c.map.rehash(std.hash_map.StringContext{});
 +        const e = c.gpa.create(Entry) catch return;
 +        e.node = .{};
 +        e.text = c.gpa.dupe(u8, text) catch {
@@ -173,6 +180,12 @@ index 0000000..946262b
 +        c.lru.append(&e.node);
 +    }
 +};
++
++/// What an entry holds: its bytes and ids, plus its Entry, two allocations' headers and its map slot (about 64 + 2*16
++/// + 64 bytes), so many short pieces cannot hold far more than the cap.
++fn entryCost(text_len: usize, n_ids: usize) usize {
++    return text_len + 4 * n_ids + 160;
++}
 +
 +fn freeEntry(gpa: Allocator, e: *PieceCache.Entry) void {
 +    gpa.free(e.text);
@@ -228,6 +241,23 @@ index 0000000..946262b
 +    cache.put(&text, &ids); // 256 + 1024 bytes, over 1 KiB / 4
 +    try std.testing.expectEqual(@as(usize, 0), cache.used);
 +    try std.testing.expectEqual(@as(?[]const u32, null), try cache.get(gpa, &text));
++}
++
++test "many short pieces are charged their entry, so the count stays bounded, and churn keeps lookups working" {
++    const gpa = std.testing.allocator;
++    var cache = PieceCache.init(std.testing.io, gpa, 64 << 10);
++    defer cache.deinit();
++    var buf: [16]u8 = undefined;
++    for (0..20_000) |i| { // ~6-byte pieces: without the per-entry charge the cap would admit ~6,000 of them
++        const t = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
++        cache.put(t, &.{@intCast(i)});
++        try std.testing.expect(cache.used <= cache.limit);
++        try std.testing.expect(cache.map.count() * 160 <= cache.limit);
++    }
++    const t = std.fmt.bufPrint(&buf, "{d}", .{19_999}) catch unreachable;
++    const got = (try cache.get(gpa, t)).?;
++    defer gpa.free(got);
++    try std.testing.expectEqualSlices(u32, &.{19_999}, got);
 +}
 diff --git a/zig/src/core/tokenizer/tokenizer.zig b/zig/src/core/tokenizer/tokenizer.zig
 index a1d3d8a..2f90b85 100644
@@ -444,7 +474,7 @@ index a1d3d8a..2f90b85 100644
 +    try std.testing.expectEqual(@as(?usize, null), cacheMb(null));
 +}
 diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
-index 644c181..d6a6aa5 100644
+index 644c181..7b4094a 100644
 --- a/zig/src/server/chat.zig
 +++ b/zig/src/server/chat.zig
 @@ -156,6 +156,9 @@ pub const Prepared = struct {
@@ -485,7 +515,7 @@ index 644c181..d6a6aa5 100644
      consumed: usize = 0,
      chunk_index: usize = 0,
  
-@@ -731,6 +737,8 @@ const Generation = struct {
+@@ -731,9 +737,11 @@ const Generation = struct {
          var b_tok_s: [24]u8 = undefined;
          var b_accept: [24]u8 = undefined;
          var b_tpr: [24]u8 = undefined;
@@ -493,7 +523,11 @@ index 644c181..d6a6aa5 100644
 +        var b_encode: [24]u8 = undefined;
          const accept = if (avg.accept_pct) |pct| std.fmt.bufPrint(&b_accept, "{d:.1}%", .{pct}) catch "-" else "-";
          // TF_DS_ENERGY: the request's own window and the ordinals rank 1's per-frame line joins by. Empty with the
-         // switch off, so the line is byte for byte the base one.
+-        // switch off, so the line is byte for byte the base one.
++        // switch off (0119's render_s/encode_s are always appended at the end, so the line is the base one plus those).
+         var energy_buf: [128]u8 = undefined;
+         var energy_fields: []const u8 = "";
+         if (g.srv.energy.on) {
 @@ -741,7 +749,7 @@ const Generation = struct {
              g.energy_mj = readings.gross_mj;
              energy_fields = api.energy.suffix(&energy_buf, readings, s.round_from, s.round_to);
@@ -504,7 +538,7 @@ index 644c181..d6a6aa5 100644
      }
  };
 diff --git a/zig/src/server/hf_text.zig b/zig/src/server/hf_text.zig
-index 63b6938..ac74ff3 100644
+index 63b6938..2409fc2 100644
 --- a/zig/src/server/hf_text.zig
 +++ b/zig/src/server/hf_text.zig
 @@ -19,6 +19,9 @@ pub const HfText = struct {
@@ -521,7 +555,7 @@ index 63b6938..ac74ff3 100644
              };
          }
          if (t.tool_source.len > 0) t.tool_compiled = template.compile(gpa, t.tool_source, null) catch null;
-+        if (tokenizer.cacheMb(std.c.getenv("TENSORFOLD_TOKEN_CACHE_MB"))) |mb| {
++        if (tokenizer.cacheMb(if (std.c.getenv("TENSORFOLD_TOKEN_CACHE_MB")) |p| std.mem.span(p) else null)) |mb| {
 +            const c = try gpa.create(tokenizer.PieceCache);
 +            c.* = tokenizer.PieceCache.init(io, gpa, mb <<| 20);
 +            t.cache = c;
@@ -585,7 +619,7 @@ index 63b6938..ac74ff3 100644
 +    try std.testing.expect(cache.hits > 0);
 +}
 diff --git a/zig/src/server/prompt.zig b/zig/src/server/prompt.zig
-index 7e1a8a2..87535ae 100644
+index 7e1a8a2..8e64935 100644
 --- a/zig/src/server/prompt.zig
 +++ b/zig/src/server/prompt.zig
 @@ -4,6 +4,7 @@ const json = @import("json.zig");
@@ -635,8 +669,8 @@ index 7e1a8a2..87535ae 100644
          error.Template => return cx.fail(.server, "{s}", .{problem}),
      };
 +    if (timing) |tm| {
-+        tm.render_s = clock.seconds(rendered - started);
-+        tm.encode_s = clock.seconds(clock.nowNs(srv.io) - rendered);
++        tm.render_s += clock.seconds(rendered - started);
++        tm.encode_s += clock.seconds(clock.nowNs(srv.io) - rendered);
 +    }
      if (!thinking and generation and ids.len > 0) {
          const last = try srv.text.decode(cx.a, ids[ids.len - 1 ..]);
@@ -660,9 +694,10 @@ index 7e1a8a2..87535ae 100644
          .ids => |ids| return .{ .ids = ids },
      };
 -    const prompt = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, true);
+-    const history = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, false);
 +    var timing: Timing = .{};
 +    const prompt = try renderIdsTimed(srv, cx, input.messages, input.tools, thinking, effort, true, &timing);
-     const history = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, false);
++    const history = try renderIdsTimed(srv, cx, input.messages, input.tools, thinking, effort, false, &timing); // both renders count
      var history_len: usize = 0;
      if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
      if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix

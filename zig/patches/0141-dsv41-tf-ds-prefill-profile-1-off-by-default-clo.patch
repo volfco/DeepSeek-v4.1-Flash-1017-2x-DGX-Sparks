@@ -1,0 +1,408 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits b4e1fbb76314..aa57b13da281)
+# dsv41: TF_DS_PREFILL_PROFILE=1 (off by default) clocks a prompt chunk's phases and the sub-marks the Engram split has not
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/dsv41.zig b/zig/src/families/dsv41/dsv41.zig
+index 70357b300af4516f343fba6e0bfb1c3e03bf04c8..290f9c1a543b7e147b82385d28d1eef3a9e1c291 100644
+--- a/zig/src/families/dsv41/dsv41.zig
++++ b/zig/src/families/dsv41/dsv41.zig
+@@ -51,6 +51,7 @@ pub const lora = @import("lora.zig");
+ pub const sampling = @import("sampling.zig");
+ pub const model = @import("model.zig");
+ pub const prompt_rows = @import("prompt_rows.zig");
++pub const prefill_prof = @import("prefill_prof.zig");
+ pub const expert_prune = @import("expert_prune.zig");
+ pub const lanes = @import("lanes.zig");
+ pub const pool = @import("pool.zig");
+@@ -110,6 +111,7 @@ test {
+     refAll(sampling);
+     refAll(model);
+     refAll(prompt_rows);
++    refAll(prefill_prof);
+     refAll(expert_prune);
+     refAll(lanes);
+     refAll(pool);
+diff --git a/zig/src/families/dsv41/exl3_experts.zig b/zig/src/families/dsv41/exl3_experts.zig
+index a610090896ffbc0351b4ba7eb1a041888ae3c7b3..f6182fe34561d6d2d82603487eed6ab32998656c 100644
+--- a/zig/src/families/dsv41/exl3_experts.zig
++++ b/zig/src/families/dsv41/exl3_experts.zig
+@@ -12,6 +12,7 @@ const std = @import("std");
+ const cuda = @import("cuda");
+ const elf = @import("elf.zig");
+ const weights = @import("weights.zig");
++const prefill_prof = @import("prefill_prof.zig");
+ 
+ /// experts.py's settings (GLM_GATEUP, GLM_DOWN by default_config; PROMPT_TILES; MMA_KB; EXACT_ROWS; DECODE_STAGES).
+ pub const exact_rows = 64;
+@@ -215,6 +216,7 @@ pub fn prompt(k: *const Kernels, s: cuda.Stream, ex: weights.Experts, sc: Scratc
+     const down = k.rows[range(ex.k2_d[0], ex.k2_d[1])] orelse return error.MissingKernel;
+ 
+     var a: cuda.Args = .{};
++    prefill_prof.subBegin(s, .e_gu);
+     a.add(pick);
+     a.add(sc.counts);
+     i32a(&a, p);
+@@ -257,6 +259,7 @@ pub fn prompt(k: *const Kernels, s: cuda.Stream, ex: weights.Experts, sc: Scratc
+     a.add(limit);
+     a.add(@as(c_int, act_f32));
+     try launch(k.gateup_epilogue, s, .{ p, i / 128, 1 }, 32, &a);
++    prefill_prof.subEnd(s, .e_gu);
+ 
+     // down: grid (1, D / 128, pairs), 4 warps, two 16-row member tiles a program, one split
+     a = .{};
+@@ -269,6 +272,7 @@ pub fn prompt(k: *const Kernels, s: cuda.Stream, ex: weights.Experts, sc: Scratc
+     for ([_]u64{ sc.z, pick, ex.svh_d, sc.no_y, wts, 0, out }) |v| a.add(v);
+     for ([_]usize{ p, d, 1, e, slots, 0 }) |v| i32a(&a, v);
+     try launch(k.down_combine, s, .{ r, d / 128, 1 }, 32 * slots, &a);
++    prefill_prof.subEnd(s, .e_down);
+ }
+ 
+ /// experts_grouped.cuh's DecodeEpi, field for field (C layout, its defaults; the C padding as zero fields, the bytes
+diff --git a/zig/src/families/dsv41/exl3_prefill.zig b/zig/src/families/dsv41/exl3_prefill.zig
+index d912c9068a12f38acd3aaa742687e2e844f9976e..f0a6a55f06becfe251d2a7bbf8eb95ac905891d7 100644
+--- a/zig/src/families/dsv41/exl3_prefill.zig
++++ b/zig/src/families/dsv41/exl3_prefill.zig
+@@ -9,6 +9,7 @@ const exl3_linear = @import("exl3_linear.zig");
+ const tri = @import("tri.zig");
+ const tri_markov = @import("tri_markov.zig");
+ const weights = @import("weights.zig");
++const prefill_prof = @import("prefill_prof.zig");
+ 
+ pub const DType = exl3_linear.DType;
+ 
+@@ -101,9 +102,13 @@ pub const Workspace = struct { xh: u64, w: u64, h: u64 };
+ /// prefill.matmul without a bias (no DeepSeek-V4.1 linear has one): out [M, N] (row stride os elements) =
+ /// x [M, K] (row stride ldx) @ W, the prompt path's arithmetic.
+ pub fn matmul(k: *const Kernels, t: tri.Tri, ws: Workspace, l: weights.Linear, x: u64, x_dtype: DType, ldx: usize, out: u64, out_type: tri_markov.OutType, os: usize, m: usize) !void {
++    prefill_prof.subBegin(t.stream, .d_rot);
+     try rotIn(k, t.stream, x, x_dtype, ldx, l.suh, ws.xh, m, l.k);
++    prefill_prof.subEnd(t.stream, .d_rot);
+     try unpack(k, t.stream, l, ws.w);
++    prefill_prof.subEnd(t.stream, .d_unpack);
+     try tri_markov.matmul(t, ws.xh, ws.w, ws.h, l.svh, null, out, out_type, os, m, l.k, l.n);
++    prefill_prof.subEnd(t.stream, .d_gemm);
+ }
+ 
+ /// prefill.Workspace.hadamard: H [128, 128] bf16, 1 - 2 * parity(i & j) (the bits of +-1.0).
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 0f16c10f19a3d83b89ff2903efa56ad00819814a..16ef50b47376229c0e93af3fd21a143ec295df1e 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -247,6 +247,7 @@ pub fn main(init: std.process.Init) !u8 {
+             printKvShard(w, o.rank, m) catch {};
+             printPrune(w, o.rank, m) catch {};
+             printExpertBytes(w, o.rank, m) catch {};
++            dsv41.prefill_prof.print(w, o.rank) catch {};
+             if (m.ptimer) |tm| {
+                 w.print("{{\"rank\": {d}, \"prefill_phases_ms\": {{", .{o.rank}) catch {};
+                 for (dsv41.round.PhaseTimer.phases, 0..) |name, i| w.print("{s}\"{s}\": {d:.3}", .{ if (i == 0) "" else ", ", name, if (tm.rounds == 0) 0 else tm.ms[i] / @as(f64, @floatFromInt(tm.rounds)) }) catch {};
+@@ -443,6 +444,7 @@ pub fn main(init: std.process.Init) !u8 {
+         try printKvShard(w, 0, m);
+         try printPrune(w, 0, m);
+         try printExpertBytes(w, 0, m);
++        try dsv41.prefill_prof.print(w, 0);
+         if (m.eh) |eh| if (eh.p_calls > 0) {
+             const pc: f64 = @floatFromInt(eh.p_calls);
+             try w.print("{{\"rank\": 0, \"prefill_engram_ms\": {{\"calls\": {d}, \"rows\": {d:.2}, \"upload\": {d:.2}, \"mm\": {d:.2}, \"exchange\": {d:.2}, \"gate\": {d:.2}}}}}\n", .{ eh.p_calls, @as(f64, @floatFromInt(eh.p_rows)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_upload)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_mm)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_x)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_gate)) / pc / 1e6 });
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index ec019872d01c7a9a59479c7b27be2fdbebd024f2..fe25256f6f1c6735528463f0050e6f35f646c382 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -35,6 +35,7 @@ const shard = @import("shard.zig");
+ const shard_ops = @import("shard_ops.zig");
+ const prompt_rows = @import("prompt_rows.zig");
+ const expert_prune = @import("expert_prune.zig");
++const prefill_prof = @import("prefill_prof.zig");
+ 
+ /// The served prompt chunk (TF_DS_PREFILL_CHUNK): a prompt runs in chunks that start at its multiples.
+ pub const chunk_rows = 2048;
+@@ -252,6 +253,8 @@ pub const Model = struct {
+         errdefer m.host.deinit();
+         const a = m.host.allocator();
+         m.io = io;
++        // TF_DS_PREFILL_PROFILE=1: a prompt chunk's phases and sub-marks clocked (prefill_prof.zig, attribution only)
++        if (envOf("TF_DS_PREFILL_PROFILE")) |v| if (std.mem.eql(u8, v, "1")) prefill_prof.enable(io);
+         m.ctx = ctx;
+         m.rank = o.rank;
+         m.world = o.world;
+@@ -1429,9 +1432,11 @@ pub const Model = struct {
+         for (0..n) |j| m.ids64[j] = if (seq[start + j] < 0) image_id else seq[start + j];
+         const pt = m.ptimer;
+         if (pt) |t| try t.mark(m.stream, .start);
++        prefill_prof.mark(m.stream, .start);
+         try prompt.begin(e, ch, m.ids64[0..n], start, m.host_pos);
+         if (ch.spans.len > 0) try prompt.embedSpans(e, ch);
+         if (pt) |t| try t.mark(m.stream, .embed);
++        prefill_prof.mark(m.stream, .embed);
+         // Engram rows read ahead on a thread while the GPU runs the layers before them (the served reader pool's
+         // overlap): this chunk's both layers' during the chunk before it (m.ahead), else the first layer's from the
+         // chunk's start and the next's once the first is applied
+@@ -1488,6 +1493,7 @@ pub const Model = struct {
+                         try m.stream.synchronize();
+                         try t.finish();
+                     }
++                    prefill_prof.finish();
+                     m.rs.reset();
+                     return .encoder_only;
+                 }
+@@ -1524,27 +1530,35 @@ pub const Model = struct {
+                     m.ahead = std.Thread.spawn(.{}, prompt.engramReadAheadAll, .{ eh, c, m.fill_seq[0 .. start + n + nn], start + n, nn }) catch null;
+                 }
+                 if (pt) |t| try t.mark(m.stream, .engram);
++                prefill_prof.mark(m.stream, .engram);
+             }
+             // a DSpark tap reads the streams after the layer's Engram (_forward_k's order)
+             if (taps) if (std.mem.indexOfScalar(u16, c.dspark_taps.slice(), @intCast(li))) |j| try prompt.tap(e, ch, j);
+             try prompt.attnMixes(e, ch, li);
+             if (pt) |t| try t.mark(m.stream, .mix_attn);
++            prefill_prof.mark(m.stream, .mix_attn);
+             try prompt.attention(e, ch, &m.view, &rs.shared, li, m.ring_view[li], rs.floor, rs.kv_done != null and rs.kv_done.? == li);
+             if (pt) |t| try t.mark(m.stream, .attn);
++            prefill_prof.mark(m.stream, .attn);
+             try prompt.gather(e, ch, ch.pa, ch.ga);
+             if (pt) |t| try t.mark(m.stream, .gather_a);
++            prefill_prof.mark(m.stream, .gather_a);
+             try prompt.ffnMixes(e, ch, li);
+             if (pt) |t| try t.mark(m.stream, .mix_ffn);
++            prefill_prof.mark(m.stream, .mix_ffn);
+             try prompt.moe(e, ch, li);
+             if (pt) |t| try t.mark(m.stream, .moe);
++            prefill_prof.mark(m.stream, .moe);
+             try prompt.gather(e, ch, ch.pm, ch.gm);
+             if (pt) |t| try t.mark(m.stream, .gather_m);
++            prefill_prof.mark(m.stream, .gather_m);
+             prompt.endLayer(ch);
+         }
+         rs.next = hi;
+         if (hi < c.layers) return .more;
+         try prompt.head(e, ch);
+         if (pt) |t| try t.mark(m.stream, .head);
++        prefill_prof.mark(m.stream, .head);
+         if (m.dr) |*dr| {
+             // its taps (the tap layers side by side) into the slot's drafter rings
+             const dw = c.hidden;
+@@ -1558,6 +1572,7 @@ pub const Model = struct {
+             try m.stream.synchronize();
+             try t.finish();
+         }
++        prefill_prof.finish();
+         m.rs.reset();
+         return .head;
+     }
+diff --git a/zig/src/families/dsv41/prefill_prof.zig b/zig/src/families/dsv41/prefill_prof.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..fca02cdfcc980c381df0d33f02397288ef56e5d1
+--- /dev/null
++++ b/zig/src/families/dsv41/prefill_prof.zig
+@@ -0,0 +1,141 @@
++//! TF_DS_PREFILL_PROFILE=1: a prompt chunk's time by phase (default off). Attribution only: the stream is drained at
++//! every cut, so the figures include the syncs and are not an unprofiled chunk's cost. Names and the chunk-a-round shape
++//! follow round.zig's PhaseTimer (start/embed/.../head a chunk, a_in..a_woa inside a layer's attention, m_rt the router),
++//! but wall-clock a drained stream instead of events: the d_* and e_* sub-marks fire once a dense-GEMM call and once a
++//! prompt-experts call, far more marks than PhaseTimer's event array holds.
++//! Two classes of marks, one accumulator each, no double charging inside a class:
++//! - phases (start..head): each mark charges the interval since the previous mark to itself, the chunk boundaries'
++//!   (start, head's finish) excepted; their sum is the chunk's time.
++//! - sub-marks (a_in..a_woa, m_rt, d_*, e_*): each charges its own begin..end interval on the cursor of its class, so
++//!   the dense GEMMs' marks inside an a_in interval do not cut it. They never move the phases' cursor, so the phase
++//!   they sit inside keeps its full time; they are a breakdown of part of it, not a subtraction from it.
++//! A chunk cut by a decode round (TF_DS_PREFILL_SLICE) charges that round to its next phase, as PhaseTimer's does.
++//! The line prints at the end of the run next to prefill_engram_ms (lanes_main.zig) as "prefill_profile_ms": every
++//! mark's average ms a chunk, and the chunks counted. Unset, every mark is one load and a branch.
++const std = @import("std");
++const cuda = @import("cuda");
++
++pub const Phase = enum(u8) {
++    start, embed, engram, mix_attn, attn, gather_a, mix_ffn, moe, gather_m, head, // a chunk's stretches (model.sliceRun)
++    a_in, a_q, a_idx, a_core, a_woa, // prompt.attention: the input linears, q, the kv source and indexer, the core, wo_a
++    m_rt, // prompt.moe's routing, before the experts
++    d_rot, d_unpack, d_gemm, // exl3_prefill.matmul, once a dense-GEMM call
++    e_gu, e_down, // exl3_experts.prompt, once a call (gate-up through gateup_epilogue; down: grouped_rows and down_combine)
++};
++pub const phases = @typeInfo(Phase).@"enum".field_names;
++
++/// A sub-mark's class: a cursor each, so a mark of one class (a dense GEMM inside a_in's interval) leaves the others'.
++const Class = enum { attn, dense, moe, experts };
++
++fn classOf(ph: Phase) Class {
++    return switch (ph) {
++        .a_in, .a_q, .a_idx, .a_core, .a_woa => .attn,
++        .m_rt => .moe,
++        .d_rot, .d_unpack, .d_gemm => .dense,
++        .e_gu, .e_down => .experts,
++        else => unreachable, // (a phase has no begin..end interval of its own)
++    };
++}
++
++/// The one live profiler (model.open's TF_DS_PREFILL_PROFILE; null: every mark is a branch).
++pub var live: ?*Profiler = null;
++var one: Profiler = .{ .io = undefined };
++
++/// TF_DS_PREFILL_PROFILE=1: the marks on, from the next chunk (model.open, after its io).
++pub fn enable(io: std.Io) void {
++    one = .{ .io = io };
++    live = &one;
++}
++
++pub fn mark(s: cuda.Stream, ph: Phase) void {
++    const p = live orelse return;
++    p.cut(p.stamp(s), ph);
++}
++
++/// A sub-mark's first begin: the marks of its class that follow chain off it.
++pub fn subBegin(s: cuda.Stream, ph: Phase) void {
++    const p = live orelse return;
++    p.sub[@intFromEnum(classOf(ph))] = p.stamp(s);
++}
++
++/// A sub-mark's end: charges its class's cursor..now (consecutive marks of a class need one begin between them).
++pub fn subEnd(s: cuda.Stream, ph: Phase) void {
++    const p = live orelse return;
++    const c = @intFromEnum(classOf(ph));
++    if (p.sub[c] == 0) return;
++    const now = p.stamp(s);
++    p.ns[@backingInt(ph)] += now - p.sub[c];
++    p.sub[c] = now;
++}
++
++/// The chunk's end (head's mark drained it): count the chunk, close the open interval and drop the sub cursors. The
++/// tail after head is not charged.
++pub fn finish() void {
++    const p = live orelse return;
++    p.cursor = 0;
++    p.sub = @splat(0);
++    p.chunks += 1;
++}
++
++/// The run's line, next to prefill_engram_ms: each mark's average ms a chunk.
++pub fn print(w: anytype, rank: usize) !void {
++    const p = live orelse return;
++    const n: f64 = @floatFromInt(@max(p.chunks, 1));
++    try w.print("{{\"rank\": {d}, \"prefill_profile_ms\": {{\"chunks\": {d}", .{ rank, p.chunks });
++    for (phases, 0..) |name, i| try w.print(", \"{s}\": {d:.3}", .{ name, @as(f64, @floatFromInt(p.ns[i])) / n / 1e6 });
++    try w.print("}}}}\n", .{});
++    try w.flush();
++}
++
++pub const Profiler = struct {
++    io: std.Io,
++    ns: [phases.len]u64 = @splat(0),
++    cursor: u64 = 0, // the previous phase mark's stamp (0: between chunks)
++    sub: [@typeInfo(Class).@"enum".field_names.len]u64 = @splat(0), // by Class: the class's open sub-mark
++    chunks: u64 = 0,
++
++    fn stamp(p: *Profiler, s: cuda.Stream) u64 {
++        s.synchronize() catch {};
++        return @intCast(std.Io.Timestamp.now(p.io, .awake).nanoseconds);
++    }
++
++    fn cut(p: *Profiler, now: u64, ph: Phase) void {
++        // start opens a chunk's interval: a chunk that failed mid-way leaves no open one to charge it
++        if (p.cursor != 0 and ph != .start) p.ns[@backingInt(ph)] += now - p.cursor;
++        p.cursor = now;
++    }
++};
++
++test "the profiler charges intervals to their phases, counts chunks, and keeps sub-marks off the cursor" {
++    var p: Profiler = .{ .io = undefined };
++    live = &p;
++    defer live = null;
++    p.cut(100, .start); // a chunk's first cut charges nothing
++    p.cut(180, .embed);
++    p.sub[@intFromEnum(Class.attn)] = 180;
++    p.sub[@intFromEnum(Class.dense)] = 180;
++    p.ns[@intFromEnum(Phase.d_rot)] += 20; // a dense mark inside the a_in interval
++    p.ns[@intFromEnum(Phase.a_in)] += 60;
++    p.cut(400, .attn);
++    p.sub[@intFromEnum(Class.attn)] = 400;
++    p.ns[@intFromEnum(Phase.a_q)] += 100; // after the attn cut: still not charged to attn or its cursor
++    finish();
++    try std.testing.expectEqual(@as(u64, 80), p.ns[@intFromEnum(Phase.embed)]);
++    try std.testing.expectEqual(@as(u64, 220), p.ns[@intFromEnum(Phase.attn)]);
++    try std.testing.expectEqual(@as(u64, 60), p.ns[@intFromEnum(Phase.a_in)]);
++    try std.testing.expectEqual(@as(u64, 20), p.ns[@intFromEnum(Phase.d_rot)]);
++    try std.testing.expectEqual(@as(u64, 100), p.ns[@intFromEnum(Phase.a_q)]);
++    try std.testing.expectEqual(@as(u64, 1), p.chunks);
++    try std.testing.expectEqual(@as(u64, 0), p.cursor);
++    try std.testing.expectEqual(@as(u64, 0), p.sub[@intFromEnum(Class.attn)]);
++    p.cut(10, .start); // the next chunk's first cut charges nothing
++    try std.testing.expectEqual(@as(u64, 80), p.ns[@intFromEnum(Phase.embed)]);
++}
++
++test "the phase list has no duplicates" {
++    for (phases) |name| {
++        var n: usize = 0;
++        for (phases) |other| n += @intFromBool(std.mem.eql(u8, name, other));
++        try std.testing.expectEqual(@as(usize, 1), n);
++    }
++}
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 0f0f373d23009ce6f6a3412efffe8fde1a956f92..5485265b3e5fa8d4a0b75dea8ae05fc601ed5adb 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -38,6 +38,7 @@ const rdma = @import("rdma.zig");
+ const shard = @import("shard.zig");
+ const shard_ops = @import("shard_ops.zig");
+ const prompt_rows = @import("prompt_rows.zig");
++const prefill_prof = @import("prefill_prof.zig");
+ 
+ comptime {
+     std.debug.assert(prompt_rows.default_window == exl3_experts.exact_rows and prompt_rows.max_window == exl3_experts.max_window_rows);
+@@ -1045,15 +1046,18 @@ pub fn attention(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, l
+     const ring_mode = n <= ring_extra and !(replay_floor and below);
+     const one_split = !ring_mode and n <= tri.decode_rows;
+     // attn_in: wq_a and wkv of x, one prompt GEMM each, or one group up to Engine.gemm_rows rows
++    prefill_prof.subBegin(e.s, .a_in);
+     if (prompt_rows.denseOnGemm(n, e.gemm_rows)) {
+         try mm(e, ch, lay.wq_a, ch.x, c.hidden, ch.qa, .bf16, lay.wq_a.n);
+         try mm(e, ch, lay.wkv, ch.x, c.hidden, ch.y, .bf16, hd);
+     } else {
+         try grouped(e, ch, n, &.{ lay.wq_a, lay.wkv }, &.{ ch.x, ch.x }, &.{ c.hidden, c.hidden }, &.{ ch.qa, ch.y }, &.{ lay.wq_a.n, hd }, &.{ .bf16, .bf16 });
+     }
++    prefill_prof.subEnd(e.s, .a_in);
+     try tri_basic.rmsnorm(e.t, ch.qa, lay.wq_a.n, lay.q_norm, ch.qr, lay.wq_a.n, c.eps, n, lay.wq_a.n);
+     try mm(e, ch, lay.wq_b, ch.qr, lay.wq_a.n, ch.q, .bf16, hl * hd);
+     try tri_norm.ropeHeads(e.t, ch.q, rope.cos, rope.sin, ch.pos, rd, false, n, hl, hd);
++    prefill_prof.subEnd(e.s, .a_q);
+     // the window keys: the ring's last window - 1 positions before start, then this chunk's rows
+     const lo = @max(floor, start -| (c.window - 1));
+     const wsrc_rows = if (ring_mode) ring_rows else start - lo + n;
+@@ -1103,6 +1107,7 @@ pub fn attention(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, l
+             padded = true;
+         }
+     }
++    prefill_prof.subEnd(e.s, .a_idx); // the kv source and the indexer's picks
+     const attn: tri_attn.Attn = .{
+         .q = ch.q,
+         .out = ch.o,
+@@ -1134,6 +1139,7 @@ pub fn attention(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, l
+         try upload(e, ch.ring_idx, &idx, keep * 8);
+         try e.ops.scatterRows(e.s, kv + (n - keep) * hd * 2, hd * 2, ch.ring_idx, ring, hd * 2, hd * 2, keep);
+     }
++    prefill_prof.subEnd(e.s, .a_core);
+     // wo_a: each group's column block of o read in place, written into its column block of u; then wo_b to fp32
+     const groups = lay.groups;
+     const gk = hl * hd / groups;
+@@ -1158,6 +1164,7 @@ pub fn attention(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, l
+         const dts = [_]exl3_linear.DType{ .bf16, .bf16, .bf16, .bf16 };
+         try grouped(e, ch, n, lay.wo_a[0..groups], xs[0..groups], lds[0..groups], outs[0..groups], oss[0..groups], dts[0..groups]);
+     }
++    prefill_prof.subEnd(e.s, .a_woa);
+     if (e.two) |t| return t.woB(e, ch, lay); // 2D: the column partner's groups first, then this pair's columns
+     try mm(e, ch, lay.wo_b, ch.u, uw, ch.pa, .fp32, c.hidden);
+ }
+@@ -1472,6 +1479,7 @@ pub fn moe(e: *const Engine, ch: *Chunk, li: usize) !void {
+     const sl = e.slots();
+     const shared_id = lay.experts.count - 1;
+     var kc: usize = 0;
++    prefill_prof.subBegin(e.s, .m_rt);
+     if (n <= tri.decode_rows) {
+         // a decode-sized chunk: the row-invariant gate (rowmm_gate's chunk sums) and its routing
+         kc = try tri_norm.rowmmGate(e.t, ch.x, d, lay.gate_w, ch.gl, n, d, c.experts);
+@@ -1483,6 +1491,7 @@ pub fn moe(e: *const Engine, ch: *Chunk, li: usize) !void {
+         try tri_norm.route(e.t, ch.logits, 0, lay.gate_b, c.top_k, c.routed_scaling, shared_id, ch.pick, ch.wts, n, c.experts, sl);
+     }
+     try routeSpans(e, ch, lay, shared_id, sl, kc);
++    prefill_prof.subEnd(e.s, .m_rt);
+     if (e.two) |t| return t.experts(e, ch, lay); // 2D: gate / up here, the intermediate's exchange, down here
+     // routed(): a chunk of fewer than EXACT_ROWS rows (Engine.window_rows) takes the decode window's fused path and scratch
+     if (prompt_rows.moeInWindow(n, e.window_rows)) return exl3_experts.decode(e.ex, e.s, lay.experts, ch.xsd, ch.x, d, ch.pick, ch.wts, ch.pm, n, c.swiglu_limit, null);

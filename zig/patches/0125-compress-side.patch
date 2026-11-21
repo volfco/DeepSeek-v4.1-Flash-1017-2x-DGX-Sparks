@@ -1,0 +1,242 @@
+From 00f7cfda6623dba99e4e501c523cd0e2d06989a7 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Sun, 15 Nov 2026 11:55:35 -0800
+Subject: [PATCH 3/6] dsv41: TF_DS_COMPRESS_SIDE (off by default) runs the
+ round's compressor chain on a stream of its own, joined before the first
+ reader
+
+Switch: TF_DS_COMPRESS_SIDE ("1" or "on"; anything else or unset: off). Read once per process in Round.init (where the round's other per-process switches live, not in forward) and stored on the round; set alike on both ranks, like every round switch (an uneven pair is still bit-identical here - every forked byte moves with its launch, only the order across streams changes - but set alike is the convention). With the switch off there is nothing: no stream, no events, no launch changes, no env cost in forward; the bytes are the base's, byte for byte. With it on, one stream and two events are created at Round.init (before any round runs and before any graph capture).
+
+What forks (per compressed layer, behind a switch): right after `try rd.mark(e, .a_in);` in the layer's attention - after the grouped attn_in linears (wq_a, wkv, and for a compressed layer the compressor's comp_wkv/comp_wgate) have been launched, so the compressor's inputs (rd.ckv/rd.cgate) and the mix's output x are ready - the chain forks onto its own stream:
+- ratio 1: the RMSNorm (tri_basic.rmsnorm, rd.ckv -> rd.lat);
+- ratio 2: scatterRows (rd.ckv -> the layer's raw_kv slots, idx = rd.g(.rslot)), scatterRows (rd.cgate -> raw_score), cuMemsetD8Async(ch.invalid, 0, 4), gatherRows (raw_kv -> rd.kvg, idx = rd.g(.gi), sources cs.slots * raw_rows), gatherRows (raw_score -> rd.sg), e.exact.compress2 (rd.kvg/rd.sg -> rd.lat2), then the RMSNorm (rd.lat2 -> rd.lat).
+
+The fork: cs_fork is recorded on the main stream, the side stream waits on cs_fork, the chain is launched on the side stream (the kit's calls through a sibling tri.Tri carrying that stream; ops/memset/compress2 through the stream handle directly), then cs_join is recorded on the side stream. The join: where the chain is launched today (the `if (lay.comp_wkv != null)` block inside `_kv_idx`), the main stream waits on cs_join and the ratio-branch launches are skipped. The chain exists in exactly one copy (`compressorChain` in round.zig, selected by the fork's cs_out flag), shared by the forked and the unforked path, so the two cannot drift; the unforked path runs the same launches in the same order on the main stream as before the patch.
+
+What does NOT fork, and why:
+- idx_wk's grouped linear (prompt.grouped with rd.lat): grouped() hardcodes e.s (rotMany/glinear/cuBLAS ride the caller's stream), and the staging it needs (ch.gxh, and the split-K scratch ch.gz) is shared with the main stream. Forked, it could race the main stream's own grouped calls; it stays on the main stream, after the join. Same for the latent RoPE/fp4Store block that follows it (ropeHeads(rd.lat), fp4Store into cs.comp_codes / cs.idx_codes): after the join, untouched.
+- the latent rope/fp4Store block is the first reader of rd.lat in the same region; it is untouched and runs strictly after the join.
+- the indexer's q-side (ropeHeads(iq), fp4QdP2, rowmmWts(rd.x)), the L2 prefetch, mark(.a_q), and the TF_DS_KV_SHARD q_sent RDMA block: all read only x / qa / iq / rd.x (never rd.lat, rd.kvg, rd.sg, rd.lat2, cs.comp_codes, cs.idx_codes), so they stay where they are; they are the overlap the fork buys.
+- everything that DOES read the chain's outputs - idx_wk's grouped + rmsnorm + ropeHeads + fp4Store, the latent rope + fp4Store, the indexer select block (iotaVis / indexKeys / topkSelect / indexScore, reading cs.idx_codes via the indexer's IndexK and rd.lat via the idx_k path), the candidate-pool ops, comp = .fp4{cs.comp_codes} and the sparse attention after it - comes after the join exactly as before, unchanged.
+- the chain for a layer with no compressor does not fork (has_comp false; no cs_out; the join site is untouched).
+
+Placement: the fork is one layer's worth of independent launches; the join is enqueued at the same point the chain used to launch, before anything reads its output. The fork and the join are inside one stretch (attention() for one layer runs within one stretch), so CUDA-graph capture (TF_DS_GRAPHS=1) spans both, with the same event-record/wait mechanism the mixes' side stream (useSide/joinSide) and the prefetch (usePrefetch/joinPrefetch) already use under capture - no cupGraphAddEventNode fiddling. Graph/capture interplay is constructed from that precedent, not observed on the pair.
+
+The Sinkhorn side stream is untouched. The compressor's stream is its own (cs_fork/cs_join, waiting only on cs_fork) and shares nothing with rd.side/rd.join; the Sinkhorn path is byte-identical with the switch on or off. If the Sinkhorn side stream is in use, the compressor's stream queues behind nothing but cs_fork.
+
+PhaseTimer marks the main stream; the chain's GPU time lands on no phase (the forked launches are not between two main-stream marks) and `rd.launches` will not count them either. With the switch on, the layer's phase profile shows its sections minus the compressor's time. Documented here because it is a profile-reading difference, not a correctness one: no one should read a smaller a_q/a_idx window as "the compressor got faster".
+
+Bits identical: the fork is a reorder of independent launches (the chain needs only what the grouped attn_in linears produced; nothing in the window between the fork and the join reads the chain's outputs; the join orders every later read after the chain). exact.py must stay IDENTICAL with the switch on; if it does not, the fork is wrong and this does not ship. Gates on the pair, not run on this host (host-only patch): exact.py IDENTICAL; then tf-dsv41-lanes --profile / the served process's TF_DS_ROUND_PROFILE /metrics line (0123) - the layer's sections should show the compressor's time gone from the main stream's a_q window (unchanged total acceptance); check /metrics for the profile's presence.
+
+Tests (host): zig build test (this host's flaky big binaries reported one phantom "failed command" on the first run; that binary passes standalone - 408/408 - and every .zig-cache/o test binary passes standalone on re-run; second full run passed clean). Type-check/build: zig build install native -Dfatbins=/home/colum/.cache/tf-dummy-fatbins succeeds (binaries rebuilt). Not run here: any pair, any smoke, exact.py, any GPU. Unverified on the pair: the bytes claim (it rests on the launch-order reading above, not on a run), and the graphs-capture interplay (constructed from the useSide/usePrefetch precedent, not captured or replayed here).
+
+Host judgement calls: ONE shared helper (compressorChain) instead of duplicated chain code - one copy, selected by a bool, so the forked and unforked paths cannot drift; eager stream/event creation at Round.init rather than a lazy first fork (device resources bought once, before any capture, and only when the switch is on; env read zero times per round); dropCompress() added (events then stream, mirroring dropPrefetch/dropShard) next to the dropSide/dropPrefetch calls in Model.close and at the three layer_main.zig driver epilogues; dropCompress takes no Engine (dropPrefetch/dropShard's shape). No .cu change; no other env parsing; the only native.zig change is the one purpose-comment line.
+
+Patches: this is 0125 in the decode-step-structure series.
+
+base: series-0119 (TF_REF fbbc971 + zig/patches 0001-0122) + 0123 + 0124
+---
+ zig/src/families/dsv41/layer_main.zig |  3 +
+ zig/src/families/dsv41/model.zig      |  1 +
+ zig/src/families/dsv41/native.zig     |  1 +
+ zig/src/families/dsv41/round.zig      | 97 +++++++++++++++++++++++----
+ 4 files changed, 89 insertions(+), 13 deletions(-)
+
+diff --git a/zig/src/families/dsv41/layer_main.zig b/zig/src/families/dsv41/layer_main.zig
+index 4b1fb8f..ab53303 100644
+--- a/zig/src/families/dsv41/layer_main.zig
++++ b/zig/src/families/dsv41/layer_main.zig
+@@ -676,6 +676,7 @@ fn runRounds(run: *Run, eng: *const prompt.Engine, ch: *prompt.Chunk, caches: *c
+     defer rd.dropSide(eng);
+     if (prefetch_on) try rd.usePrefetch(eng);
+     defer rd.dropPrefetch();
++    defer rd.dropCompress();
+     var targets: [R_max]usize = undefined;
+     targets[0] = try argmax(run, ch.head_g, vocab); // greedy from the prompt's logits
+     var prev_ids: [R_max]i64 = undefined;
+@@ -947,6 +948,7 @@ fn runLight(run: *Run, eng: *const prompt.Engine, ch: *prompt.Chunk, caches: *co
+     defer rd.dropSide(eng);
+     if (prefetch_on) try rd.usePrefetch(eng);
+     defer rd.dropPrefetch();
++    defer rd.dropCompress();
+     const seq = try a.alloc(i32, tokens + 16);
+     const host_pos = try a.alloc(i64, chunk_rows);
+     var prompts: std.ArrayList([]const i32) = .empty; // the earlier requests' prompts (kept prompts' prefixes)
+@@ -1093,6 +1095,7 @@ fn runDrafted(run: *Run, eng: *const prompt.Engine, ch: *prompt.Chunk, caches: *
+     defer rd.dropSide(eng);
+     if (prefetch_on) try rd.usePrefetch(eng);
+     defer rd.dropPrefetch();
++    defer rd.dropCompress();
+     var pool = try draft_mod.Pool.init(eng, arena, draft_mod.default_streams);
+     var dr = try draft_mod.Drafter.init(eng, arena, sp);
+     var streams: std.ArrayList(DStream) = .empty;
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 94c8221..efc757a 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -736,6 +736,7 @@ pub const Model = struct {
+         }
+         m.rd.dropSide(&m.eng);
+         m.rd.dropPrefetch();
++        m.rd.dropCompress();
+         m.rd.dropShard();
+         if (m.aio) |x| x.deinit();
+         if (m.paio) |x| x.deinit();
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index a898115..21cfff9 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -40,6 +40,7 @@
+ //!                                               --graph-cap, the same number on both ranks
+ //!   TF_DS_HC_SIDE=1                             the mixes' side work on a stream of its own
+ //!   TF_DS_L2_PREFETCH=1                         the paced L2 prefetch of the next kernels' weights
++//!   TF_DS_COMPRESS_SIDE=1                       the compressor chain (ratio 1/2) on a stream of its own (set alike on both ranks), forked behind the input linears and joined before the indexer select block; a reorder of independent launches, so the bytes are the same; off: nothing changes
+ //!   TF_DS_ENGRAM_AIO=1                          a round's Engram reads by Linux AIO on O_DIRECT
+ //!   TF_DS_PREFILL_SLICE=<layers>                (rank 0; with TF_DS_PREFILL_INTERLEAVE_MS) a prompt chunk runs this many layers
+ //!                                               (1 .. 40) at a time and one decode round runs between slices, so the decoding
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 6407003..6d2c1f6 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -206,6 +206,12 @@ pub const Round = struct {
+     pf_fork: ?cuda.Event = null,
+     pf_join: ?cuda.Event = null,
+     pf_out: bool = false,
++    // the compressor chain's own stream (TF_DS_COMPRESS_SIDE): forked behind a_in, joined where the chain launches
++    cs: ?cuda.Stream = null,
++    cs_fork: ?cuda.Event = null,
++    cs_join: ?cuda.Event = null,
++    cs_out: bool = false,
++    compress_side: bool = false, // TF_DS_COMPRESS_SIDE (read at Round.init; set alike on both ranks)
+     timer: ?*PhaseTimer = null, // eager rounds' GPU time by phase (a profile)
+     // a profile's GPU clocks a round (Model.useClock): at the forward's start, then before and after each stretch
+     // a profile's kernel launches by the phase they end in (eager rounds: in a graph only its capture launches)
+@@ -429,6 +435,16 @@ pub const Round = struct {
+         rd.pf_fork = null;
+         rd.pf_join = null;
+         rd.pf_out = false;
++        rd.cs = null;
++        rd.cs_fork = null;
++        rd.cs_join = null;
++        rd.cs_out = false;
++        rd.compress_side = false;
++        if (getenv("TF_DS_COMPRESS_SIDE")) |v| if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "on")) {
++            // the pair is made here, once, like the rest of the round's on open: a round never buys device resources
++            rd.compress_side = true;
++            try rd.useCompress(e);
++        };
+         rd.timer = null;
+         return rd;
+     }
+@@ -634,6 +650,29 @@ pub const Round = struct {
+         rd.pf = null;
+     }
+ 
++    /// TF_DS_COMPRESS_SIDE: the compressor chain's stream and events, made once at Round.init (the switch is read there).
++    /// The chain is forked behind a_in and joined where it is launched today, before anything reads its output: a
++    /// reorder of independent launches, so the bytes are the same. A stream of its own (not the mixes' side stream:
++    /// that protocol is the Sinkhorn's and is untouched), waiting only on cs_fork.
++    pub fn useCompress(rd: *Round, e: *const Engine) !void {
++        if (rd.cs != null) return;
++        var s = try cuda.Stream.init(e.d, true);
++        errdefer s.deinit();
++        rd.cs_fork = try cuda.Event.init(e.d, false);
++        rd.cs_join = try cuda.Event.init(e.d, false);
++        rd.cs = s;
++    }
++
++    pub fn dropCompress(rd: *Round) void {
++        if (rd.cs_fork) |*x| x.deinit();
++        if (rd.cs_join) |*x| x.deinit();
++        if (rd.cs) |*s| s.deinit();
++        rd.cs_fork = null;
++        rd.cs_join = null;
++        rd.cs = null;
++        rd.cs_out = false;
++    }
++
+     /// These ranges touched into L2 behind the work queued so far, on the prefetch stream.
+     /// One paced L2 prefetch launch on its stream: `ranges` in order, the last one cut where the launch reaches `budget`
+     /// bytes (the served launches move at most 16 MiB, 8 MiB behind wo_b).
+@@ -822,6 +861,35 @@ fn ropeOf(e: *const Engine, lay: weights.Layer) prompt.Rope {
+     return if (lay.ratio != 0) e.compressed else e.plain;
+ }
+ 
++/// The compressor's chain (a compressed layer): the RMSNorm alone at ratio 1; at ratio 2 the scatter of the rows
++/// into the group's raw slots, the memset of ch.invalid, the double gather back, compress2's
++/// weighted sum to bf16, the RMSNorm. One copy of the launches, run on `t`/`s`: the unforked path passes the main
++/// stream, the forked (TF_DS_COMPRESS_SIDE) path the chain's own (every launch rides `s`: the kit's through the
++/// stream-carrying Tri `t`, the ops and the memset through `s` directly, so the event ordering is total).
++fn compressorChain(e: *const Engine, rd: *const Round, ch: *const Chunk, t: tri.Tri, s: cuda.Stream, caches: *const Caches, li: usize, ratio: usize) !void {
++    const lay = e.w.layers[li];
++    const c = e.c;
++    const hd = c.head_dim;
++    const R = rd.r;
++    if (ratio == 1) {
++        try tri_basic.rmsnorm(t, rd.ckv, hd, lay.comp_norm, rd.lat, hd, c.eps, R, hd);
++        return;
++    }
++    if (ratio == 2) {
++        // rk[rslot] = kv, rs[rslot] = score; the group's two rows back (rk[gi], rs[gi]); the pair's softmax-
++        // weighted sum to bf16 (torch's ops: exact.compress2's bytes), then the RMSNorm (Triton's)
++        try e.ops.scatterRows(s, rd.ckv, hd * 4, rd.g(.rslot), caches.raw_kv[li], hd * 4, hd * 4, R);
++        try e.ops.scatterRows(s, rd.cgate, hd * 4, rd.g(.rslot), caches.raw_score[li], hd * 4, hd * 4, R);
++        try e.d.check(e.d.api.cuMemsetD8Async(ch.invalid, 0, 4, s.handle), "cuMemsetD8Async");
++        try e.ops.gatherRows(s, caches.raw_kv[li], caches.slots * raw_rows, rd.g(.gi), rd.kvg, hd * 4, 2 * R, ch.invalid);
++        try e.ops.gatherRows(s, caches.raw_score[li], caches.slots * raw_rows, rd.g(.gi), rd.sg, hd * 4, 2 * R, ch.invalid);
++        try e.exact.compress2(s, rd.kvg, rd.sg, rd.lat2, R, hd);
++        try tri_basic.rmsnorm(t, rd.lat2, hd, lay.comp_norm, rd.lat, hd, c.eps, R, hd);
++        return;
++    }
++    return notPorted(@src());
++}
++
+ /// _attention2 with _kv_idx (kv_done: q_kv_norm wrote the window KV), the served switches, xh none (hc_rot off): the
+ /// layer's attention partial pa [R, D] fp32 from its mixed rows x.
+ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches, rings: []const u64, sh: *prompt.Shared, li: usize) !void {
+@@ -875,6 +943,17 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+         try prompt.grouped(e, ch, R, ls[0..n], xs[0..n], ldxs[0..n], outs[0..n], lds[0..n], dts[0..n]);
+     }
+     try rd.mark(e, .a_in);
++    // TF_DS_COMPRESS_SIDE: the layer's compressor chain forks onto the stream of its own (joined where the chain
++    // launches today, before anything reads its output). The chain's launches and their order are the same, so a
++    // reorder of independent launches; everything it writes is read only after the join.
++    if (rd.compress_side and has_comp) {
++        try rd.cs_fork.?.record(e.s);
++        try rd.cs.?.wait(rd.cs_fork.?);
++        const t2: tri.Tri = .{ .set = t.set, .stream = rd.cs.?, .pdl = t.pdl, .log = t.log, .kit = t.kit };
++        try compressorChain(e, rd, ch, t2, rd.cs.?, cs, li, ratio);
++        try rd.cs_join.?.record(rd.cs.?);
++        rd.cs_out = true;
++    }
+     // the indexer's top-k takes every entry it scans (short contexts): its selection needs no scores
+     const has_idx = ratio != 0 and lay.idx_wq_b != null;
+     const nb: usize = if (ratio != 0) rd.bucket / ratio else 0;
+@@ -932,19 +1011,11 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+         const cb_k: Glue = if (ratio == 1) .cbase1 else .cbase2;
+         cbase = rd.g(cb_k);
+         if (lay.comp_wkv != null) {
+-            if (ratio == 1) {
+-                try tri_basic.rmsnorm(t, rd.ckv, hd, lay.comp_norm, rd.lat, hd, c.eps, R, hd);
+-            } else if (ratio == 2) {
+-                // rk[rslot] = kv, rs[rslot] = score; the group's two rows back (rk[gi], rs[gi]); the pair's softmax-
+-                // weighted sum to bf16 (torch's ops: exact.compress2's bytes), then the RMSNorm (Triton's)
+-                try e.ops.scatterRows(e.s, rd.ckv, hd * 4, rd.g(.rslot), cs.raw_kv[li], hd * 4, hd * 4, R);
+-                try e.ops.scatterRows(e.s, rd.cgate, hd * 4, rd.g(.rslot), cs.raw_score[li], hd * 4, hd * 4, R);
+-                try e.d.check(e.d.api.cuMemsetD8Async(ch.invalid, 0, 4, e.s.handle), "cuMemsetD8Async");
+-                try e.ops.gatherRows(e.s, cs.raw_kv[li], cs.slots * raw_rows, rd.g(.gi), rd.kvg, hd * 4, 2 * R, ch.invalid);
+-                try e.ops.gatherRows(e.s, cs.raw_score[li], cs.slots * raw_rows, rd.g(.gi), rd.sg, hd * 4, 2 * R, ch.invalid);
+-                try e.exact.compress2(e.s, rd.kvg, rd.sg, rd.lat2, R, hd);
+-                try tri_basic.rmsnorm(t, rd.lat2, hd, lay.comp_norm, rd.lat, hd, c.eps, R, hd);
+-            } else return notPorted(@src());
++            if (rd.cs_out) {
++                // the chain ran on its own stream at the fork; the main stream waits here, before anything reads it
++                try e.s.wait(rd.cs_join.?);
++                rd.cs_out = false;
++            } else try compressorChain(e, rd, ch, t, e.s, cs, li, ratio);
+             sh.kv_layer = li;
+             const ctarget = rd.g(if (ratio == 1) .ctarget1 else .ctarget2);
+             const gpos = rd.g(if (ratio == 1) .gpos1 else .gpos2);
+-- 
+2.56.0
+

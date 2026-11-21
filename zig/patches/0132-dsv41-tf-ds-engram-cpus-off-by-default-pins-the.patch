@@ -1,0 +1,165 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 45a83ff69e02..c3a1cd172156)
+# dsv41: TF_DS_ENGRAM_CPUS (off by default) pins the Engram host threads to a CPU spec parsed at model open
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/engram_io.zig b/zig/src/families/dsv41/engram_io.zig
+index a074daca5ee12dde225203de0505710c99461cfe..0dfee42936a446fc4f25ac55a19998de0ece119c 100644
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -22,6 +22,62 @@ pub const Table = struct { id: u32 = 0, fd_w: std.c.fd_t, base_w: u64, row_w: us
+ /// decoded as FP8 E4M3 and the scales as E8M0; a BF16 or F32 table would decode wrong without a word).
+ pub const OpenOptions = struct { trim: bool = false, map_scales: bool = false, strict: bool = false };
+ 
++/// TF_DS_ENGRAM_CPUS: the CPUs the Engram host threads run on. Empty (unset) = no affinity call anywhere.
++pub const CpuSet = struct {
++    set: std.os.linux.cpu_set_t = @splat(0),
++    len: usize = 0, // CPUs in the set
++
++    pub fn has(self: *const CpuSet, cpu: usize) bool {
++        return self.set[cpu / @bitSizeOf(usize)] & (@as(usize, 1) << @intCast(cpu % @bitSizeOf(usize))) != 0;
++    }
++};
++
++const max_cpus = @bitSizeOf(std.os.linux.cpu_set_t);
++
++fn parseCpu(s: []const u8) !usize {
++    if (s.len == 0) return error.InvalidCpus;
++    return std.fmt.parseInt(usize, s, 10) catch error.InvalidCpus;
++}
++
++/// a-b ranges and/or comma lists ("10-14", "10,12,14"); every CPU below `cpu_count` (and the mask's size). An inverted
++/// range or a CPU past either is refused: a mis-set affinity must not run on another core.
++pub fn parseCpus(text: []const u8, cpu_count: usize) !CpuSet {
++    var out: CpuSet = .{};
++    var it = std.mem.splitScalar(u8, text, ',');
++    while (it.next()) |part| {
++        var lo: usize = undefined;
++        var hi: usize = undefined;
++        if (std.mem.indexOfScalar(u8, part, '-')) |d| {
++            if (std.mem.indexOfScalarPos(u8, part, d + 1, '-') != null) return error.InvalidCpus;
++            lo = try parseCpu(part[0..d]);
++            hi = try parseCpu(part[d + 1 ..]);
++        } else {
++            lo = try parseCpu(part);
++            hi = lo;
++        }
++        if (lo > hi or hi >= cpu_count or hi >= max_cpus) return error.InvalidCpus;
++        for (lo..hi + 1) |c| {
++            out.set[c / @bitSizeOf(usize)] |= @as(usize, 1) << @intCast(c % @bitSizeOf(usize));
++            out.len += 1;
++        }
++    }
++    if (out.len == 0) return error.InvalidCpus;
++    return out;
++}
++
++/// The parsed TF_DS_ENGRAM_CPUS (empty = unset); model open sets it once, before any Engram thread starts.
++var engram_cpus: CpuSet = .{};
++
++pub fn setCpus(text: ?[]const u8, cpu_count: usize) !void {
++    engram_cpus = if (text) |t| try parseCpus(t, cpu_count) else .{};
++}
++
++/// The calling thread on the Engram CPUs, when TF_DS_ENGRAM_CPUS is set; no syscall otherwise and off Linux.
++pub fn pin() void {
++    if (engram_cpus.len == 0 or comptime builtin.os.tag != .linux) return;
++    std.os.linux.sched_setaffinity(0, &engram_cpus.set) catch {};
++}
++
+ pub const Tables = struct {
+     gpa: std.mem.Allocator,
+     fds: std.ArrayList(std.c.fd_t) = .empty,
+@@ -148,6 +204,7 @@ pub const Tables = struct {
+     }
+ 
+     fn warmWalk(gpa: std.mem.Allocator, maps: []const []align(std.heap.page_size_min) const u8) void {
++        pin();
+         defer gpa.free(maps);
+         for (maps) |m| {
+             var at: usize = 0;
+@@ -418,6 +475,7 @@ pub const Pool = struct {
+     }
+ 
+     fn loop(p: *Pool) void {
++        pin();
+         var seen: u64 = 0;
+         while (true) {
+             p.mutex.lockUncancelable(p.io);
+@@ -556,6 +614,7 @@ pub const DecodePool = struct {
+     }
+ 
+     fn loop(p: *DecodePool) void {
++        pin();
+         var seen: u64 = 0;
+         while (true) {
+             p.mutex.lockUncancelable(p.io);
+@@ -722,6 +781,20 @@ test "DecodePool: the same rows decode the same at each pool size" {
+     }
+ }
+ 
++test "TF_DS_ENGRAM_CPUS: ranges and lists parse, an inverted range or a CPU past the count is refused" {
++    const a = try parseCpus("10-14", 16);
++    try std.testing.expectEqual(@as(usize, 5), a.len);
++    try std.testing.expect(a.has(10) and a.has(14) and !a.has(9) and !a.has(15));
++    const b = try parseCpus("10,12,14", 16);
++    try std.testing.expectEqual(@as(usize, 3), b.len);
++    try std.testing.expect(b.has(10) and b.has(12) and b.has(14) and !b.has(11));
++    try std.testing.expectEqual(@as(usize, 3), (try parseCpus("1,3-4", 16)).len);
++    try std.testing.expectError(error.InvalidCpus, parseCpus("14-10", 16));
++    try std.testing.expectError(error.InvalidCpus, parseCpus("16", 16));
++    try std.testing.expectError(error.InvalidCpus, parseCpus("10-20", 16));
++    for ([_][]const u8{ "", "x", "1-", "-3", "1,,2", "1-2-3", " 1", "1 " }) |v| try std.testing.expectError(error.InvalidCpus, parseCpus(v, 16));
++}
++
+ test "TF_DS_ENGRAM_ROWCACHE_MB: unset or 0 is off, N is N MiB" {
+     try std.testing.expect(RowCache.budgetOf(null) == null);
+     try std.testing.expect(RowCache.budgetOf("0") == null);
+diff --git a/zig/src/families/dsv41/engram_lead.zig b/zig/src/families/dsv41/engram_lead.zig
+index c34d710d3b0e0685f6bca40b105d3d3351eca747..72d2be2dae1031aa53db3ad5a16b0ac8bf75e247 100644
+--- a/zig/src/families/dsv41/engram_lead.zig
++++ b/zig/src/families/dsv41/engram_lead.zig
+@@ -82,6 +82,7 @@ pub const Lead = struct {
+ 
+ /// Lead's reader of layer j: the chunk's rows into ahead_rows[j] as engramRows reads them; errors land in lead_err[j].
+ fn read(eh: *EngramHost, c: *const Config, seq: []const i32, start: usize, n: usize, j: usize) void {
++    engram_io.pin();
+     read1(eh, c, seq, start, n, j) catch |err| {
+         eh.lead_err[j] = prompt.rankFault(err);
+     };
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 2a33d2ef60fb07c186941deed106a263beaf7d7b..26c92d638c416a6d31b7b545231a3f71b1821424 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -490,6 +490,13 @@ pub const Model = struct {
+         errdefer if (m.paio2) |x| x.deinit();
+         // Engram on the host: the compressed token map, the multipliers, the tables and 64 readers
+         if (o.engram_dir) |edir| {
++            // TF_DS_ENGRAM_CPUS: the Engram host threads' CPUs, parsed once here; unset leaves every thread's affinity alone
++            const cpus_env = if (std.c.getenv("TF_DS_ENGRAM_CPUS")) |v| std.mem.span(v) else null;
++            const ncpu = std.Thread.getCpuCount() catch 1;
++            engram_io.setCpus(cpus_env, ncpu) catch {
++                std.log.err("dsv41: TF_DS_ENGRAM_CPUS={s}: expected a-b ranges and/or comma lists of CPUs below {d}", .{ cpus_env.?, ncpu });
++                return error.InvalidEngramCpus;
++            };
+             const map_text = try std.Io.Dir.cwd().readFileAlloc(io, o.token_map orelse return error.NoTokenMap, a, .limited(1 << 26));
+             const map = try std.json.parseFromSliceLeaky([]i32, a, map_text, .{});
+             const EngramJson = struct { multipliers: [][]i64 };
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 9ab52c975277a0e0d905b385e483f4c6067403dc..c071b00ee1f3f0402be5f12c410832d3d9eced70 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1931,6 +1931,7 @@ fn cachedRow(rc: *engram_io.RowCache, t: engram_io.Table, id: i64, w: []u8, s: [
+ /// before it: the n-grams hashed (j 0: every layer's at once), the rows read and decoded into ahead_rows[j], exactly
+ /// as engramApply would at the layer. Errors land in ahead_err.
+ pub fn engramReadAhead(eh: *EngramHost, c: *const Config, seq: []const i32, start: usize, n: usize, j: usize) void {
++    engram_io.pin();
+     engramAhead1(eh, c, seq, start, n, j) catch |err| {
+         eh.ahead_err = rankFault(err);
+     };
+@@ -1938,6 +1939,7 @@ pub fn engramReadAhead(eh: *EngramHost, c: *const Config, seq: []const i32, star
+ 
+ /// The next chunk's rows of both Engram layers (fillChunk starts it once this chunk's last Engram layer is applied).
+ pub fn engramReadAheadAll(eh: *EngramHost, c: *const Config, seq: []const i32, start: usize, n: usize) void {
++    engram_io.pin();
+     for (0..@min(2, c.engram_layers.slice().len)) |j| {
+         engramAhead1(eh, c, seq, start, n, j) catch |err| {
+             eh.ahead_err = rankFault(err);

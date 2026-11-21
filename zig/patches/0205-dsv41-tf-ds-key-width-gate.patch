@@ -1,0 +1,55 @@
+diff --git a/zig/src/families/dsv41/rope_store.zig b/zig/src/families/dsv41/rope_store.zig
+index 97df2d9..2812979 100644
+--- a/zig/src/families/dsv41/rope_store.zig
++++ b/zig/src/families/dsv41/rope_store.zig
+@@ -44,6 +44,17 @@ pub fn fuseOk(fused: bool, rows: usize, d: usize, rd: usize, heads: usize) bool
+     return fused and rows > 0 and isPow2(d) and d >= 128 and d <= 512 and isPow2(rd) and rd >= 2 and rd <= d and heads >= 1;
+ }
+ 
++/// The only width tf_ds_fused_idx_key_kernel can take: it normalizes with the kit's 128-wide `_rmsnorm`
++/// specialization, whose per-thread item count is `D / 128` computed from the *template* argument (128), not from the
++/// runtime `d`. A 256- or 512-wide row would normalize only its first 128 elements and pack the rest unnormalized, so
++/// the key arm has a width gate of its own rather than fuseOk's [128, 512] range.
++pub const key_width: usize = 128;
++
++/// The decode indexer key arm's gate: fuseOk's bounds and exactly `key_width`.
++pub fn keyFuseOk(fused: bool, rows: usize, d: usize, rd: usize, heads: usize) bool {
++    return d == key_width and fuseOk(fused, rows, d, rd, heads);
++}
++
+ /// The launch-shape invariant every full-mask shuffle in the five kernels rests on (dsv41_torch.cu's "WARP ALIGNMENT"
+ /// note): the participating lanes are whole warps of consecutive element indices, so no lane is inactive inside a
+ /// `__shfl_xor_sync(0xffffffffu, ...)` (undefined behaviour, not a wrong number). It holds because:
+@@ -304,6 +315,16 @@ test "e4m3ToFloat decodes the byte layout" {
+     try expectEqual(@as(f32, 0.75), e4m3ToFloat(0x34)); // exp 6 (2^-1), man 4 -> 1.5 * 0.5
+ }
+ 
++test "keyFuseOk: the key kernel takes 128 only, not fuseOk's whole width range" {
++    try std.testing.expect(keyFuseOk(true, 7, 128, 64, 1));
++    try std.testing.expect(!keyFuseOk(true, 7, 256, 64, 1)); // fuseOk accepts 256; the key kernel cannot
++    try std.testing.expect(fuseOk(true, 7, 256, 64, 1));
++    try std.testing.expect(!keyFuseOk(true, 7, 512, 64, 1));
++    try std.testing.expect(!keyFuseOk(false, 7, 128, 64, 1));
++    try std.testing.expect(!keyFuseOk(true, 0, 128, 64, 1));
++    try std.testing.expect(!keyFuseOk(true, 7, 128, 256, 1)); // rd past d is fuseOk's own refusal
++}
++
+ test "warpShapesOk: the served shapes hold, a warp-splitting shape does not" {
+     // the launchers' shapes: prompt key 128/64 at 32 lanes, decode key 128/64 at 128, the latents 512/64 at 256 and
+     // 128/64 at 64, the query 128/64 at 128
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 8e96d62..80a9de2 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1218,8 +1218,9 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+             if (lay.idx_wk) |iwk| {
+                 const id = c.index_head_dim;
+                 try prompt.grouped(e, ch, R, &.{iwk}, &.{rd.lat}, &.{hd}, &.{rd.ikp}, &.{id}, &.{.bf16});
+-                if (id == 128 and rope_store.fuseOk(e.ops.rope_store, R, id, rd_dim, 1)) {
+-                    // TF_DS_FUSED_ROPE_STORE: _rmsnorm + _rope_heads + _fp4_store in one launch
++                if (rope_store.keyFuseOk(e.ops.rope_store, R, id, rd_dim, 1)) {
++                    // TF_DS_FUSED_ROPE_STORE: _rmsnorm + _rope_heads + _fp4_store in one launch (the key kernel's own
++                    // width gate: its norm is the 128-wide kit specialization)
+                     try e.exact.idxKeyFused(t.stream, rd.ikp, id, lay.idx_k_norm, rope.cos, rope.sin, gpos, cs.idx_codes[li], cs.idx_scales[li], ctarget, R, id, rd_dim, c.eps);
+                 } else {
+                     try tri_basic.rmsnorm(t, rd.ikp, id, lay.idx_k_norm, rd.ik, id, c.eps, R, id);

@@ -1,0 +1,585 @@
+From 0000000000000000000000000000000000000112 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 01:04:22 +0000
+Subject: [PATCH] prompt cache: TF_DS_KEEP_PROTECT=1 supersedes a state only within its own
+ conversation
+
+Under fork fan-out victimBut freed a branch point first: ANY longer entry
+extending its tokens counted as superseding it, so the parent
+conversation re-prefilled its own prefix. And in dsv41's
+lanes.placeKept the placement victim was the first kept state in keep
+order, so the shared system-cut Snap (the oldest keep) was staled first
+under pool pressure and every follower re-prefilled the shared prefix.
+This patch covers both eviction layers of TF_DS_KEEP_PROTECT=1 (the
+prompt-cache supersede rule and the placement victims).
+
+With TF_DS_KEEP_PROTECT=1 (on only when exactly "1"; read where the store
+is built, native/cuda.zig openWith and dsv41's lanes_main, and in
+Lanes.init for placement) victimBut qualifies a superseder only when it
+continues the state's own conversation: the same conversation group when
+both carry one, else the lineage link (a descendant of its lineage
+qualifies), and where neither link identifies the relation it counts as
+before -- protection is never claimed on guesswork. Snap gains a shared
+bit set through the prompt cache's new Snapshots.share vtable hook
+(keepWith's shared paths: kept shared or promoted, and a restored shared
+state at adopt, whose entry init marks the family copy too; GLM/flashnext
+keep the null default), and placeKept takes a snap keptOver counts as
+superseded first (any overlapping snap on a different base, or a longer
+one on its own base), then the oldest non-shared snap, then the oldest
+shared one. TF_DS_KEEP_PROTECT joins rank_identity's Features named
+"keep_protect=1;" only when on (read in native.zig's rankExchange like
+edit_mark), so an off pair's string is unchanged and a pair that
+disagrees is refused at the hello.
+
+Switch unset: victimBut's supersede formula and placeKept's
+first-in-keep-order victim are behaviour-identical on the off path (one
+inert Snap.shared write; read only under the switch); the shared and
+skip exemptions and the placement candidate filters (non-stale,
+non-loading, not source, non-clashing) are untouched, and no kernel
+shapes change. Restore- and reserve-driven evictions (victimBut's call
+sites without a conversation identity) pass no identity and keep base's
+unprotected order.
+
+Tests: zig build test and zig/tests/server/zig_test.sh pass; the patch's
+own tests: prompt_cache_test.zig's same-group supersede first,
+cross-group protection of the branch point, base order with the switch
+unset and the lineage-link cases, lanes.zig's placeKept victims
+(non-shared snaps before a shared one, the covered snap first, base order
+unset), prompt_cache_tier_test.zig's restored shared state marking its
+family copy at adopt, rank_identity.zig's keep_protect feature-string
+shapes, and keepProtect's "1"-only parse. Not run on a pair.
+---
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+index a236fe9d..d1677d2e 100644
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -41,6 +41,9 @@ pub const Snapshots = struct {
+         /// dsv41 hands Lanes.usable here with its tier (snaps list membership, `stale`, its grid and window).
+         /// Lookups pass the rest over before comparing lengths, so a stale long state never shadows a usable one.
+         usable: ?*const fn (ptr: *anyopaque, saved: Saved, len: u32) bool = null,
++        /// `saved` became a shared prefix (kept shared or promoted): the family marks it (dsv41: Snap.shared), so
++        /// placement holds it longest (TF_DS_KEEP_PROTECT=1).
++        share: ?*const fn (ptr: *anyopaque, saved: Saved) void = null,
+     };
+ };
+ 
+@@ -121,6 +124,18 @@ test editMark {
+     for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!editMark(v));
+ }
+ 
++/// TF_DS_KEEP_PROTECT's one reading (the prompt cache's eviction and dsv41's placement alike): on only when it is
++/// exactly "1".
++pub fn keepProtect(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse return false, "1");
++}
++
++test keepProtect {
++    try std.testing.expect(!keepProtect(null) and !keepProtect("0") and !keepProtect(""));
++    try std.testing.expect(keepProtect("1"));
++    try std.testing.expect(!keepProtect(" 1") and !keepProtect("1 ")); // (exact, as imageCacheOn reads "0")
++}
++
+ /// Cache ids at or above this are pictures' (`pictureId`); a vocabulary id is always below it.
+ pub const picture_ids: u32 = 0x8000_0000;
+ 
+@@ -416,6 +431,9 @@ pub const Rules = struct {
+     grid: u32 = 0,
+     /// The rows a resumed pass replays at its end (dsv41: the window): a state is usable only this far from the end.
+     window: u32 = 0,
++    /// TF_DS_KEEP_PROTECT=1: a longer state counts as superseding only within its own conversation (`related`), so a
++    /// fork's states never free their branch point first.
++    keep_protect: bool = false,
+ 
+     /// The native rule (Lanes.usable): 0 < at < len, on the grid, at most len - window, its lookahead inside the prompt.
+     pub fn eligible(r: Rules, at: u32, len: usize) bool {
+@@ -563,7 +581,7 @@ pub const Store = struct {
+                 f(s.family.ptr, s.budget -| s.held -| s.restoring_bytes -| bytes);
+                 if (s.spare() < free_) continue;
+             };
+-            s.remove(s.victimBut(skip, prompt) orelse return false);
++            s.remove(s.victimBut(skip, prompt, 0, &.{}) orelse return false);
+             s.counts.evicted += 1;
+         }
+     }
+@@ -765,6 +783,7 @@ pub const Store = struct {
+         };
+         s.clock += 1;
+         e.* = .{ .tokens = tokens, .at = r.point.at, .saved = saved, .bytes = bytes, .born = @intCast(r.key.len), .used = s.clock, .last = last, .shared = r.point.shared, .group = r.point.group, .point = r.point.id, .restored = true, .lineage = lin };
++        if (r.point.shared) if (s.family.vtable.share) |f| f(s.family.ptr, saved); // restored shared: the family's copy marked
+         s.entries.append(s.gpa, e) catch {
+             e.point = null; // the point stays the tier's; only the memory copy goes
+             s.free(e);
+@@ -879,7 +898,7 @@ pub const Store = struct {
+         var need: u64 = 0;
+         for (marks_) |at| need += s.family.vtable.bytes(s.family.ptr, at);
+         while (s.held + s.restoring_bytes + need > s.budget) {
+-            const i = s.victimBut(from, prompt) orelse return;
++            const i = s.victimBut(from, prompt, 0, &.{}) orelse return;
+             s.remove(i);
+             s.counts.evicted += 1;
+         }
+@@ -976,10 +995,13 @@ pub const Store = struct {
+         const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
+         for (s.entries.items) |e| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n])) {
+             e.used = s.clock; // the same state again: no copy
+-            if (shared and !e.shared) if (e.point) |p| if (s.tier) |t| if (t.vtable.share) |f| { // now a shared prefix, on disk too
+-                f(t.ptr, p);
+-                s.stats.shared_promoted += 1;
+-            };
++            if (shared and !e.shared) { // now a shared prefix: the family's copy marked, and on disk
++                if (s.family.vtable.share) |f| f(s.family.ptr, e.saved);
++                if (e.point) |p| if (s.tier) |t| if (t.vtable.share) |f| {
++                    f(t.ptr, p);
++                    s.stats.shared_promoted += 1;
++                };
++            }
+             e.shared = e.shared or shared;
+             if (e.group == 0) e.group = info.group;
+             return true;
+@@ -998,7 +1020,7 @@ pub const Store = struct {
+                 if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| s.restoring_bytes -| bytes); // spare that cannot take this state goes before any state
+                 if (s.spare() < free_) continue;
+             }
+-            s.remove(s.victimBut(null, prompt).?); // its storage may come back spare and take this state
++            s.remove(s.victimBut(null, prompt, info.group, info.lineage).?); // its storage may come back spare and take this state
+             s.counts.evicted += 1;
+         }
+         if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.restoring_bytes -| bytes);
+@@ -1035,6 +1057,7 @@ pub const Store = struct {
+         };
+         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
+         e.* = .{ .tokens = tokens, .at = at, .saved = saved, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last, .shared = shared, .group = info.group, .images = info.images, .lineage = lin };
++        if (shared) if (s.family.vtable.share) |f| f(s.family.ptr, saved); // kept shared: the family's copy marked
+         s.entries.append(s.gpa, e) catch {
+             s.free(e);
+             return s.fail(at, error.OutOfMemory);
+@@ -1113,14 +1136,27 @@ pub const Store = struct {
+         return false;
+     }
+ 
++    /// Whether a superseder (a later entry's, or the keeping pass's `group` and `lineage`) continues `e`'s own
++    /// conversation, so `e` has moved on. With keep_protect (TF_DS_KEEP_PROTECT=1): the groups when both carry a
++    /// conversation, else the lineage link when both carry one (a descendant of `e`'s lineage qualifies); where
++    /// neither link identifies the relation it counts as before (protection is never claimed on guesswork).
++    fn related(s: *const Store, e: *const Entry, group: u64, lineage: []const Fork) bool {
++        if (!s.rules.keep_protect) return true;
++        if (e.group != 0 and group != 0) return e.group == group;
++        if (e.lineage.len > 0 and lineage.len > 0) return for (e.lineage, 0..) |f, i| {
++            if (i >= lineage.len or lineage[i].name != f.name or lineage[i].at != f.at) break false;
++        } else true;
++        return true;
++    }
++
+     /// The entry to free first, never `skip` (a pass's resume): one a later prompt extends (never a shared cut), oldest first; else the oldest.
+-    fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32) ?usize {
++    fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32, group: u64, lineage: []const Fork) ?usize {
+         var best: ?usize = null;
+         for (s.entries.items, 0..) |e, i| {
+             if (e.shared or e == skip) continue; // a shared cut is evicted only as the least recently used
+-            const now = prompt.len > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens); // this prompt extends it
++            const now = prompt.len > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens) and s.related(e, group, lineage); // this prompt extends it
+             const moved_on = now or for (s.entries.items) |o| {
+-                if (o != e and o.born > e.born and o.tokens.len > e.tokens.len and std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) break true;
++                if (o != e and o.born > e.born and o.tokens.len > e.tokens.len and std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens) and s.related(e, o.group, o.lineage)) break true;
+             } else false;
+             if (moved_on and (best == null or e.used < s.entries.items[best.?].used)) best = i;
+         }
+diff --git a/zig/src/core/prompt_cache_test.zig b/zig/src/core/prompt_cache_test.zig
+index b80cf8ce..0cd6ac7b 100644
+--- a/zig/src/core/prompt_cache_test.zig
++++ b/zig/src/core/prompt_cache_test.zig
+@@ -262,6 +262,100 @@ test "eviction frees a conversation's superseded state first, then the oldest; a
+     try std.testing.expectEqual(s.entries.items.len, f.live);
+ }
+ 
++/// Keep `prompt`'s state at `at` with its conversation and lineage, as a pass would (the family stands at `at`).
++fn keepAs(s: *Store, f: *Fake, prompt: []const u32, at: u32, info: pc.KeepInfo) bool {
++    f.at = at;
++    return s.keepWith(prompt, at, null, &.{}, info);
++}
++
++/// Whether the store still holds `e`.
++fn holds(s: *Store, e: *pc.Entry) bool {
++    return std.mem.indexOfScalar(*pc.Entry, s.entries.items, e) != null;
++}
++
++test "TF_DS_KEEP_PROTECT=1: a branch point's own conversation moving on frees it first" {
++    const gpa = std.testing.allocator;
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0, .keep_protect = true }, 215); // fake bytes: 100 + at
++    defer s.deinit();
++    const p = [_]u32{ 1, 2, 3, 4, 9 };
++    try std.testing.expect(keepAs(&s, &f, &p, 4, .{ .group = 1 })); // 104
++    const turn = [_]u32{ 1, 2, 3, 4, 5, 5, 9 };
++    try std.testing.expect(keepAs(&s, &f, &turn, 6, .{ .group = 1 })); // 106: its own conversation's next turn
++    const parent, const grown = .{ s.entries.items[0], s.entries.items[1] };
++    parent.used = 100; // the branch point is the most recently used: only its own turn supersedes it
++    const x = [_]u32{ 8, 8, 8, 8, 8 };
++    try std.testing.expect(keepAs(&s, &f, &x, 5, .{})); // 105: room for one eviction only
++    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
++    try std.testing.expect(!holds(&s, parent)); // its own turn supersedes it: first to free
++    try std.testing.expect(holds(&s, grown));
++}
++
++test "TF_DS_KEEP_PROTECT=1: a cross-conversation fork's longer state leaves its branch point alone" {
++    const gpa = std.testing.allocator;
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0, .keep_protect = true }, 215);
++    defer s.deinit();
++    const p = [_]u32{ 1, 2, 3, 4, 9 };
++    try std.testing.expect(keepAs(&s, &f, &p, 4, .{ .group = 1 })); // 104
++    const fork = [_]u32{ 1, 2, 3, 4, 7, 7, 9 };
++    try std.testing.expect(keepAs(&s, &f, &fork, 6, .{ .group = 2 })); // 106: another conversation's fork
++    const parent, const forker = .{ s.entries.items[0], s.entries.items[1] };
++    parent.used = 100; // the branch point is the most recently used: the fork does not supersede it
++    const x = [_]u32{ 8, 8, 8, 8, 8 };
++    try std.testing.expect(keepAs(&s, &f, &x, 5, .{})); // 105: room for one eviction only
++    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
++    try std.testing.expect(holds(&s, parent)); // the fork goes as the least recently used
++    try std.testing.expect(!holds(&s, forker));
++    parent.used = 0; // and the plain least-recently-used path takes the branch point later
++    const y = [_]u32{ 6, 6, 6, 6, 6 };
++    try std.testing.expect(keepAs(&s, &f, &y, 4, .{}));
++    try std.testing.expect(!holds(&s, parent));
++}
++
++test "TF_DS_KEEP_PROTECT unset: any longer descendant makes its parent the first victim" {
++    const gpa = std.testing.allocator;
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 215);
++    defer s.deinit();
++    const p = [_]u32{ 1, 2, 3, 4, 9 };
++    try std.testing.expect(keepAs(&s, &f, &p, 4, .{ .group = 1 })); // 104
++    const fork = [_]u32{ 1, 2, 3, 4, 7, 7, 9 };
++    try std.testing.expect(keepAs(&s, &f, &fork, 6, .{ .group = 2 })); // 106
++    const parent, const forker = .{ s.entries.items[0], s.entries.items[1] };
++    parent.used = 100; // most recently used, and still the first victim: the fork counts as superseding
++    const x = [_]u32{ 8, 8, 8, 8, 8 };
++    try std.testing.expect(keepAs(&s, &f, &x, 5, .{})); // 105: room for one eviction only
++    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
++    try std.testing.expect(!holds(&s, parent));
++    try std.testing.expect(holds(&s, forker));
++}
++
++test "TF_DS_KEEP_PROTECT=1: the lineage link supersedes within one computation, and claims nothing without one" {
++    const gpa = std.testing.allocator;
++    const p = [_]u32{ 1, 2, 3, 4, 9 };
++    const x = [_]u32{ 8, 8, 8, 8, 8 };
++    const cases = [_]struct { lin: []const pc.Fork, other: []const pc.Fork, parent_goes: bool }{
++        .{ .lin = &.{.{ .name = 1, .at = 0 }}, .other = &.{.{ .name = 9, .at = 0 }}, .parent_goes = false }, // a fresh prefill: not its lineage
++        .{ .lin = &.{.{ .name = 1, .at = 0 }}, .other = &.{ .{ .name = 1, .at = 0 }, .{ .name = 2, .at = 4 } }, .parent_goes = true }, // a descendant qualifies
++        .{ .lin = &.{}, .other = &.{}, .parent_goes = true }, // neither link identifies the relation: base behaviour
++    };
++    for (cases) |k| {
++        var f: Fake = .{ .gpa = gpa };
++        var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0, .keep_protect = true }, 215);
++        defer s.deinit();
++        try std.testing.expect(keepAs(&s, &f, &p, 4, .{ .lineage = k.lin })); // 104
++        const long = [_]u32{ 1, 2, 3, 4, 7, 7, 9 };
++        try std.testing.expect(keepAs(&s, &f, &long, 6, .{ .lineage = k.other })); // 106, longer, born later
++        const parent, const longer = .{ s.entries.items[0], s.entries.items[1] };
++        parent.used = 100;
++        try std.testing.expect(keepAs(&s, &f, &x, 5, .{})); // 105: room for one eviction only
++        try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
++        try std.testing.expectEqual(k.parent_goes, !holds(&s, parent));
++        try std.testing.expectEqual(!k.parent_goes, !holds(&s, longer));
++    }
++}
++
+ test "a failed copy keeps nothing and a failed restore prefills from the start" {
+     const gpa = std.testing.allocator;
+     var arena: std.heap.ArenaAllocator = .init(gpa);
+diff --git a/zig/src/core/prompt_cache_tier_test.zig b/zig/src/core/prompt_cache_tier_test.zig
+index c7e22d7a..1cf58a43 100644
+--- a/zig/src/core/prompt_cache_tier_test.zig
++++ b/zig/src/core/prompt_cache_tier_test.zig
+@@ -14,12 +14,13 @@ const Sum = struct {
+     at: u32 = 0,
+     sum: u64 = 0,
+     live: usize = 0,
++    shared_marks: usize = 0, // the family's share hook fired (Snap.shared in dsv41)
+     stale: ?pc.Saved = null, // `usable` refuses this state
+ 
+     const State = struct { at: u32, sum: u64 };
+ 
+     fn snapshots(f: *Sum) pc.Snapshots {
+-        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .usable = usableFn } };
++        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .usable = usableFn, .share = shareFn } };
+     }
+     fn of(ptr: *anyopaque) *Sum {
+         return @ptrCast(@alignCast(ptr));
+@@ -47,6 +48,9 @@ const Sum = struct {
+     fn usableFn(ptr: *anyopaque, saved: pc.Saved, _: u32) bool {
+         return of(ptr).stale != saved;
+     }
++    fn shareFn(ptr: *anyopaque, _: pc.Saved) void {
++        of(ptr).shared_marks += 1;
++    }
+     /// The live state run on to `to` tokens of `prompt` (a fresh pass's arithmetic).
+     fn feed(f: *Sum, prompt: []const u32, to: u32) void {
+         for (prompt[f.at..to]) |t| f.sum = f.sum *% 31 +% t;
+@@ -98,6 +102,22 @@ fn settle(s: *Store, r: *pc.Restore) pc.Restored {
+     }
+ }
+ 
++test "a restored shared state's family copy is marked shared at adopt (placeKept's victim order)" {
++    var f: Sum = .{};
++    var tier: FakeTier = .{ .gpa = gpa, .codec = f.codec() };
++    defer tier.deinit();
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
++    defer s.deinit();
++    s.setTier(tier.tier(), 0);
++    const a = seq(40, 1);
++    _ = try tier.put(a[0..16], 16, std.mem.asBytes(&Sum.State{ .at = 16, .sum = Sum.fresh(&a, 16) }), 0, 3, true); // a shared point on disk
++    const p = s.probe(&a, &.{}).durable.?;
++    try std.testing.expect(p.shared);
++    try std.testing.expectEqual(pc.Restored.adopted, settle(&s, try s.restoreBegin(p, &a)));
++    try std.testing.expect(s.entries.items[0].shared and s.entries.items[0].restored);
++    try std.testing.expectEqual(@as(usize, 1), f.shared_marks); // the share hook fired: the family's copy is marked too
++}
++
+ test "without a tier the store asks nothing and counts nothing new" {
+     var f: Sum = .{};
+     var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index b7695034..423d12d0 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -455,6 +455,7 @@ pub const Snap = struct {
+     loading: bool = false, // a restore's destination: its rows held back, not usable until every rank installed it
+     restored: bool = false, // read back from the spill tier
+     part: u8 = 0, // TF_DS_KV_SHARD: the part holding its rows (parts.zig's Kept; a live move changes it)
++    shared: bool = false, // kept at a shared cut (prompt_cache's Snapshots.share): placement's last victim (TF_DS_KEEP_PROTECT=1)
+ };
+ 
+ /// Kept states this long or longer say so in the log when they go stale (their prompts then run again from 0).
+@@ -530,6 +531,7 @@ pub const Lanes = struct {
+     drawn: [ring]u32 = undefined,
+     next: u64 = 0,
+     snaps: std.ArrayList(*Snap) = .empty, // kept prompt states, oldest first
++    keep_protect: bool = false, // TF_DS_KEEP_PROTECT=1: a placement takes a snap a longer one covers first, then the oldest non-shared (placeKept)
+     next_snap: u64 = 1,
+     fill: ?Fill = null, // the prompt pass that runs in pieces between rounds, from its next chunk
+     paused: ?Fill = null, // the pass a short prompt cut into (lanes' cut_in), resumed by its next piece
+@@ -543,6 +545,7 @@ pub const Lanes = struct {
+ 
+     pub fn init(gpa: std.mem.Allocator, m: *Model) Lanes {
+         var ln: Lanes = .{ .gpa = gpa, .m = m, .peer = if (m.world > 1) m.peer() else null };
++        ln.keep_protect = api.prompt_cache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null); // every rank alike
+         // the round costs by rows: ROUND_MS[min(rows, len) - 1] (the served table, or TF_DS_ROUND_MS)
+         const t = m.round_ms;
+         for (&ln.wc, 0..) |*c, i| c.* = .{ .width = @intCast(i + 1), .ms = t[@min(i, t.len - 1)] };
+@@ -1377,7 +1380,9 @@ pub const Lanes = struct {
+     /// the copy needs another state's room or would leave none for another request of its size: a copy that fills the
+     /// pool makes the next prompt evict a kept state (the 5 x 500K check with the duplicate admitted fourth). Kept
+     /// states hold their stream's whole extent back while a placement still fits so (placeSoft): its tail stays free
+-    /// for the resume in place, which then stales nothing.
++    /// for the resume in place, which then stales nothing. With TF_DS_KEEP_PROTECT=1 the room comes first from a snap
++    /// keptOver counts as superseded (any overlapping snap on a different base, or a longer one on its own base), then
++    /// the oldest non-shared snap, then the oldest shared one.
+     fn placeKept(self: *Lanes, live: []const [2]usize, size: usize, source: ?*Snap) !usize {
+         const gpa = self.gpa;
+         var kept: std.ArrayList([3]usize) = .empty;
+@@ -1399,15 +1404,25 @@ pub const Lanes = struct {
+                 return if (try roomAfter(gpa, rows.items, b, size, self.m.pool_cap)) b else error.ContextFull;
+             }
+             if (got) |b| return b;
+-            const victim = for (self.snaps.items) |sn| {
+-                if (!sn.stale and !sn.loading and sn != source and !clashes(live, sn.base, sn.base + sn.at)) break sn;
+-            } else if (source) |sn| (if (!sn.stale and !clashes(live, sn.base, sn.base + sn.at)) sn else return error.ContextFull) else return error.ContextFull;
++            const victim: *Snap = v: {
++                if (self.keep_protect) {
++                    for (self.snaps.items) |sn| if (placeable(sn, live, source) and self.keptOver(sn.base, sn.base + sn.at, sn)) break :v sn;
++                    for (self.snaps.items) |sn| if (placeable(sn, live, source) and !sn.shared) break :v sn;
++                }
++                for (self.snaps.items) |sn| if (placeable(sn, live, source)) break :v sn;
++                break :v if (source) |sn| (if (!sn.stale and !clashes(live, sn.base, sn.base + sn.at)) sn else return error.ContextFull) else return error.ContextFull;
++            };
+             noteStale(victim, "a placement needed its room (oldest first)");
+             if (self.spill) |t| t.guardSnap(victim.id, 0); // its unpublished write stages or cancels before the rows go
+             victim.stale = true;
+         }
+     }
+ 
++    /// Whether a placement may take `sn`'s rows: live, not loading, not `source`, clear of `live` (placeKept).
++    fn placeable(sn: *Snap, live: []const [2]usize, source: ?*Snap) bool {
++        return !sn.stale and !sn.loading and sn != source and !clashes(live, sn.base, sn.base + sn.at);
++    }
++
+     /// Whether a kept state other than `except` and its shorter siblings has rows in [lo, hi); a longer one may be another conversation's.
+     fn keptOver(self: *const Lanes, lo: usize, hi: usize, except: *const Snap) bool {
+         for (self.snaps.items) |sn| if (sn != except and !sn.stale and (sn.base != except.base or sn.at > except.at) and sn.base < hi and lo < sn.base + sn.at) return true;
+@@ -1474,6 +1489,13 @@ pub const Lanes = struct {
+         return error.BackendRestores; // the prompt pass restores, before its first chunk
+     }
+ 
++    /// The prompt cache's Snapshots.share: the kept state is a shared prefix now, so placement holds it longest
++    /// (placeKept, TF_DS_KEEP_PROTECT=1).
++    pub fn snapShareFn(_: *anyopaque, saved: *anyopaque) void {
++        const sn: *Snap = @ptrCast(@alignCast(saved));
++        sn.shared = true;
++    }
++
+     pub fn snapDropFn(ptr: *anyopaque, saved: *anyopaque) void {
+         const self = of(ptr);
+         const sn: *Snap = @ptrCast(@alignCast(saved));
+@@ -2349,6 +2371,50 @@ test "retained histories preserve their replay and output reservations (PR #10:
+     try std.testing.expect(!ln.snaps.items[0].stale); // its rows lie in the live stream: that stream holds the room
+ }
+ 
++test "TF_DS_KEEP_PROTECT=1: a placement's victims are the non-shared snaps before a shared one" {
++    const c = model.chunk_rows;
++    var m: Model = undefined;
++    m.pool_cap = 24 * c;
++    var ln: Lanes = .{ .gpa = std.testing.allocator, .m = &m, .peer = null, .keep_protect = true };
++    defer ln.snaps.deinit(std.testing.allocator);
++    var n1: Snap = .{ .id = 1, .at = 6 * c, .base = 0, .end = 6 * c, .buf = undefined };
++    var shared: Snap = .{ .id = 2, .at = 6 * c, .base = 6 * c, .end = 12 * c, .buf = undefined, .shared = true };
++    var n2: Snap = .{ .id = 3, .at = 6 * c, .base = 12 * c, .end = 18 * c, .buf = undefined };
++    for ([_]*Snap{ &n1, &shared, &n2 }) |sn| try ln.snaps.append(std.testing.allocator, sn);
++    try std.testing.expectEqual(@as(usize, 12 * c), try ln.placeKept(&.{}, 12 * c, null)); // the room both non-shared snaps gave
++    try std.testing.expect(n1.stale and n2.stale and !shared.stale); // the shared cut survives placement pressure
++}
++
++test "TF_DS_KEEP_PROTECT unset: a placement's victim is the first kept state in keep order" {
++    const c = model.chunk_rows;
++    var m: Model = undefined;
++    m.pool_cap = 24 * c;
++    var ln: Lanes = .{ .gpa = std.testing.allocator, .m = &m, .peer = null };
++    defer ln.snaps.deinit(std.testing.allocator);
++    var n1: Snap = .{ .id = 1, .at = 6 * c, .base = 0, .end = 6 * c, .buf = undefined };
++    var shared: Snap = .{ .id = 2, .at = 6 * c, .base = 6 * c, .end = 12 * c, .buf = undefined, .shared = true };
++    var n2: Snap = .{ .id = 3, .at = 6 * c, .base = 12 * c, .end = 18 * c, .buf = undefined };
++    for ([_]*Snap{ &n1, &shared, &n2 }) |sn| try ln.snaps.append(std.testing.allocator, sn);
++    try std.testing.expectEqual(@as(usize, 0), try ln.placeKept(&.{}, 12 * c, null));
++    try std.testing.expect(n1.stale and shared.stale and !n2.stale); // the oldest keeps go first, shared or not
++}
++
++test "TF_DS_KEEP_PROTECT=1: a snap a longer one on its base covers is placement's first victim" {
++    const c = model.chunk_rows;
++    var m: Model = undefined;
++    m.pool_cap = 24 * c;
++    var ln: Lanes = .{ .gpa = std.testing.allocator, .m = &m, .peer = null, .keep_protect = true };
++    defer ln.snaps.deinit(std.testing.allocator);
++    var older: Snap = .{ .id = 1, .at = 4 * c, .base = 0, .end = 4 * c, .buf = undefined };
++    var shared: Snap = .{ .id = 2, .at = 2 * c, .base = 18 * c, .end = 20 * c, .buf = undefined, .shared = true };
++    var covered: Snap = .{ .id = 3, .at = 2 * c, .base = 6 * c, .end = 8 * c, .buf = undefined };
++    var source: Snap = .{ .id = 4, .at = 8 * c, .base = 6 * c, .end = 14 * c, .buf = undefined };
++    for ([_]*Snap{ &older, &shared, &covered, &source }) |sn| try ln.snaps.append(std.testing.allocator, sn);
++    // the source covers `covered`'s rows (a longer snap on its base): the covered one goes before the older and shared ones
++    try std.testing.expectEqual(@as(usize, 0), try ln.placeKept(&.{}, 6 * c, &source));
++    try std.testing.expect(covered.stale and older.stale and !shared.stale);
++}
++
+ test "a prefix two conversations share: the second one resuming it in place would stale the first one's later marks" {
+     var m: Model = undefined;
+     m.pool_cap = 1 << 20;
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 97f7e194..237ade0b 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -309,8 +309,8 @@ pub fn main(init: std.process.Init) !u8 {
+     };
+     if (spill != null) {
+         const L = dsv41.lanes.Lanes;
+-        snap_vt = .{ .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .usable = L.usableFn };
+-        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")) }, @intFromFloat(cache_gib * (1 << 30)));
++        snap_vt = .{ .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .usable = L.usableFn, .share = L.snapShareFn };
++        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")), .keep_protect = pcache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null) }, @intFromFloat(cache_gib * (1 << 30)));
+         var seed: [4]u8 = undefined;
+         io.random(&seed);
+         store_v.setTier(ln.spill.?.tier(), std.mem.readInt(u32, &seed, .little));
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index f5cdda2f..3b043024 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -164,6 +164,8 @@ pub const Snaps = struct {
+     tail: u32 = 0,
+     /// Whether a kept state still restores (Lanes.usable): given with the spill tier only.
+     usable: ?*const fn (*anyopaque, *anyopaque, u32) bool = null,
++    /// The kept state became a shared prefix (core/prompt_cache's Snapshots.share; Lanes.snapShareFn).
++    share: ?*const fn (*anyopaque, *anyopaque) void = null,
+ };
+ 
+ /// The rank's model and the backend over it (what `open` hands the server, freed by `deinit`).
+@@ -294,7 +296,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     st.lanes.vision = st.vision;
+     // the pool is the model's (preallocated): a stream takes no device memory of its own
+     const L = lanes_mod.Lanes;
+-    var snaps: Snaps = .{ .ptr = &st.lanes, .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .tail = @intCast(st.m.cfg.window) };
++    var snaps: Snaps = .{ .ptr = &st.lanes, .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .share = L.snapShareFn, .tail = @intCast(st.m.cfg.window) };
+     const window: ?usize = if (st.m.kvs != null or st.m.pool_cap != o.context) st.m.window_cap else null;
+     var tier: ?spill_tier.prompt_cache.Tier = null;
+     if (o.spill != null) {
+@@ -494,10 +496,11 @@ pub fn rankExchange(gpa: std.mem.Allocator, io: std.Io, mo: model.Options, m: *m
+     var fbuf: [256]u8 = undefined;
+     const image_cache = spill_tier.Settings.imageCache(getenv("TF_DS_IMAGE_CACHE"));
+     const edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")); // (the marks gate: the fingerprint's reading)
++    const keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")); // (the victim order gate: the fingerprint's reading)
+     // TF_DS_KV_SHARD's switches every rank's planner takes (carry, twins) and its part size: agreed in `features`
+     const kvs: kv_lanes.Settings = if (m.kvs != null) try kv_lanes.Settings.fromEnv(getenvFn) else .{ .carry = false, .twins = false };
+     const part_rows: u64 = if (m.caches.shard) |x| x.part else 0;
+-    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
++    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .keep_protect = keep_protect, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
+     var pbuf: [model.Model.spill.StateLayout.max_encoded]u8 = undefined;
+     const lp = try rank_identity.layoutPart(layout, m.world, &pbuf);
+     var arena = std.heap.ArenaAllocator.init(gpa);
+diff --git a/zig/src/families/dsv41/rank_identity.zig b/zig/src/families/dsv41/rank_identity.zig
+index 4f95e637..45a16586 100644
+--- a/zig/src/families/dsv41/rank_identity.zig
++++ b/zig/src/families/dsv41/rank_identity.zig
+@@ -131,14 +131,15 @@ pub const Features = struct {
+     engram_lanes: u8 = 1,
+     image_cache: bool = true,
+     edit_mark: bool = false, // TF_DS_EDIT_MARK (named in the string only when on)
++    keep_protect: bool = false, // TF_DS_KEEP_PROTECT (named in the string only when on)
+     streams: u32,
+     round_rows: u32,
+     pool: u64,
+     drafts: bool,
+ };
+ 
+-/// TF_DS_KV_SHARD adds "part=N;" (the part size: the owner layout's, also in the planes field) and TF_DS_EDIT_MARK=1
+-/// "edit_mark=1;"; with neither on, the bytes are what they always were.
++/// TF_DS_KV_SHARD adds "part=N;" (the part size: the owner layout's, also in the planes field), TF_DS_EDIT_MARK=1
++/// "edit_mark=1;" and TF_DS_KEEP_PROTECT=1 "keep_protect=1;"; with none on, the bytes are what they always were.
+ pub fn featureString(buf: []u8, f: Features) ![]const u8 {
+     const head = try std.fmt.bufPrint(buf, "spill={d};spill_min={d};kv_shard={d};kv_carry={d};twins={d};engram_lanes={d};image_cache={d};streams={d};round_rows={d};pool={d};drafts={d};", .{
+         @intFromBool(f.spill), f.spill_min_tokens, @intFromBool(f.kv_shard), @intFromBool(f.kv_carry), @intFromBool(f.twins),
+@@ -147,6 +148,7 @@ pub fn featureString(buf: []u8, f: Features) ![]const u8 {
+     var n = head.len;
+     if (f.kv_shard) n += (try std.fmt.bufPrint(buf[n..], "part={d};", .{f.part_rows})).len;
+     if (f.edit_mark) n += (try std.fmt.bufPrint(buf[n..], "edit_mark=1;", .{})).len; // named only when on: a mismatch with an off peer is a hello refusal
++    if (f.keep_protect) n += (try std.fmt.bufPrint(buf[n..], "keep_protect=1;", .{})).len;
+     return buf[0..n];
+ }
+ 
+@@ -605,10 +607,13 @@ test "the features: off as they always were; TF_DS_KV_SHARD adds its switches an
+     try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=1;kv_carry=1;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=2101248;drafts=1;part=1050624;", on);
+ }
+ 
+-test "TF_DS_EDIT_MARK is named in the features only when on (an off pair's string is unchanged)" {
++test "TF_DS_EDIT_MARK and TF_DS_KEEP_PROTECT are named in the features only when on (an off pair's string is unchanged)" {
+     var b: [256]u8 = undefined;
+     const edit = try featureString(&b, .{ .spill = true, .spill_min_tokens = 8192, .edit_mark = true, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
+     try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;edit_mark=1;", edit);
++    var b2: [256]u8 = undefined;
++    const both = try featureString(&b2, .{ .spill = true, .spill_min_tokens = 8192, .edit_mark = true, .keep_protect = true, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
++    try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;edit_mark=1;keep_protect=1;", both);
+ }
+ 
+ test "TF_DS_KV_SHARD alone: a missing recipe identity reads unset, never a refusal; with the spill tier it is refused" {
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index a7b8bbc4..f1b00202 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -453,7 +453,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+         const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 0.5) * gib);
+         if (want > 0) {
+             h.snap_vt = .{ .bytes = sn.bytes, .save = sn.save, .restore = sn.restore, .drop = sn.drop };
+-            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")) }, want);
++            if (@hasField(@TypeOf(sn), "share")) h.snap_vt.share = sn.share;
++            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")) }, want);
+             // the spill tier (off by default: nothing below runs then)
+             if (@hasField(@TypeOf(loaded), "tier")) {
+                 const store = &h.cache.?;

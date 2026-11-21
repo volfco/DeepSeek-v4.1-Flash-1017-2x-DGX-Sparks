@@ -1,0 +1,255 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits e8ac9d3a3daa..ab19ac885888)
+# server: TF_DS_REPLY_SCAN_SUFFIX (off by default) holds back a suffix of the streamed reply's text scan - the whole text was reprocessed every round for stops and the thinking split
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index f9f858dc4f41e86a7b1d9266b3996d727ce2c61a..88f295ce22f72c26b4498ba9bfcfb818dbc23be5 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -279,7 +279,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
+     };
+     release(srv, preparing); // a background request waits only while a foreground one prepares
+     preparing = false;
+-    var gen: Generation = .{ .last_out_ns = submitted, .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = input.token_ids, .energy = prepared.energy, .render_s = prepared.render_s, .encode_s = prepared.encode_s };
++    var gen: Generation = .{ .last_out_ns = submitted, .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = input.token_ids, .energy = prepared.energy, .render_s = prepared.render_s, .encode_s = prepared.encode_s, .scan_suffix = scanSuffixOn() };
+     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, gen.energy_mj);
+     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
+     const result: Failure!Reply = blk: {
+@@ -291,6 +291,13 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
+     return result;
+ }
+ 
++/// TF_DS_REPLY_SCAN_SUFFIX ("1" or "on"; unset or anything else: off) - the streamed reply's per-round whole-text
++/// scans resume where the last round's stopped (0167): Stops.visibleR and splitThinkingR instead of the full scans.
++fn scanSuffixOn() bool {
++    const v = std.c.getenv("TF_DS_REPLY_SCAN_SUFFIX") orelse return false;
++    return std.mem.eql(u8, std.mem.span(v), "1") or std.mem.eql(u8, std.mem.span(v), "on");
++}
++
+ /// The ``ended`` line of a submitted reply that ends without one: its client left, or it failed.
+ fn logEnded(id: []const u8, e: Failure, message: []const u8, prompt: usize, tokens: usize, after: f64) void {
+     const why: ?[]const u8 = switch (e) {
+@@ -373,6 +380,10 @@ const Generation = struct {
+     visible: reply_text.Incremental = .{},
+     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
+     hide: reply_text.Hide = .{}, // what the stream filter read of the answer in the rounds before
++    /// TF_DS_REPLY_SCAN_SUFFIX (0167): the per-round whole-text scans resume where the last round's stopped.
++    scan_suffix: bool = false,
++    stops_r: reply_text.Stops.Resume = .{},
++    split_r: reply_text.SplitResume = .{},
+     answer_at: ?[*]const u8 = null, // the answer's buffer last round: the searches below go on only in the same one
+     answer_len: usize = 0,
+     channel_from: usize = 0, // where the search for a Harmony marker in the answer goes on
+@@ -445,11 +456,11 @@ const Generation = struct {
+             try fresh.append(g.a, t);
+         }
+         const all = try g.visible.extend(g.a, g.srv.text, decodeText, fresh.items);
+-        const text = g.stops.visible(all, true);
++        const text = if (g.scan_suffix) g.stops.visibleR(all, true, &g.stops_r) else g.stops.visible(all, true);
+         if (g.visible.pending()) return; // a character still split across tokens
+         var answer = text;
+         if (g.thinking) {
+-            const split = try reply_text.splitThinking(g.a, text, false, g.srv.markers);
++            const split = if (g.scan_suffix) try reply_text.splitThinkingR(g.a, text, false, g.srv.markers, &g.split_r) else try reply_text.splitThinking(g.a, text, false, g.srv.markers);
+             const piece = g.streamed_reasoning.after(split.reasoning, true);
+             if (piece.len > 0) {
+                 try g.streamed_reasoning.set(g.a, split.reasoning, piece);
+diff --git a/zig/src/server/reply_text.zig b/zig/src/server/reply_text.zig
+index ac0e0e15ce8928a8b9a5cf9d876f31bb4d7e1eb7..4c6110b8dd852b08edc31fd52aac53a9b0d08a92 100644
+--- a/zig/src/server/reply_text.zig
++++ b/zig/src/server/reply_text.zig
+@@ -37,6 +37,35 @@ fn find(text: []const u8, tag: []const u8) ?usize {
+     return findTag(text, 0, tag);
+ }
+ 
++/// 0167 (TF_DS_REPLY_SCAN_SUFFIX): ``findTag(text, 0, tag)`` over a reply's append-only text with a resume: a miss
++/// remembers how far it searched (the next call re-checks only the overlap where the tag could straddle the old end)
++/// and a hit remembers its offset (the first hit on append-only text stays the first). A text whose base moved or
++/// shrank restarts the search, so every call still returns findTag's own answer; an empty tag finds at 0 as it does.
++pub const FirstFind = struct {
++    base: ?[*]const u8 = null,
++    scanned: usize = 0,
++    at: ?usize = null,
++
++    pub fn find(f: *FirstFind, text: []const u8, tag: []const u8) ?usize {
++        if (tag.len == 0) return find(text, tag);
++        if (f.base) |b| {
++            if (b != text.ptr or text.len < f.scanned) f.* = .{};
++        }
++        f.base = text.ptr;
++        if (f.at) |at| return at;
++        const from = f.scanned -| (tag.len - 1);
++        const hit = findTag(text, from, tag);
++        f.scanned = text.len;
++        if (hit) |at| f.at = at;
++        return hit;
++    }
++};
++
++/// 0167: the resumed find when there is one, else the full find (the switch's two paths).
++fn findR(r: ?*FirstFind, text: []const u8, tag: []const u8) ?usize {
++    return if (r) |f| f.find(text, tag) else find(text, tag);
++}
++
+ /// The invoke and parameter tags of a DSML spelling, by its block's opener (null: not a DSML block; V4.1's opener also
+ /// with the two newlines ``calls`` lists it with). V4's parser requires a parameter's ``string`` attribute; V4.1's reads
+ /// one when it is there.
+@@ -201,12 +230,27 @@ pub const Split = struct { reasoning: []const u8, answer: []const u8 };
+ 
+ /// (reasoning, answer) of a thinking reply; while it streams, a tail that could begin a marker is held back.
+ pub fn splitThinking(a: Allocator, full: []const u8, finished: bool, m: Markers) Allocator.Error!Split {
++    return splitThinkingR(a, full, finished, m, null);
++}
++
++/// 0167 (TF_DS_REPLY_SCAN_SUFFIX): where ``splitThinkingR``'s first-occurrence finds stand over one append-only
++/// reply text - the stray opener's over the full text, then the closer's and each call opener's over the trimmed
++/// inner text. The finished-reply paths are one-shot and keep their full scans.
++pub const SplitResume = struct {
++    open: FirstFind = .{},
++    close: FirstFind = .{},
++    call: [calls.len]FirstFind = @splat(.{}),
++};
++
++/// ``splitThinking`` with a resume (0167): the first-occurrence finds go on where the last round's stopped, so a
++/// round re-scans only the text the last one did not. Null: the full scans, as before.
++pub fn splitThinkingR(a: Allocator, full: []const u8, finished: bool, m: Markers, r: ?*SplitResume) Allocator.Error!Split {
+     var text = full;
+     if (m.open.len > 0 and !std.mem.startsWith(u8, text, m.open)) {
+-        if (find(text, m.open)) |start| if (start > 0) {
++        if (findR(if (r) |rr| &rr.open else null, text, m.open)) |start| if (start > 0) {
+             var prefix = text[0..start];
+             prefix = prefix[0 .. prefix.len - partialTag(prefix, m.open)]; // a stray partial opener
+-            const inner = try splitThinking(a, text[start..], finished, m);
++            const inner = try splitThinkingR(a, text[start..], finished, m, r);
+             return .{ .reasoning = inner.reasoning, .answer = try std.mem.concat(a, u8, &.{ prefix, inner.answer }) };
+         };
+         if (!finished) {
+@@ -223,9 +267,9 @@ pub fn splitThinking(a: Allocator, full: []const u8, finished: bool, m: Markers)
+     } else if (!finished and std.mem.startsWith(u8, think_open, text)) {
+         return .{ .reasoning = "", .answer = "" }; // held while the reply may still be writing that opener
+     }
+-    if (find(text, m.close)) |end| return .{ .reasoning = text[0..end], .answer = trimNewlines(text[end + m.close.len ..]) };
++    if (findR(if (r) |rr| &rr.close else null, text, m.close)) |end| return .{ .reasoning = text[0..end], .answer = trimNewlines(text[end + m.close.len ..]) };
+     var call: ?usize = null;
+-    for (calls) |c| if (find(text, c[0])) |at| {
++    for (calls, 0..) |c, ci| if (findR(if (r) |rr| &rr.call[ci] else null, text, c[0])) |at| {
+         if (call == null or at < call.?) call = at;
+     };
+     if (call) |at| {
+@@ -469,11 +513,41 @@ fn spaceAt(s: []const u8, i: usize) usize {
+ pub const Stops = struct {
+     strings: []const []const u8,
+ 
++    /// 0167 (TF_DS_REPLY_SCAN_SUFFIX): where ``visibleR``'s scan stands over one append-only reply text.
++    pub const Resume = struct {
++        base: ?[*]const u8 = null,
++        scanned: usize = 0,
++        first: ?usize = null,
++    };
++
+     pub fn visible(s: Stops, text: []const u8, partial: bool) []const u8 {
++        return visibleR(s, text, partial, null);
++    }
++
++    /// ``visible`` with a resume over the reply's append-only text (0167, TF_DS_REPLY_SCAN_SUFFIX): only the overlap
++    /// where a stop could straddle the last round's end is searched again. The first stop hit is the whole state: it
++    /// is stable once found, so every round still returns ``visible``'s own slice. Null: the full scan.
++    pub fn visibleR(s: Stops, text: []const u8, partial: bool, r: ?*Resume) []const u8 {
+         var first: ?usize = null;
+-        for (s.strings) |stop| if (std.mem.indexOf(u8, text, stop)) |at| {
++        var from: usize = 0;
++        if (r) |rr| {
++            if (rr.base) |b| {
++                if (b != text.ptr or text.len < rr.scanned) rr.* = .{};
++            }
++            rr.base = text.ptr;
++            if (rr.first) |at| return text[0..at];
++            var w: usize = 1;
++            for (s.strings) |stop| w = @max(w, stop.len);
++            from = rr.scanned -| (w - 1);
++            first = null;
++        }
++        for (s.strings) |stop| if (findTag(text, from, stop)) |at| {
+             if (first == null or at < first.?) first = at;
+         };
++        if (r) |rr| {
++            rr.scanned = text.len;
++            rr.first = first;
++        }
+         if (first) |at| return text[0..at];
+         if (!partial) return text;
+         var held: usize = 0;
+@@ -549,6 +623,74 @@ test "splits and holds" {
+     try std.testing.expectEqualStrings("lo", afterChars("h\u{e9}lo", 2));
+ }
+ 
++test "TF_DS_REPLY_SCAN_SUFFIX: FirstFind returns find's own answer through misses, straddles and a moved base" {
++    const tag = think_markers.close;
++    var f: FirstFind = .{};
++    // growing text, the tag straddling the scanned end: same answer as find at every prefix
++    var buf: std.ArrayList(u8) = .empty;
++    defer buf.deinit(std.testing.allocator);
++    try buf.appendSlice(std.testing.allocator, "nothing ");
++    try std.testing.expectEqual(find(buf.items, tag), f.find(buf.items, tag));
++    try buf.appendSlice(std.testing.allocator, tag[0 .. tag.len / 2]);
++    try std.testing.expectEqual(find(buf.items, tag), f.find(buf.items, tag));
++    try buf.appendSlice(std.testing.allocator, tag[tag.len / 2 ..]);
++    try std.testing.expectEqual(find(buf.items, tag), f.find(buf.items, tag));
++    try buf.appendSlice(std.testing.allocator, " tail");
++    try std.testing.expectEqual(find(buf.items, tag), f.find(buf.items, tag));
++    // a moved base (a fresh copy) restarts: the same answer
++    const copy = try std.testing.allocator.dupe(u8, buf.items);
++    defer std.testing.allocator.free(copy);
++    try std.testing.expectEqual(find(copy, tag), f.find(copy, tag));
++    // the empty tag finds at 0 as find does
++    try std.testing.expectEqual(find(copy, ""), f.find(copy, ""));
++}
++
++test "TF_DS_REPLY_SCAN_SUFFIX: the resumed scans equal the full scans at every streamed prefix" {
++    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    const gpa = std.testing.allocator;
++    const close = think_markers.close;
++    const opener = calls[3][0];
++    const seeds: [4][]const u8 = .{
++        try std.mem.concat(a, u8, &.{ think_open, "\nPlan.\n", close, "\n\nDone." }),
++        try std.mem.concat(a, u8, &.{ "plan", close, "\n\nHi" }),
++        try std.mem.concat(a, u8, &.{ "step by step ", opener, "{\"x\": 1} tail" }),
++        try std.mem.concat(a, u8, &.{ channel_markers.open, " hi ", channel_markers.close, " out" }),
++    };
++    for (seeds) |seed| {
++        // one append-only buffer: the streaming case (the base stands, the text grows)
++        var sr: Stops.Resume = .{};
++        var pr: SplitResume = .{};
++        for (1..seed.len + 1) |n| {
++            const text = seed[0..n];
++            const stops: Stops = .{ .strings = &.{ "ND", "zz", "tail" } };
++            try std.testing.expectEqualStrings(stops.visible(text, true), stops.visibleR(text, true, &sr));
++            const full = try splitThinking(a, text, false, think_markers);
++            const resumed = try splitThinkingR(a, text, false, think_markers, &pr);
++            try std.testing.expectEqualStrings(full.reasoning, resumed.reasoning);
++            try std.testing.expectEqualStrings(full.answer, resumed.answer);
++            const fullc = try splitThinking(a, text, false, channel_markers);
++            const resumedc = try splitThinkingR(a, text, false, channel_markers, &pr);
++            try std.testing.expectEqualStrings(fullc.reasoning, resumedc.reasoning);
++            try std.testing.expectEqualStrings(fullc.answer, resumedc.answer);
++        }
++        // and a moved base every round (a fresh copy each prefix): the resumes restart, the answers hold
++        var sr2: Stops.Resume = .{};
++        var pr2: SplitResume = .{};
++        for (1..seed.len + 1) |n| {
++            const copy = try gpa.dupe(u8, seed[0..n]);
++            defer gpa.free(copy);
++            const stops: Stops = .{ .strings = &.{ "ND", "zz", "tail" } };
++            try std.testing.expectEqualStrings(stops.visible(copy, true), stops.visibleR(copy, true, &sr2));
++            const full = try splitThinking(a, copy, false, think_markers);
++            const resumed = try splitThinkingR(a, copy, false, think_markers, &pr2);
++            try std.testing.expectEqualStrings(full.reasoning, resumed.reasoning);
++            try std.testing.expectEqualStrings(full.answer, resumed.answer);
++        }
++    }
++}
++
+ test "a reply that writes its own think opener keeps the tag out of its reasoning" {
+     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+     defer arena.deinit();

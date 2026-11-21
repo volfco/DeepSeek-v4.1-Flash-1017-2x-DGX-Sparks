@@ -1,0 +1,92 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits d221052477d5..9b834fe084a2)
+# server: queue_s and restore_s on the done line, ttft_s/prefill_s at 3 decimals (W10-a)
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index 9facae8bfe0ba1c575857e6b873380b33ccffe2b..da374de9ee894a828c5d37c717e8d221aaa95df5 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -119,6 +119,11 @@ pub const Stats = struct {
+     /// This reply's share of the Engram host path's time, in seconds (api.EngramStats.host's delta: the hashing, the
+     /// decode and the upload's wait, not the reads); null when the backend keeps none.
+     engram_host_seconds: ?f64 = null,
++    /// Time from admission to prefill start, measured by the engine host, in seconds (includes any wait on a spill
++    /// restore; null when the request never ran).
++    queue_seconds: ?f64 = null,
++    /// Time parked on a spill prompt-state restore, summed over every park, in seconds (null when the request never ran).
++    restore_seconds: ?f64 = null,
+     /// The drafter's own counters as a JSON object, or empty.
+     telemetry_json: []const u8 = "",
+     /// The wire's frame ordinals this reply's rounds ran in (TF_DS_ENERGY: the rank-1 follower logs its counter per
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index ea0f2a191a46ed04d815f10d5e14e34ed58362ed..cc4b2c4024b601275da94f3d939d0e553273722f 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -232,6 +232,8 @@ pub const LaneHost = struct {
+         ordinal0: ?u64 = null, // the wire's frame ordinal at admission (TF_DS_ENERGY's join)
+         prefill_sent: bool = false, // a lone driver's prefilled event went out
+         began: i96 = 0,
++        queued: i96 = 0, // when submitFn created the job; admission minus this is the queue wait
++        restore_ns: i96 = 0, // parked on a spill restore, summed over every park (loading entries only)
+         prefilled: ?i96 = null,
+         engram0: f64 = 0, // the Engram host seconds at its start (the done line's engram_host_ms: api.EngramStats.host)
+         entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
+@@ -396,7 +398,7 @@ pub const LaneHost = struct {
+     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) SubmitError!void {
+         const h = self(ctx);
+         const job = h.gpa.create(Job) catch return error.Busy;
+-        job.* = .{ .host = h, .id = id, .request = request, .sink = sink };
++        job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .queued = std.Io.Clock.awake.now(h.io).toNanoseconds() };
+         h.mutex.lockUncancelable(h.io);
+         defer h.mutex.unlock(h.io);
+         if (h.closing or h.isBroken()) { // (a broken pair admits nothing more: the process restarts)
+@@ -521,7 +523,10 @@ pub const LaneHost = struct {
+             src.read(src.ctx, &e);
+             break :blk @max(0, e.host - job.engram0);
+         } else null;
+-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null, .engram_host_seconds = engram_host, .round_from = job.ordinal0, .round_to = h.core.backend.ordinal(), .score = if (s.score) |sc| sc.summary() else null } else .{};
++        // queue_s: admission to prefill start (includes any parked spill restore, so restore_s is nested, not added to it)
++        const queue_s: ?f64 = if (job.started) @as(f64, @floatFromInt(@max(0, job.began - job.queued))) / 1e9 else null;
++        const restore_s: ?f64 = if (job.started) @as(f64, @floatFromInt(@max(0, job.restore_ns))) / 1e9 else null;
++        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null, .engram_host_seconds = engram_host, .queue_seconds = queue_s, .restore_seconds = restore_s, .round_from = job.ordinal0, .round_to = h.core.backend.ordinal(), .score = if (s.score) |sc| sc.summary() else null } else .{};
+         emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
+         if (job.started) {
+             s.deinit(h.gpa);
+@@ -1374,6 +1379,7 @@ pub const LaneHost = struct {
+             h.lock();
+             _ = h.loading.orderedRemove(i);
+             const waited: u64 = @intCast(@max(0, now - l.since));
++            l.job.restore_ns += @intCast(waited);
+             h.host_counts.restore_wait_timeouts += 1;
+             h.host_counts.restore_wait_ns += waited;
+             h.host_counts.restore_wait_max_ns = @max(h.host_counts.restore_wait_max_ns, waited);
+@@ -1403,6 +1409,7 @@ pub const LaneHost = struct {
+             };
+             const l = h.loading.orderedRemove(i);
+             const waited: u64 = @intCast(@max(0, now - l.since));
++            l.job.restore_ns += @intCast(waited);
+             h.host_counts.restore_wait_ns += waited;
+             h.host_counts.restore_wait_max_ns = @max(h.host_counts.restore_wait_max_ns, waited);
+             h.toReady(l.job);
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index ea5dcaa0c7f523a3ae24815afab0c44b0d2cacab..f9f858dc4f41e86a7b1d9266b3996d727ce2c61a 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -763,6 +763,8 @@ const Generation = struct {
+         var b_encode: [24]u8 = undefined;
+         var b_engram: [32]u8 = undefined;
+         const engram_host = api.engramSuffix(&b_engram, s.engram_host_seconds);
++        var b_queue: [24]u8 = undefined;
++        var b_restore: [24]u8 = undefined;
+         const accept = if (avg.accept_pct) |pct| std.fmt.bufPrint(&b_accept, "{d:.1}%", .{pct}) catch "-" else "-";
+         // TF_DS_ENERGY: the request's own window and the ordinals rank 1's per-frame line joins by. Empty with the
+         // switch off (0119's render_s/encode_s are always appended at the end, so the line is the base one plus those).
+@@ -773,7 +775,8 @@ const Generation = struct {
+             g.energy_mj = readings.gross_mj;
+             energy_fields = api.energy.suffix(&energy_buf, readings, s.round_from, s.round_to);
+         }
+-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} prefill_s={s} ttft_s={s} decode_s={s} s_per_token={s} tok_per_s={s} accept={s} tokens_per_round={s}{s} render_s={s} encode_s={s}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, fmtNum(&b_prefill, "{d:.1}", s.prefill_seconds), fmtNum(&b_ttft, "{d:.1}", avg.ttft_s), fmtNum(&b_decode, "{d:.1}", avg.decode_s), fmtNum(&b_tpot, "{d:.4}", avg.s_per_token), fmtNum(&b_tok_s, "{d:.1}", avg.tok_per_s), accept, fmtNum(&b_tpr, "{d:.1}", avg.tokens_per_round), energy_fields, fmtNum(&b_render, "{d:.3}", g.render_s), fmtNum(&b_encode, "{d:.3}", g.encode_s), engram_host });
++        // the 0070 pattern: engram_host, queue_s/restore_s appended after every existing field, so old prefix parsers still match
++        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} prefill_s={s} ttft_s={s} decode_s={s} s_per_token={s} tok_per_s={s} accept={s} tokens_per_round={s}{s} render_s={s} encode_s={s}{s} queue_s={s} restore_s={s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, fmtNum(&b_prefill, "{d:.3}", s.prefill_seconds), fmtNum(&b_ttft, "{d:.3}", avg.ttft_s), fmtNum(&b_decode, "{d:.1}", avg.decode_s), fmtNum(&b_tpot, "{d:.4}", avg.s_per_token), fmtNum(&b_tok_s, "{d:.1}", avg.tok_per_s), accept, fmtNum(&b_tpr, "{d:.1}", avg.tokens_per_round), energy_fields, fmtNum(&b_render, "{d:.3}", g.render_s), fmtNum(&b_encode, "{d:.3}", g.encode_s), engram_host, fmtNum(&b_queue, "{d:.3}", s.queue_seconds), fmtNum(&b_restore, "{d:.3}", s.restore_seconds) });
+         return reply;
+     }
+ };

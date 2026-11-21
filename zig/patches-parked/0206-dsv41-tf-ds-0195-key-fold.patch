@@ -1,0 +1,225 @@
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index d603e38..544ac7b 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -956,32 +956,62 @@ __device__ __forceinline__ unsigned long long tf_ds_pool_kth(const float* row, i
+ // Compact selected columns in input order so neither the mask nor the list needs a sort. The maxima and the selection
+ // live only on chip: the call sites read the mask (the prompt arm) or the block list (decode), never bmax/pidx, so the
+ // fused launch writes neither (the unfused blockMax/topkIndices/poolPick sequence still does).
++// `keys` / `tmax` (queries.py _score_keys' outputs) are optional and require bsize == 8 (the launcher checks): eight
++// threads' blocks are one 64-key tile, so the row's keys and each tile's largest key come out of the same score reads
++// as the block maxima and the decode arm skips its separate _score_keys launch. `keys` is [rows, width] unsigned
++// int64 at row stride `width`; `tmax` is [rows, ceil(width / 64)] unsigned int64 at row stride ceil(width / 64).
++#define TF_DS_IDX_FUSED_TILE 64
+ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const float* score, long long ss, int width,
+                                                                           int bsize, const long long* vis,
+                                                                           const long long* every, int k,
+                                                                           uint8_t* mask, long long ms, int* cblk,
+-                                                                          int pdl) {
++                                                                          unsigned long long* keys,
++                                                                          unsigned long long* tmax, int pdl) {
+     pdl_enter(pdl);
+     const int r = blockIdx.x;
+     const int nb = 1 + (width - 1) / bsize;
+     extern __shared__ float maxima[];
+     const float ninf = -__int_as_float(0x7f800000);
+     const float* row = score + (long long)r * ss;
+-    // phase 1: the block maxima (tf_ds_block_max_kernel's rule, one thread a block)
++    // phase 1: the block maxima (tf_ds_block_max_kernel's rule, one thread a block) and, with `keys`, that block's
++    // columns' keys and its largest key. Every lane runs the tile reduction (the guard is per lane, not around the
++    // loop) so the full-mask shuffles never see an inactive lane.
+     const long long visible = vis[r];
+     const long long last = visible > 0 ? (visible - 1) / bsize : -1;
+-    for (int b = threadIdx.x; b < nb; b += blockDim.x) {
+-        const float* s = row + (long long)b * bsize;
+-        float m = ninf;
+-        bool nan = false;
+-        for (int j = 0; j < bsize && b * bsize + j < width; ++j) {
+-            const float x = s[j];
+-            if (x != x) nan = true;
+-            else if (x > m) m = x;
++    const bool fold = keys != NULL && tmax != NULL;   // the launcher refuses one without the other
++    const int nt = fold ? 1 + (width - 1) / TF_DS_IDX_FUSED_TILE : 0;
++    for (int first = 0; first < nb; first += blockDim.x) {
++        const int b = first + threadIdx.x;
++        const bool live = b < nb;
++        unsigned long long top = 0;   // below every key tf_ds_score_key makes (-inf's is 0x007fffff00000000)
++        if (live) {
++            const float* s = row + (long long)b * bsize;
++            float m = ninf;
++            bool nan = false;
++            for (int j = 0; j < bsize && b * bsize + j < width; ++j) {
++                const float x = s[j];
++                if (x != x) nan = true;
++                else if (x > m) m = x;
++                if (fold) {
++                    const unsigned long long u = tf_ds_score_key(x, b * bsize + j);
++                    keys[(long long)r * width + b * bsize + j] = u;
++                    if (u > top) top = u;
++                }
++            }
++            float v = nan ? __int_as_float(0x7fc00000) : m;
++            if (b == last) v = __int_as_float(0x7f800000);
++            maxima[b] = v;
++        }
++        if (fold) {
++            // bsize == 8: a 64-key tile is eight consecutive blocks, i.e. eight consecutive lanes of this iteration
++            #pragma unroll
++            for (int off = 1; off < TF_DS_IDX_FUSED_TILE / 8; off <<= 1) {
++                const unsigned long long o = __shfl_xor_sync(0xffffffffu, top, off);
++                if (o > top) top = o;
++            }
++            // the lowest lane of a live group writes it (a dead lane implies every later lane of its group is dead)
++            if (live && (threadIdx.x & 7) == 0) tmax[(long long)r * nt + b / 8] = top;
+         }
+-        float v = nan ? __int_as_float(0x7fc00000) : m;
+-        if (b == last) v = __int_as_float(0x7f800000);
+-        maxima[b] = v;
+     }
+     __syncthreads();
+     const unsigned long long kth = k == nb ? 0 : tf_ds_pool_kth(maxima, nb, k);
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 2a89710..31ce7ca 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -31,6 +31,27 @@ pub const max_k = 2048;
+ /// the served block size); past it the unfused sequence runs.
+ pub const max_nbk = 8192;
+ 
++/// The candidate block size the key fold needs: at `candidate_block == 8` eight threads' blocks are one 64-key tile, so
++/// the fused launch can write queries.py _score_keys' outputs (every column's key and each tile's largest key) from the
++/// same score reads as the block maxima, and the decode arm skips that launch. Other block sizes keep it.
++pub const key_fold_bsize = 8;
++/// _score_keys' tile width (TB in the kit's launch and `tri_index.tile`).
++pub const key_tile = 64;
++
++/// The key fold's bytes, on the host: every column's key (`scoreKey`) and each `key_tile`-wide tile's largest key in
++/// the keys' unsigned order (the kernel's eight-lane max, which the test below pins). `keys` is [width], `tmax`
++/// [ceil(width / key_tile)]; the kernel's partial last tile is the last block's live lanes only.
++pub fn foldKeys(score: []const f32, keys: []u64, tmax: []u64) void {
++    std.debug.assert(keys.len >= score.len and tmax.len >= (score.len + key_tile - 1) / key_tile);
++    for (score, 0..) |x, i| keys[i] = scoreKey(x, i);
++    var t: usize = 0;
++    while (t * key_tile < score.len) : (t += 1) {
++        var m: u64 = 0;
++        for (keys[t * key_tile..@min(score.len, (t + 1) * key_tile)]) |u| m = @max(m, u);
++        tmax[t] = m;
++    }
++}
++
+ /// Whether the fused launch supports this configuration. The call sites fall back to the unfused sequence when it
+ /// does not. k > nbk (the selection's own bound) and nbk <= 0 refuse; `width` must agree with `bsize`.
+ pub fn fuseOk(fused: bool, rows: usize, width: usize, bsize: usize, nbk: usize, k: usize) bool {
+@@ -211,6 +232,29 @@ test "poolPick zeroes the mask, sets picked blocks above -inf, lists -1 otherwis
+     try expectEqual([_]i32{ -1, 0 }, cblk2);
+ }
+ 
++test "foldKeys: the keys are scoreKey's, a tile's maximum is its largest key (unsigned), NaN ranks first" {
++    // a tile boundary at 64 keys, plus a partial last tile
++    var s: [70]f32 = undefined;
++    for (&s, 0..) |*x, i| x.* = @floatFromInt(70 - i); // descending: the first tile's max is column 0
++    var keys: [70]u64 = undefined;
++    var tmax: [2]u64 = undefined;
++    foldKeys(&s, &keys, &tmax);
++    for (s, 0..) |_, i| try expectEqual(scoreKey(s[i], i), keys[i]);
++    try expectEqual(keys[0], tmax[0]); // 70.0 at column 0 beats the rest of its tile
++    try expectEqual(keys[64], tmax[1]); // 6.0 at column 64, the second tile's (largest, then partial) head
++    // a NaN in the second tile outranks +inf there: the tile max is the NaN's key, above every finite one
++    s[65] = @bitCast(@as(u32, 0x7FC00000));
++    foldKeys(&s, &keys, &tmax);
++    try expectEqual(scoreKey(s[65], 65), tmax[1]);
++    try std.testing.expect(tmax[1] > scoreKey(std.math.inf(f32), 65));
++    // -inf ties break to the lower column, and the tail beyond the row is not in any tile
++    var flat: [64]f32 = @splat(-std.math.inf(f32));
++    var fkeys: [64]u64 = undefined;
++    var ftmax: [1]u64 = undefined;
++    foldKeys(&flat, &fkeys, &ftmax);
++    try expectEqual(fkeys[0], ftmax[0]);
++}
++
+ test "key negative-column rule: a column at or past every is -1 in the list and not in the pool" {
+     // end-to-end through the host reference: an every below some selected column
+     const bmax = [_]f32{ 3, 7, 8, 1 };
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 8a46d70..9a7941c 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -478,11 +478,16 @@ pub const Ops = struct {
+     /// TF_DS_IDX_FUSED: the candidate pool's blockMax -> topk_indices -> poolPick in one launch (tf_ds_idx_fused_kernel),
+     /// one block per row. `mask` / `cblk` 0 leave one out (like poolPick) and are the only outputs the fused launch
+     /// writes (its maxima and selection stay on chip; the unfused sequence still writes bmax/pidx); `every` is the vis
+-    /// the selection applies (the call sites pass every_vis). The wrapper refuses (rather than falls back) when the
+-    /// bounds the caller passed to fuseOk are not met - the call sites only call it after `idx_fused.fuseOk` agrees.
+-    pub fn idxFused(o: *const Ops, s: cuda.Stream, score: u64, ss: usize, width: usize, bsize: usize, vis: u64, every: u64, k: usize, mask: u64, ms: usize, cblk: u64, rows: usize) !void {
++    /// the selection applies (the call sites pass every_vis). `keys` / `tmax` 0 leave the key fold out; asked for, the
++    /// launch also writes queries.py _score_keys' outputs (every column's key and each 64-key tile's largest key) from
++    /// the same score reads, so the decode arm skips that launch (bsize must be idx_fused.key_fold_bsize). The wrapper
++    /// refuses (rather than falls back) when the bounds the caller passed to fuseOk are not met - the call sites only
++    /// call it after `idx_fused.fuseOk` agrees.
++    pub fn idxFused(o: *const Ops, s: cuda.Stream, score: u64, ss: usize, width: usize, bsize: usize, vis: u64, every: u64, k: usize, mask: u64, ms: usize, cblk: u64, keys: u64, tmax: u64, rows: usize) !void {
+         if (rows == 0) return;
+         if (score == 0 or vis == 0 or every == 0) return error.BadIdxFusedArgs;
++        // the key fold (queries.py _score_keys' two outputs) needs bsize == 8, and the tile maxima only exist with the keys
++        if ((keys != 0) != (tmax != 0) or (keys != 0 and bsize != idx_fused.key_fold_bsize)) return error.BadIdxFusedArgs;
+         if (width == 0 or width > std.math.maxInt(c_int) or bsize == 0 or bsize > std.math.maxInt(c_int)) return error.BadIdxFusedArgs;
+         const nbk = 1 + (width - 1) / bsize;
+         if (ss < width or (mask != 0 and ms < nbk) or nbk > idx_fused.max_nbk or k < 1 or k > idx_fused.max_k or k > nbk) return error.BadIdxFusedArgs;
+@@ -497,6 +502,8 @@ pub const Ops = struct {
+         a.add(mask);
+         a.add(@as(c_longlong, @intCast(ms)));
+         a.add(cblk);
++        a.add(keys);
++        a.add(tmax);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
+         try cuda.launch.launch(o.idx_fused_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
+     }
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 703f90a..02f9d87 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1473,7 +1473,7 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+             if (pooled and li == c.candidate_source) {
+                 // TF_DS_IDX_FUSED: the same three launches in one (off by default); the mask keeps its offset (mrows)
+                 if (idx_fused.fuseOk(e.ops.idx_fused, m, n_comp_end, cb, nbk, pk)) {
+-                    try e.ops.idxFused(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.every, pk, mrows, ch.pool_ms, 0, m);
++                    try e.ops.idxFused(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.every, pk, mrows, ch.pool_ms, 0, 0, 0, m);
+                 } else {
+                     try e.ops.blockMax(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.bmax, nbk, m);
+                     try e.ops.topkIndices(e.s, ch.bmax, nbk, m, nbk, pk, ch.every, ch.pidx);
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 80a9de2..6200230 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1286,6 +1286,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                 // the candidate source: the scores, the pool from them, then their keys' top-k
+                 try tri_index.indexScore(t, rd.iq4, k, rd.iw, vis, nb, rd.score, cbase, false, null, false, R, ih, id);
+                 const cb = c.candidate_block;
++                var keys_done = false; // the fused launch wrote rd.keys / rd.tmax (0195's key fold)
+                 if (nb > c.candidate_blocks * cb) {
+                     // _candidate_blocks: the block maxima (the newest pinned), their candidate_blocks best (ties to the
+                     // lower block, ascending), those with a finite maximum as block ids, the rest -1
+@@ -1293,7 +1294,10 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     // TF_DS_IDX_FUSED: the same three launches in one (off by default; the bounds keep the pool's
+                     // regime, past them the unfused sequence runs)
+                     if (idx_fused.fuseOk(e.ops.idx_fused, R, nb, cb, nbk, c.candidate_blocks)) {
+-                        try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
++                        // the pool, and at the served block size the row's _score_keys outputs too (one read of the
++                        // scores; other block sizes keep that launch below)
++                        keys_done = cb == idx_fused.key_fold_bsize;
++                        try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, if (keys_done) rd.keys else 0, if (keys_done) rd.tmax else 0, R);
+                     } else {
+                         try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
+                         try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
+@@ -1306,10 +1310,10 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     rd.has_cand = true;
+                 }
+                 if (nb > tri_index.topk_fused_max) {
+-                    try tri_index.scoreKeys(t, rd.score, rd.tmax, rd.keys, R, nb);
++                    if (!keys_done) try tri_index.scoreKeys(t, rd.score, rd.tmax, rd.keys, R, nb);
+                     try tri_index.topkSelectPruned(t, rd.keys, nb, rd.tmax, kk, vis, rd.cidx, rd.pbufs, top, R, nb);
+                 } else {
+-                    try tri_index.scoreKeys(t, rd.score, null, rd.keys, R, nb);
++                    if (!keys_done) try tri_index.scoreKeys(t, rd.score, null, rd.keys, R, nb);
+                     try tri_index.topkSelect(t, rd.keys, nb, kk, vis, rd.cidx, top, R, nb);
+                 }
+             } else return notPorted(@src()); // the scores' topk_indices path (a top-k of no power of two)

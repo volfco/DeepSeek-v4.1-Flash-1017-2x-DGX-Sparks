@@ -1,0 +1,509 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits aa57b13da281..334ad82e818c)
+# dsv41: tf-dsv41-probe, the MoE pure-read probe (W4, 0144) - the achievable GB/s of reading picked experts' trellis bytes, sorted vs shuffled vs one expert 13 times, each with the L2 prefetch stream off and on
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
+index fa950087d6f9d12d533c624b9f767092893e8a3b..ec47ccb5139d08498eb5b81a4bb8a0c4ec873804 100644
+--- a/zig/build/cuda.zig
++++ b/zig/build/cuda.zig
+@@ -163,6 +163,10 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
+     ds_lanes.addImport("cuda", cuda);
+     ds_lanes.addImport("lanes", mods.lanes);
+     b.installArtifact(b.addExecutable(.{ .name = "tf-dsv41-lanes", .root_module = ds_lanes }));
++    // the MoE pure-read probe: achievable GB/s reading expert trellis bytes, bus-bound vs trellis-decode-bound (UNVERIFIED-BUILD: probe.cu's read kernels not through nvcc)
++    const ds_probe = b.createModule(.{ .root_source_file = b.path("zig/src/families/dsv41/probe_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
++    ds_probe.addImport("cuda", cuda);
++    b.installArtifact(b.addExecutable(.{ .name = "tf-dsv41-probe", .root_module = ds_probe }));
+     // the GLM port's spill block staging kernel (dsv41_port.cu) against its CPU reference, one GPU
+     const ds_port = b.createModule(.{ .root_source_file = b.path("zig/src/families/dsv41/port_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+     ds_port.addImport("cuda", cuda);
+@@ -233,6 +237,10 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, step: *std.Build.S
+     port.addImport("cuda", cuda);
+     const port_run = b.addRunArtifact(b.addTest(.{ .root_module = port }));
+     step.dependOn(&port_run.step);
++    // probe_main.zig alone: the MoE pure-read probe's spec parse and its three read-order cases (no GPU)
++    const probe = b.createModule(.{ .root_source_file = b.path("zig/src/families/dsv41/probe_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
++    probe.addImport("cuda", cuda);
++    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = probe })).step);
+     // tri_norm.zig alone (no dsv41 module): the kit-driven _rowmm_parts split for rounds past 16 rows, every recorded launch
+     const norm = b.createModule(.{ .root_source_file = b.path("zig/src/families/dsv41/tri_norm.zig"), .target = host, .optimize = .debug, .link_libc = true });
+     norm.addImport("cuda", cuda);
+diff --git a/zig/kernels/cuda/probe.cu b/zig/kernels/cuda/probe.cu
+index d3359e785756c1561a55d4ead08ecd7217b09348..f5ab9f96f8de8b9f77df2478f4f0d360204e918e 100644
+--- a/zig/kernels/cuda/probe.cu
++++ b/zig/kernels/cuda/probe.cu
+@@ -54,3 +54,123 @@ extern "C" __global__ void tf_probe_pdl_step(unsigned long long* counter, unsign
+     *counter += add;
+     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+ }
++
++// ---------------------------------------------------------------------------
++// The MoE pure-read probe (W4, 0144): read expert trellis bytes at scale and accumulate a checksum, one word per
++// block, to separate "bus-bound" from "trellis-decode-bound". Grid shaped like the decode launch (places x I/128
++// blocks, 4 warps); places is the number of ranges (13 picked experts), I/128 the column tiles (9 at I=1152).
++// Contract: every range is 16-byte aligned and its length a multiple of 16; at most 16 ranges per launch.
++// UNVERIFIED-BUILD: this file has never been through nvcc on the build host.
++
++struct ProbeRead {
++    const char* ptr[16];
++    unsigned long long bytes[16];
++    int n;
++};
++
++struct ProbePrefetch {
++    const char* ptr[16];
++    unsigned long long bytes[16];
++    int n;
++};
++
++// Block-uniform slice of range blockIdx.x: [start, end); equal ceiling slices, rounded to 16 bytes. A block whose
++// slice is empty reads nothing and reports a zero word.
++__device__ __forceinline__ void probe_slice(const ProbeRead& a, long long& start, long long& end) {
++    const long long len = (long long)a.bytes[blockIdx.x];
++    const long long per = (((len + gridDim.y - 1) / gridDim.y) + 15) & ~15LL;
++    start = per * blockIdx.y;
++    end = (start + per < len) ? (start + per) : len;
++}
++
++// 128 threads: per-warp shuffle reduce, then the first warp's lanes 0..3. Valid on every thread; only thread 0's
++// value is meaningful.
++__device__ __forceinline__ unsigned long long probe_block_sum(unsigned long long v, unsigned long long* shared) {
++    for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
++    const int lane = threadIdx.x & 31;
++    const int warp = threadIdx.x >> 5;
++    if (lane == 0) shared[warp] = v;
++    __syncthreads();
++    if (threadIdx.x == 0) return shared[0] + shared[1] + shared[2] + shared[3];
++    return 0;
++}
++
++// Streaming read of the given ranges with __ldcs (evict-first), one uint4 a load. Grid (places, tiles), block 128.
++extern "C" __global__ void __launch_bounds__(128) probe_read_ldg(ProbeRead a, unsigned long long* out) {
++    __shared__ unsigned long long shared[4];
++    long long start, end;
++    probe_slice(a, start, end);
++    unsigned long long acc = 0;
++    if (start < end) {
++        const uint4* p = reinterpret_cast<const uint4*>(a.ptr[blockIdx.x] + start);
++        const long long n = (end - start) >> 4;
++        for (long long i = threadIdx.x; i < n; i += blockDim.x) {
++            const uint4 w = __ldcs(p + i);
++            acc += (unsigned long long)w.x + (unsigned long long)w.y + (unsigned long long)w.z + (unsigned long long)w.w;
++        }
++    }
++    const unsigned long long total = probe_block_sum(acc, shared);
++    // Every block leaves exactly one word, even the empty-slice ones (total == 0 there).
++    if (threadIdx.x == 0) out[blockIdx.x * gridDim.y + blockIdx.y] = total;
++}
++
++// The same ranges through cp.async into a 3-stage shared ring, 4 warps (like grouped_cp_kernel's S=3 ring): each
++// stage holds 128 uint4 = one per thread. Batches of 128 x 16 B; one commit_group per batch, wait_group 1 keeps the
++// oldest group complete before its stage is read. Reads sm_80+ cp.async.cg.
++extern "C" __global__ void __launch_bounds__(128) probe_read_cpasync(ProbeRead a, unsigned long long* out) {
++    __shared__ uint4 ring[3][128];
++    __shared__ unsigned long long shared[4];
++    long long start, end;
++    probe_slice(a, start, end);
++    unsigned long long acc = 0;
++    if (start < end) {
++        const long long n = (end - start) >> 4;   // 16-byte units
++        const long long batches = (n + 127) >> 7; // 128 units a stage
++        const char* base = a.ptr[blockIdx.x] + start;
++        // Prologue: fill stages 0 and 1, committing an empty group when the batch does not exist.
++        for (long long b = 0; b < 2; ++b) {
++            if (b < batches) {
++                const long long v = b * 128 + threadIdx.x;
++                if (v < n) {
++                    const unsigned dst = (unsigned)__cvta_generic_to_shared(&ring[b][threadIdx.x]);
++                    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst), "l"(base + v * 16) : "memory");
++                }
++            }
++            asm volatile("cp.async.commit_group;" ::: "memory");
++        }
++        for (long long b = 0; b < batches; ++b) {
++            asm volatile("cp.async.wait_group 1;" ::: "memory");
++            __syncthreads();
++            const int s = (int)(b % 3);
++            const long long v = b * 128 + threadIdx.x;
++            if (v < n) {
++                const uint4 w = ring[s][threadIdx.x];
++                acc += (unsigned long long)w.x + (unsigned long long)w.y + (unsigned long long)w.z + (unsigned long long)w.w;
++            }
++            __syncthreads(); // every warp done with the stage before it is refilled
++            const long long nb = b + 2;
++            if (nb < batches) {
++                const long long nv = nb * 128 + threadIdx.x;
++                if (nv < n) {
++                    const unsigned dst = (unsigned)__cvta_generic_to_shared(&ring[nb % 3][threadIdx.x]);
++                    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst), "l"(base + nv * 16) : "memory");
++                }
++            }
++            asm volatile("cp.async.commit_group;" ::: "memory"); // one group a batch, empty past the end
++        }
++    }
++    const unsigned long long total = probe_block_sum(acc, shared);
++    if (threadIdx.x == 0) out[blockIdx.x * gridDim.y + blockIdx.y] = total;
++}
++
++// Every 128-byte line of each range brought into L2; writes nothing. A stand-alone prefetch stream for the
++// with-prefetch half of the report; grid-strided, plain prefetch.global.L2 (PTX 2.0, any sm_20+).
++extern "C" __global__ void probe_prefetch_l2(ProbePrefetch a) {
++    const long long stride = (long long)gridDim.x * blockDim.x;
++    const long long at = (long long)blockIdx.x * blockDim.x + threadIdx.x;
++    for (int t = 0; t < a.n; ++t) {
++        const long long lines = (long long)(a.bytes[t] >> 7);
++        for (long long i = at; i < lines; i += stride)
++            asm volatile("prefetch.global.L2 [%0];" :: "l"(a.ptr[t] + (i << 7)) : "memory");
++    }
++}
+diff --git a/zig/src/families/dsv41/probe_main.zig b/zig/src/families/dsv41/probe_main.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..fdf6be1686febc62abaa89700679598795f6e369
+--- /dev/null
++++ b/zig/src/families/dsv41/probe_main.zig
+@@ -0,0 +1,346 @@
++//! tf-dsv41-probe [options] -- the MoE pure-read probe (W4, 0144): measures achievable GB/s reading expert trellis
++//! bytes, to test whether the decode MoE is bus-bound or trellis-decode-bound. Three cases x {prefetch off, on} per
++//! kernel, reported as one RESULT line each:
++//!   distinct-sorted    the picked experts' ranges in address order (what the driver should see from a fresh pick)
++//!   distinct-shuffled  the same ranges in a seeded shuffled order (order sensitivity of the bus)
++//!   repeat-first       the first range 13 times (L2 residency: the picked-expert set re-read every decode round)
++//! prefetch=on runs probe_prefetch_l2 on a side stream with the same ranges beside the timed kernel.
++//!
++//! The ranges come from either:
++//!   --spec FILE    JSON list of {"ptr": <u64 or "0x..">, "len_bytes": <u64>} — device addresses of one layer's picked
++//!                  experts' trellis bytes, as the engine knows them (at most 16 entries; each len a multiple of 16;
++//!                  ptr 16-byte aligned). generate with e.g.:
++//!                    jq -c '.[] | {ptr: (.ptr | tonumber), len_bytes: .len_bytes}' picked.json > spec.json
++//!   --synthetic    (default) one cudaMalloc'd buffer, N evenly-spaced ranges of the right sizes:
++//!                  --experts N (13) --expert-bytes B (16777216 = 16 MiB, a placeholder: pass the real per-expert
++//!                  trellis + scales byte count of the layer and rank under probe) --stride-bytes S (default =
++//!                  expert-bytes, i.e. contiguous; pass a larger stride for gaps between experts)
++//! Other options: --tiles T (9 = I/128 at I=1152) --reps R (5) --seed S (shuffle seed, 0x144) --kernel ldg|cpasync|both
++//! Addresses in the spec are raw device pointers: this binary does not map or own them; run it on the rank that holds
++//! the weights.
++//!
++//! Timing: CUDA events around the kernel; bytes counted as the sum of the launched ranges' lengths (repeat-first
++//! counts 13x the one expert). GB/s = bytes / median milliseconds. The checksum (sum of the per-block words) is
++//! printed so a run can be sanity-checked against itself; it is not a correctness oracle for the MoE math.
++//!
++//! Needs a build with the kernels (-Dnvcc=... or -Dfatbins=...); otherwise it exits 2. probe.cu's new kernels have
++//! NOT been compiled on the build host (no nvcc): UNVERIFIED-BUILD.
++//!
++//! Lines starting with '#' document the run; RESULT lines are machine-greppable:
++//!   RESULT probe kernel=ldg case=distinct-sorted prefetch=off experts=13 tiles=9 bytes=220200960 reps=5 median_gbs=... best_gbs=... worst_gbs=... checksum=0x...
++const std = @import("std");
++const cuda = @import("cuda");
++
++const usage =
++    "usage: tf-dsv41-probe [--spec FILE | --synthetic] [--experts N] [--expert-bytes B] [--stride-bytes B]\n" ++
++    "                      [--tiles T] [--reps R] [--seed S] [--kernel ldg|cpasync|both]\n" ++
++    "  --spec FILE: JSON list of {\"ptr\": <u64>, \"len_bytes\": <u64>} device addresses (one layer's picked experts).\n" ++
++    "  --synthetic (default): cudaMalloc'd buffer, N evenly-spaced ranges of --expert-bytes at --stride-bytes.\n";
++
++const max_ranges = 16;
++
++/// Layout-identical to probe.cu's ProbeRead / ProbePrefetch (16 pointers, 16 byte counts, one int; passed by value).
++const Ranges = extern struct {
++    ptr: [max_ranges]u64,
++    bytes: [max_ranges]u64,
++    n: c_int,
++};
++
++const Kernel = enum { ldg, cpasync };
++
++const Options = struct {
++    spec: ?[]const u8 = null,
++    experts: usize = 13,
++    expert_bytes: usize = 16 << 20,
++    stride_bytes: ?usize = null,
++    tiles: usize = 9, // I/128 at I = 1152
++    reps: usize = 5,
++    seed: u64 = 0x144,
++    kernels: []const Kernel = &.{ .ldg, .cpasync },
++};
++
++fn parseSize(s: []const u8) !usize {
++    return std.fmt.parseInt(usize, s, 0); // decimal, or 0x…
++}
++
++fn parseArgs(args: []const []const u8) !Options {
++    var o: Options = .{};
++    var kernel: ?[]const u8 = null;
++    var i: usize = 1;
++    while (i < args.len) : (i += 1) {
++        const a = args[i];
++        const next = struct {
++            fn get(argv: []const []const u8, at: *usize) ![]const u8 {
++                if (at.* + 1 >= argv.len) return error.MissingValue;
++                at.* += 1;
++                return argv[at.*];
++            }
++        }.get;
++        if (std.mem.eql(u8, a, "--spec")) {
++            o.spec = try next(args, &i);
++        } else if (std.mem.eql(u8, a, "--synthetic")) {
++            o.spec = null;
++        } else if (std.mem.eql(u8, a, "--experts")) {
++            o.experts = try parseSize(try next(args, &i));
++        } else if (std.mem.eql(u8, a, "--expert-bytes")) {
++            o.expert_bytes = try parseSize(try next(args, &i));
++        } else if (std.mem.eql(u8, a, "--stride-bytes")) {
++            o.stride_bytes = try parseSize(try next(args, &i));
++        } else if (std.mem.eql(u8, a, "--tiles")) {
++            o.tiles = try parseSize(try next(args, &i));
++        } else if (std.mem.eql(u8, a, "--reps")) {
++            o.reps = try parseSize(try next(args, &i));
++        } else if (std.mem.eql(u8, a, "--seed")) {
++            o.seed = try std.fmt.parseInt(u64, try next(args, &i), 0);
++        } else if (std.mem.eql(u8, a, "--kernel")) {
++            kernel = try next(args, &i);
++        } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
++            return error.Help;
++        } else return error.UnknownArg;
++    }
++    if (kernel) |k| {
++        if (std.mem.eql(u8, k, "ldg")) {
++            o.kernels = &.{.ldg};
++        } else if (std.mem.eql(u8, k, "cpasync")) {
++            o.kernels = &.{.cpasync};
++        } else if (std.mem.eql(u8, k, "both")) {
++            o.kernels = &.{ .ldg, .cpasync };
++        } else return error.UnknownArg;
++    }
++    if (o.experts < 1 or o.experts > max_ranges) return error.BadExperts;
++    if (o.expert_bytes < 16 or o.expert_bytes % 16 != 0) return error.BadExpertBytes;
++    if (o.stride_bytes) |s| if (s < o.expert_bytes) return error.BadStride;
++    if (o.tiles < 1 or o.tiles > 64) return error.BadTiles;
++    if (o.reps < 1 or o.reps > 1000) return error.BadReps;
++    return o;
++}
++
++/// One spec entry: device address + byte length.
++const Range = struct { ptr: u64, len: u64 };
++
++fn specRange(v: std.json.Value) !Range {
++    if (v != .object) return error.BadSpec;
++    const p = v.object.get("ptr") orelse return error.BadSpec;
++    const l = v.object.get("len_bytes") orelse return error.BadSpec;
++    const ptr: u64 = switch (p) {
++        .integer => |x| if (x > 0) @intCast(x) else return error.BadSpec,
++        .string => |s| try std.fmt.parseInt(u64, s, 0),
++        else => return error.BadSpec,
++    };
++    const len: u64 = switch (l) {
++        .integer => |x| if (x > 0) @intCast(x) else return error.BadSpec,
++        .string => |s| try std.fmt.parseInt(u64, s, 0),
++        else => return error.BadSpec,
++    };
++    if (len % 16 != 0) return error.BadSpecLen;
++    if (ptr % 16 != 0) return error.BadSpecPtr;
++    return .{ .ptr = ptr, .len = len };
++}
++
++fn readSpec(gpa: std.mem.Allocator, io: std.Io, path: []const u8, out: *[max_ranges]Range) !usize {
++    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
++    defer gpa.free(text);
++    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
++    defer parsed.deinit();
++    if (parsed.value != .array) return error.BadSpec;
++    const items = parsed.value.array.items;
++    if (items.len < 1 or items.len > max_ranges) return error.BadSpecCount;
++    for (items, 0..) |item, i| out[i] = try specRange(item);
++    return items.len;
++}
++
++/// The ranges in `order` (indices into `ranges`) packed for the kernel; every launch gets the same struct shape.
++fn packRanges(ranges: []const Range, order: []const usize) Ranges {
++    var out: Ranges = .{ .ptr = @splat(0), .bytes = @splat(0), .n = @intCast(order.len) };
++    for (order, 0..) |src, i| {
++        out.ptr[i] = ranges[src].ptr;
++        out.bytes[i] = ranges[src].len;
++    }
++    return out;
++}
++
++fn sortOrder(ranges: []const Range) [max_ranges]usize {
++    var order: [max_ranges]usize = undefined;
++    for (0..ranges.len) |i| order[i] = i;
++    std.mem.sort(usize, order[0..ranges.len], ranges, struct {
++        fn lt(rs: []const Range, a: usize, b: usize) bool {
++            return rs[a].ptr < rs[b].ptr;
++        }
++    }.lt);
++    return order;
++}
++
++fn shuffledOrder(ranges: []const Range, seed: u64) [max_ranges]usize {
++    var order = sortOrder(ranges);
++    var prng: std.Random.DefaultPrng = .init(seed);
++    prng.random().shuffle(usize, order[0..ranges.len]);
++    return order;
++}
++
++fn repeatOrder(ranges: []const Range) [max_ranges]usize {
++    var order = sortOrder(ranges);
++    const first = order[0];
++    for (0..ranges.len) |i| order[i] = first;
++    return order;
++}
++
++fn totalBytes(ranges: []const Range, order: []const usize) u64 {
++    var sum: u64 = 0;
++    for (order) |i| sum += ranges[i].len;
++    return sum;
++}
++
++const Case = struct { name: []const u8, order: [max_ranges]usize };
++
++pub fn main(init: std.process.Init) !u8 {
++    const gpa = init.gpa;
++    const io = init.io;
++    const args = try init.minimal.args.toSlice(init.arena.allocator());
++    var o = parseArgs(args) catch |e| {
++        std.debug.print("{s}", .{usage});
++        if (e == error.Help) return 0;
++        std.debug.print("tf-dsv41-probe: bad arguments ({s})\n", .{@errorName(e)});
++        return 2;
++    };
++    if (!cuda.kernels.available) {
++        std.debug.print("tf-dsv41-probe: built without kernel images (build with -Dnvcc=... or -Dfatbins=...)\n", .{});
++        return 2;
++    }
++    if (cuda.kernels.probe.len == 0) {
++        std.debug.print("tf-dsv41-probe: built without the probe fatbin\n", .{});
++        return 2;
++    }
++
++    var driver = try cuda.Driver.open();
++    defer driver.close();
++    var ctx = try cuda.Context.init(&driver, 0);
++    defer ctx.deinit();
++
++    var ranges: [max_ranges]Range = undefined;
++    var n_ranges: usize = undefined;
++    var synth: ?cuda.DeviceBuffer = null;
++    defer if (synth) |*b| b.free();
++    if (o.spec) |path| {
++        n_ranges = try readSpec(gpa, io, path, &ranges);
++        std.debug.print("# spec: {s} ({d} ranges)\n", .{ path, n_ranges });
++    } else {
++        o.stride_bytes = o.stride_bytes orelse o.expert_bytes;
++        const total: usize = (o.experts - 1) * o.stride_bytes.? + o.expert_bytes;
++        synth = try cuda.DeviceBuffer.alloc(&driver, total);
++        try synth.?.fill8(0xA5, null);
++        for (0..o.experts) |i| {
++            ranges[i] = .{ .ptr = synth.?.ptr + i * o.stride_bytes.?, .len = o.expert_bytes };
++        }
++        n_ranges = o.experts;
++        std.debug.print("# synthetic: {d} ranges of {d} bytes, stride {d} (one cudaMalloc'd buffer of {d} bytes)\n", .{ o.experts, o.expert_bytes, o.stride_bytes.?, total });
++    }
++
++    var stream = try cuda.Stream.init(&driver, true);
++    defer stream.deinit();
++    var prefetch_stream = try cuda.Stream.init(&driver, true);
++    defer prefetch_stream.deinit();
++    var mod = try cuda.Module.load(&driver, cuda.kernels.probe);
++    defer mod.unload();
++    const f_ldg = try mod.function("probe_read_ldg");
++    const f_cpasync = try mod.function("probe_read_cpasync");
++    const f_prefetch = try mod.function("probe_prefetch_l2");
++
++    const out_words = try gpa.alloc(u64, n_ranges * o.tiles);
++    defer gpa.free(out_words);
++    var out = try cuda.DeviceBuffer.alloc(&driver, out_words.len * 8);
++    defer out.free();
++    var start_ev = try cuda.Event.init(&driver, true);
++    defer start_ev.deinit();
++    var end_ev = try cuda.Event.init(&driver, true);
++    defer end_ev.deinit();
++
++    std.debug.print("# kernels: grid=({d}, {d}) block=128; reps={d}; seed={d}\n", .{ n_ranges, o.tiles, o.reps, o.seed });
++    std.debug.print("# repeat-first: the address-sorted first range read {d} times\n", .{n_ranges});
++
++    const cases = [_]Case{
++        .{ .name = "distinct-sorted", .order = sortOrder(ranges[0..n_ranges]) },
++        .{ .name = "distinct-shuffled", .order = shuffledOrder(ranges[0..n_ranges], o.seed) },
++        .{ .name = "repeat-first", .order = repeatOrder(ranges[0..n_ranges]) },
++    };
++
++    for (o.kernels) |kernel| {
++        const fn_ = if (kernel == .ldg) f_ldg else f_cpasync;
++        const kernel_name: []const u8 = if (kernel == .ldg) "ldg" else "cpasync";
++        for (cases) |case| {
++            const order = case.order[0..n_ranges];
++            const packed_ranges = packRanges(ranges[0..n_ranges], order);
++            const bytes = totalBytes(ranges[0..n_ranges], order);
++            for ([_]bool{ false, true }) |with_prefetch| {
++                const times = try gpa.alloc(f32, o.reps);
++                defer gpa.free(times);
++                // one warmup launch (also proves the kernel launches), then the timed reps
++                for (0..o.reps + 1) |iter| {
++                    const warmup = iter == 0;
++                    if (with_prefetch) {
++                        // the two streams are unordered: this is submitted first, so the stream runs beside (or ahead
++                        // of) the read, and the events below time the read kernel alone
++                        var pargs: cuda.Args = .{};
++                        pargs.add(packRanges(ranges[0..n_ranges], order));
++                        try cuda.launch.launch(f_prefetch, .{ .grid = .{ .x = 8 }, .block = .{ .x = 128 } }, prefetch_stream, &pargs);
++                    }
++                    try start_ev.record(stream);
++                    var kargs: cuda.Args = .{};
++                    kargs.add(packed_ranges);
++                    kargs.add(out.ptr);
++                    try cuda.launch.launch(fn_, .{ .grid = .{ .x = @intCast(n_ranges), .y = @intCast(o.tiles) }, .block = .{ .x = 128 } }, stream, &kargs);
++                    try end_ev.record(stream);
++                    try stream.synchronize();
++                    if (with_prefetch) try prefetch_stream.synchronize();
++                    if (!warmup) times[iter - 1] = try cuda.Event.elapsedMs(start_ev, end_ev);
++                }
++                std.mem.sort(f32, times, {}, std.sort.asc(f32));
++                const median = times[times.len / 2];
++                try out.download(0, std.mem.sliceAsBytes(out_words));
++                var checksum: u64 = 0;
++                for (out_words) |w| checksum +%= w;
++                const gbs = struct {
++                    fn of(b: u64, ms: f32) f64 {
++                        return @as(f64, @floatFromInt(b)) / (@as(f64, ms) * 1e6);
++                    }
++                }.of;
++                std.debug.print("RESULT probe kernel={s} case={s} prefetch={s} experts={d} tiles={d} bytes={d} reps={d} median_gbs={d:.1} best_gbs={d:.1} worst_gbs={d:.1} checksum=0x{x}\n", .{
++                    kernel_name,                                                            case.name,                                 if (with_prefetch) "on" else "off", n_ranges, o.tiles, bytes, o.reps,
++                    gbs(bytes, median),                                                     gbs(bytes, times[0]),                      gbs(bytes, times[times.len - 1]), checksum,
++                });
++            }
++        }
++    }
++    return 0;
++}
++
++test "a spec entry must be a 16-byte aligned pointer with a length that is a multiple of 16" {
++    const ok = "[{\"ptr\": 4096, \"len_bytes\": 1024}, {\"ptr\": \"0x2000\", \"len_bytes\": \"1024\"}]";
++    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, ok, .{});
++    defer parsed.deinit();
++    const a = try specRange(parsed.value.array.items[0]);
++    try std.testing.expect(a.ptr == 4096 and a.len == 1024);
++    const b = try specRange(parsed.value.array.items[1]);
++    try std.testing.expect(b.ptr == 0x2000 and b.len == 1024); // hexadecimal strings parse too
++    var unaligned = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "[{\"ptr\": 4100, \"len_bytes\": 1024}]", .{});
++    defer unaligned.deinit();
++    try std.testing.expectError(error.BadSpecPtr, specRange(unaligned.value.array.items[0]));
++    var odd = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "[{\"ptr\": 4096, \"len_bytes\": 4097}]", .{});
++    defer odd.deinit();
++    try std.testing.expectError(error.BadSpecLen, specRange(odd.value.array.items[0]));
++}
++
++test "the three cases: address order, a permutation of it, and the lowest range repeated" {
++    const r = [_]Range{ .{ .ptr = 0x3000, .len = 16 }, .{ .ptr = 0x1000, .len = 16 }, .{ .ptr = 0x2000, .len = 32 } };
++    const sorted = sortOrder(&r);
++    const repeated = repeatOrder(&r);
++    try std.testing.expectEqualSlices(usize, &.{ 1, 2, 0 }, sorted[0..3]);
++    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 1 }, repeated[0..3]);
++    try std.testing.expectEqual(@as(u64, 48), totalBytes(&r, &[_]usize{ 1, 1, 1 }));
++    const shuffled = shuffledOrder(&r, 0x144);
++    var seen = [_]bool{ false, false, false };
++    for (shuffled[0..3]) |i| {
++        try std.testing.expect(!seen[i]);
++        seen[i] = true;
++    }
++}
++

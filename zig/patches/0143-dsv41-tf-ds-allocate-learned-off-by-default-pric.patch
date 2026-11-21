@@ -1,0 +1,308 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 334ad82e818c..4daa6082448d)
+# dsv41: TF_DS_ALLOCATE_LEARNED (off by default) prices a shared round's rows with the depth rule's learned round costs - the static ROUND_MS only where a row count was never measured
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/core/lanes/allocate_learned_test.zig b/zig/src/core/lanes/allocate_learned_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..215ad7e972ed86a4d99275e08205873cc9741c0b
+--- /dev/null
++++ b/zig/src/core/lanes/allocate_learned_test.zig
+@@ -0,0 +1,148 @@
++//! TF_DS_ALLOCATE_LEARNED: the window allocator prices rows with the depth rule's learned round costs where a round
++//! of that depth was measured, the static shared table where it was not. The two tables must rank candidate depths
++//! differently for the switch to mean anything; these construct such pairs.
++const std = @import("std");
++const config = @import("config.zig");
++const Config = config.Config;
++const Cost = config.Cost;
++const depth = @import("depth.zig");
++const Table = @import("table.zig").Table;
++const Engine = @import("engine.zig").Engine;
++const Stream = @import("stream.zig").Stream;
++const fake = @import("fake.zig");
++const be = @import("backend.zig");
++const win = @import("windows.zig");
++
++const gpa = std.testing.allocator;
++
++const chain = [_]f64{ 0.9, 0.81, 0.729, 0.6561 };
++
++/// The served ROUND_MS table's first 16 rows (dsv41's draft.round_ms).
++const served = [_]f64{ 30.0, 35.2, 39.9, 44.9, 48.6, 52.1, 55.6, 59.1, 62.7, 66.3, 69.6, 72.9, 75.5, 78.2, 81.3, 84.4 };
++
++fn staticServed() [16]Cost {
++    var c: [16]Cost = undefined;
++    for (&c, 1..) |*x, w| x.* = .{ .width = @intCast(w), .ms = served[w - 1] };
++    return c;
++}
++
++/// A steep static table: every row costs 25 ms, so wide rounds never pay back.
++fn staticSteep() [16]Cost {
++    var c: [16]Cost = undefined;
++    for (&c, 1..) |*x, w| x.* = .{ .width = @intCast(w), .ms = 25.0 * @as(f64, @floatFromInt(w)) };
++    return c;
++}
++
++/// Keyed by drafts = rows - 1, as observeCost keys them. The measured fit on this pair: ~11.4 ms for a round's first
++/// row plus ~4.9 ms a row past it.
++const measured_all: [15]f64 = blk: {
++    var t: [15]f64 = undefined;
++    for (&t, 1..) |*x, d| x.* = 11.4 + 4.9 * @as(f64, @floatFromInt(d + 1));
++    break :blk t;
++};
++
++/// Learned round times rising 20 ms a draft: rows past the static table's knee cost much more than it prices.
++const steep_all: [15]f64 = blk: {
++    var t: [15]f64 = undefined;
++    for (&t, 1..) |*x, d| x.* = 30.0 + 20.0 * @as(f64, @floatFromInt(d));
++    break :blk t;
++};
++
++/// The steep learned table from drafts 3 on (rows 4+); rows 2 and 3 are never measured and keep the static table.
++const steep_from3: [13]f64 = blk: {
++    var t: [13]f64 = undefined;
++    for (&t, 3..) |*x, d| x.* = 30.0 + 20.0 * @as(f64, @floatFromInt(d));
++    break :blk t;
++};
++
++fn chances(_: *anyopaque, _: *Stream, out: []f64) anyerror!bool {
++    @memcpy(out, chain[0..out.len]);
++    return true;
++}
++
++fn startNow(_: *anyopaque) void {}
++
++fn elapsed(_: *anyopaque, _: be.Mark) f64 {
++    return 0.0;
++}
++
++const Seed = struct { from: i64, ms: []const f64 };
++
++/// The drafts two identical held-chain head plans are granted, with the learned costs seeded through observeCost
++/// (no stream's first round is seeded: those carry the prefill-to-decode switch and stay out of the table).
++fn grant(shared_costs: []const Cost, seed: ?Seed, learned: bool) ![2]u32 {
++    var cfg = try Config.init(gpa, .{
++        .exact_width = 16,
++        .mtp = true,
++        .speculate = true,
++        .speculate_early = false,
++        .drafts = 4,
++        .mtp_step_ms = 0.5,
++        .draft_probabilities = true,
++        .shared_costs = shared_costs,
++        .batch_rows = 16,
++        .allocate_learned = learned,
++    }, 16, 15);
++    defer cfg.deinit(gpa);
++    var target: fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var vtable = target.backend().vtable.*;
++    vtable.probabilities = chances;
++    var token: u8 = 0;
++    var engine = Engine.init(gpa, &cfg, .{ .ptr = &target, .vtable = &vtable }, .{ .ptr = &token, .vtable = &.{ .start = startNow, .elapsed_ms = elapsed } });
++    defer engine.deinit();
++    if (seed) |s| {
++        for (s.ms, 0..) |ms, k| try engine.rule.observeCost(s.from + @as(i64, @intCast(k)), ms, false, null);
++    }
++    var streams: [2]Stream = undefined;
++    var plans: [2]win.Plan = undefined;
++    for (&streams, &plans, 0..) |*s, *p, i| {
++        s.* = try Stream.init(gpa, .{ .id = if (i == 0) "a" else "b", .prompt = &.{ 1, 2, 3 }, .max_new = 8 });
++        p.* = .{ .stream = s, .position = 0, .kind = .head, .held = 4 };
++    }
++    defer for (&streams) |*s| s.deinit(gpa);
++    try win.allocate(&engine, &plans);
++    return .{ streams[0].granted.?, streams[1].granted.? };
++}
++
++test "with the switch on, rows past the static table's prices are refused for the learned ones" {
++    const costs = staticServed();
++    const off = try grant(&costs, .{ .from = 1, .ms = &steep_all }, false);
++    try std.testing.expectEqualSlices(u32, &.{ 4, 4 }, &off); // the table's favorite: the widest round
++    const on = try grant(&costs, .{ .from = 1, .ms = &steep_all }, true);
++    try std.testing.expectEqualSlices(u32, &.{ 2, 2 }, &on); // the learned costs' favorite: half as deep
++}
++
++test "with the switch on, rows cheaper than the static table prices are taken for the learned ones" {
++    const costs = staticSteep();
++    const off = try grant(&costs, .{ .from = 1, .ms = &measured_all }, false);
++    try std.testing.expectEqualSlices(u32, &.{ 1, 1 }, &off); // the steep table's favorite: one draft each
++    const on = try grant(&costs, .{ .from = 1, .ms = &measured_all }, true);
++    try std.testing.expectEqualSlices(u32, &.{ 4, 4 }, &on); // the learned costs' favorite: the widest round
++}
++
++test "a row count never measured falls back to the static table" {
++    const costs = staticServed();
++    // learned only from rows 4 (drafts >= 3) up; rows 2 and 3 keep the served table, cheaply priced
++    const on = try grant(&costs, .{ .from = 3, .ms = &steep_from3 }, true);
++    try std.testing.expectEqualSlices(u32, &.{ 1, 0 }, &on);
++    // no observation at all for any row count: exactly the table's choice either way
++    const on_cold = try grant(&costs, null, true);
++    const off_cold = try grant(&costs, null, false);
++    try std.testing.expectEqualSlices(u32, &off_cold, &on_cold);
++    try std.testing.expectEqualSlices(u32, &.{ 4, 4 }, &on_cold);
++}
++
++test "learnedRowsMs is null until a round of that depth is measured" {
++    var fc: Table = .{};
++    defer fc.deinit(gpa);
++    var shared: Table = .{};
++    defer shared.deinit(gpa);
++    var rule: depth.Rule = .{ .gpa = gpa, .prior = &.{0.9}, .most_drafts = 1, .family_costs = &fc, .shared_costs = &shared, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = false, .batch_rows = 8 };
++    defer rule.deinit();
++    try std.testing.expectEqual(@as(?f64, null), rule.learnedRowsMs(0));
++    try std.testing.expectEqual(@as(?f64, null), rule.learnedRowsMs(4));
++    try rule.observeCost(3, 42.0, false, null); // a 3-draft (4-row) round
++    try std.testing.expectEqual(@as(?f64, 42.0), rule.learnedRowsMs(4));
++    try std.testing.expectEqual(@as(?f64, null), rule.learnedRowsMs(5));
++}
+diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
+index 4a0e3ef3f4760b445f82d39ab3e673b5da0fe3a4..4789e0a813b712b5e8583f3690a9206691fe7e04 100644
+--- a/zig/src/core/lanes/config.zig
++++ b/zig/src/core/lanes/config.zig
+@@ -16,6 +16,7 @@ pub const Model = struct {
+     draft_cal: f64 = 0.0, // the weight of a round in each stream's realised-over-predicted draft survival (0: off)
+     cal_log: u32 = 0, // print every n-th calibrated verify of a stream to stderr (0: off)
+     draft_pin: ?u32 = null, // a benchmark pin of every head draft's depth (TF_DS_DRAFT_DEPTH2; null: the rule decides)
++    allocate_learned: bool = false, // price a shared round's rows with the depth rule's learned round costs where observed (TF_DS_ALLOCATE_LEARNED)
+     copy_proposals: bool = true, // suffix-lookup copy windows; false opts a backend out
+     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
+     first_copy_rows: u32 = 0, // a lone stream's first copy window (0: the exact width)
+@@ -44,6 +45,7 @@ pub const Config = struct {
+     draft_cal: f64 = 0.0, // Model.draft_cal
+     cal_log: u32 = 0, // Model.cal_log
+     draft_pin: ?u32 = null, // Model.draft_pin
++    allocate_learned: bool = false, // Model.allocate_learned
+     copy_proposals: bool = true, // suffix-lookup copy windows; false opts a backend out
+     family_width: u32,
+     max_copy: u32,
+@@ -135,6 +137,7 @@ pub const Config = struct {
+             .draft_cal = m.draft_cal,
+             .cal_log = m.cal_log,
+             .draft_pin = m.draft_pin,
++            .allocate_learned = m.allocate_learned,
+             .copy_proposals = m.copy_proposals,
+         };
+     }
+diff --git a/zig/src/core/lanes/depth.zig b/zig/src/core/lanes/depth.zig
+index 1ce2dbddd61bc104f51776e16327e749cc4c6954..29556ca472aa3ea77a383849b1d787b35a41e83c 100644
+--- a/zig/src/core/lanes/depth.zig
++++ b/zig/src/core/lanes/depth.zig
+@@ -132,6 +132,14 @@ pub const Rule = struct {
+         return modeled;
+     }
+ 
++    /// A round of `rows` rows costs this much when at least one round at that depth was measured (observeCost keys a
++    /// round by its drafts = rows - 1); null: never observed, the caller keeps its static table for the row count.
++    /// Under plain_guard the shared table stays empty (observations go to the per-stream tables): null for every row.
++    pub fn learnedRowsMs(r: *const Rule, rows: u64) ?f64 {
++        if (rows == 0) return null;
++        return r.round_ms.get(@intCast(rows - 1));
++    }
++
+     /// The most expected tokens a ms, probing one depth farther every `depth_probe_every` rounds.
+     pub fn depth(r: *Rule, who: Who) !i64 {
+         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
+diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
+index 1b32dadb350ce5ad3f1ab6c4d2200c69b84cfb61..1cb518b328a83b1b00d7a2b00e18591218471379 100644
+--- a/zig/src/core/lanes/lanes.zig
++++ b/zig/src/core/lanes/lanes.zig
+@@ -35,4 +35,5 @@ test {
+     _ = @import("engine_test.zig");
+     _ = @import("gpu_full_test.zig");
+     _ = @import("calibration_test.zig");
++    _ = @import("allocate_learned_test.zig");
+ }
+diff --git a/zig/src/core/lanes/windows.zig b/zig/src/core/lanes/windows.zig
+index e92e154419eefe8111077411abd552fd9182bc83..fb91f5ff210aa93a99e918c88435730c2dc97e45 100644
+--- a/zig/src/core/lanes/windows.zig
++++ b/zig/src/core/lanes/windows.zig
+@@ -6,6 +6,7 @@ const be = @import("backend.zig");
+ const depth = @import("depth.zig");
+ const fill = @import("fill.zig");
+ const shape = @import("shape.zig");
++const Table = @import("table.zig").Table;
+ const ev = @import("events.zig");
+ const trail = @import("trail.zig");
+ const Engine = @import("engine.zig").Engine;
+@@ -178,7 +179,14 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
+         }
+     }
+     const overhead = soloHeadOverhead(e.cfg.solo_head_overhead_ms, e.rule.overheadMs(plans.len), e.alone, plans.len, if (plans.len > 0) plans[0].kind else .none);
+-    const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, overhead, @max(plans.len, e.cfg.batch_rows));
++    // the rows' costs: the static table, or with the switch on the learned ones where a round of that depth was measured
++    var merged: ?Table = null;
++    var costs: *const Table = &e.cfg.shared_costs;
++    if (e.cfg.allocate_learned) {
++        merged = try learnedTable(a, e, plans.len);
++        costs = &merged.?;
++    }
++    const counts = try alloc.allocate(a, fixed, probs, costs, overhead, @max(plans.len, e.cfg.batch_rows));
+     if (e.rule.pin) |pin| {
+         for (plans, probs, counts) |p, chances, *c| {
+             if (pinnedHead(pin, p.kind, chances.len)) |n| c.* = n;
+@@ -234,6 +242,23 @@ pub fn calibrated(a: std.mem.Allocator, chances: []const f64, scale: f64) ![]con
+     return out;
+ }
+ 
++/// The rows' cost table with TF_DS_ALLOCATE_LEARNED on: the depth rule's learned round time for a round of
++/// `rows` rows where at least one round at that depth was measured, else the static table's entry for the row
++/// count (never observed: the row count keeps today's behavior). Overhead stays the learned one either way.
++/// The arena owns the table (reset every round).
++fn learnedTable(a: std.mem.Allocator, e: *Engine, plans: usize) !Table {
++    var out: Table = .{};
++    errdefer out.deinit(a);
++    var rows: u64 = 1;
++    const limit: u64 = @max(@as(u64, e.cfg.batch_rows), @as(u64, @intCast(plans)));
++    while (rows <= limit) : (rows += 1) {
++        const key: i64 = @intCast(rows);
++        const ms = e.rule.learnedRowsMs(rows) orelse e.cfg.shared_costs.get(key) orelse continue;
++        try out.put(a, key, ms);
++    }
++    return out;
++}
++
+ /// The window's rows, parents and keyed positions, ready for the backend.
+ pub fn build(e: *Engine, p: Plan, early: bool) !be.Window {
+     const a = e.arena.allocator();
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index f60ef990108117c6a5d637b84ba9623ffdcd5727..354668084aef0f97f213f5c0ccbce599098482b5 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -666,6 +666,7 @@ pub const Lanes = struct {
+     prof: ?Profile = null,
+     fix_k: ?usize = null, // a measurement (tf-dsv41-lanes --fix-k): K drafts a stream, chances 1 to K and 0 past it
+     solo_overhead: bool = false, // TF_DS_SOLO_OVERHEAD=1: a lone drafted stream's head windows cost the fixed draft allowance
++    allocate_learned: bool = false, // TF_DS_ALLOCATE_LEARNED=1: the window allocator prices rows with the depth rule's learned round costs (the static table where a row count was never measured); off: the served table
+     draft_cal: f64 = 0.0, // TF_DS_T25_DRAFT_CAL: the weight of a round in each stream's draft-survival calibration (0: off)
+     cal_log: u32 = 0, // TF_DS_T25_CAL_LOG: every n-th calibrated verify of a stream prints to stderr (0: off)
+     draft_pin: ?u32 = null, // TF_DS_DRAFT_DEPTH2: a benchmark pin of every head draft's depth (null: the rule decides)
+@@ -753,6 +754,7 @@ pub const Lanes = struct {
+             .window_costs = self.wc[0..],
+             .mtp_step_ms = draft.draft_ms,
+             .solo_head_overhead_ms = if (drafting and self.solo_overhead) draft.draft_ms else null, // opt-in: the Python engine's fixed draft allowance
++            .allocate_learned = self.allocate_learned,
+             .draft_cal = self.draft_cal,
+             .cal_log = self.cal_log,
+             .draft_pin = self.draft_pin,
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index c160a8ecbd9e3ea32b0cfc60b454d37f5756f648..7174d2873a48c8b203b885660c344523f1463b00 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -59,6 +59,9 @@
+ //!   TF_DS_DRAFT_DEPTH3=1                        the same pin at 3 deep (unset or 0: the rule)
+ //!   TF_DS_DRAFT_DEPTH4=1                        the same pin at 4 deep (unset or 0: the rule)
+ //!   TF_DS_DRAFT_DEPTH5=1                        the same pin at 5 deep (unset or 0: the rule)
++//!   TF_DS_ALLOCATE_LEARNED=1                    the window allocator prices rows with the depth rule's learned round costs
++//!                                               (observeCost's table) where a round of that depth was measured at least once;
++//!                                               any row count never measured keeps the served ROUND_MS (unset: off, the served table)
+ //!   TF_DS_NO_COPIES=1                           a drafted stream proposes no suffix-lookup copy windows
+ //!   TF_DS_POOL=P, TF_DS_WINDOW=W                (0008, pool.zig) the pool's positions, every stream's extents
+ //!                                               together (unset: the context), and the window a request may use
+@@ -302,6 +305,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     errdefer st.lanes.stopKv();
+     if (getenv("TF_DS_FIX_K")) |t| st.lanes.fix_k = std.fmt.parseInt(usize, t, 10) catch return error.BadFixK;
+     st.lanes.solo_overhead = if (getenv("TF_DS_SOLO_OVERHEAD")) |v| !std.mem.eql(u8, v, "0") else false;
++    st.lanes.allocate_learned = if (getenv("TF_DS_ALLOCATE_LEARNED")) |v| !std.mem.eql(u8, v, "0") else false;
+     st.lanes.draft_cal = if (getenv("TF_DS_T25_DRAFT_CAL")) |v| lanes_mod.parseCalWeight(v) catch return error.BadDraftCal else 0.0;
+     st.lanes.cal_log = if (getenv("TF_DS_T25_CAL_LOG")) |v| std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch return error.BadCalLog else 0;
+     var pins: [lanes_mod.depth_pins.len]?[]const u8 = undefined;

@@ -1,0 +1,104 @@
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index d520ca2..798b629 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -397,7 +397,9 @@ __device__ __forceinline__ void tf_ds_torch_rmsnorm_row_held(const __nv_bfloat16
+ 
+ // The pair-sum arithmetic of tf_ds_compress2_kernel / tf_ds_compress2x_kernel, verbatim (kv/score addressed by the
+ // caller): the pair's softmax (max, the two expf, the sum from 0), the products, the pair's sum as compress2 adds it.
+-__device__ __forceinline__ float tf_ds_compress2_pair(float s0, float s1, float kv0, float kv1) {
++// Every score that is not finite takes this path (NaN: the max never takes it, so the exps see NaN; +inf: inf - inf
++// must stay NaN; -inf likewise), which is what keeps the fast path below from changing a bit.
++__device__ __forceinline__ float tf_ds_compress2_pair_full(float s0, float s1, float kv0, float kv1) {
+     float m = -3.402823466e+38f;   // numeric_limits<float>::lowest()
+     m = m < s0 ? s0 : m;
+     m = m < s1 ? s1 : m;
+@@ -414,6 +416,32 @@ __device__ __forceinline__ float tf_ds_compress2_pair(float s0, float s1, float
+     return t;
+ }
+ 
++// Two finite scores: the maximum side's exp(0) is exactly 1, so only the other exponential is evaluated, once, for
++// both its addition and its division. The operand order is the full path's: (0 + 1) + e1 when s0 is the maximum
++// (m is s0 there, ties included) and (0 + e0) + 1 when it is s1; every later operation is unchanged.
++__device__ __forceinline__ float tf_ds_compress2_pair(float s0, float s1, float kv0, float kv1) {
++    if (!(isfinite(s0) && isfinite(s1))) return tf_ds_compress2_pair_full(s0, s1, kv0, kv1);
++    float p0, p1;
++    float sum;
++    if (!(s0 < s1)) {   // s0 is the maximum the full path's running max takes (a tie takes s0)
++        const float e1 = expf(__fsub_rn(s1, s0));
++        sum = __fadd_rn(__fadd_rn(0.f, 1.f), e1);
++        p0 = __fdiv_rn(1.f, sum);
++        p1 = __fdiv_rn(e1, sum);
++    } else {
++        const float e0 = expf(__fsub_rn(s0, s1));
++        sum = __fadd_rn(__fadd_rn(0.f, e0), 1.f);
++        p0 = __fdiv_rn(e0, sum);
++        p1 = __fdiv_rn(1.f, sum);
++    }
++    const float y0 = __fmul_rn(kv0, p0);
++    const float y1 = __fmul_rn(kv1, p1);
++    float t = __fadd_rn(__fadd_rn(0.f, y0), __fadd_rn(0.f, y1));
++    t = __fadd_rn(t, 0.f);
++    t = __fadd_rn(t, 0.f);
++    return t;
++}
++
+ // -- TF_DS_FUSED_COMPRESS2_NORM (0197) -------------------------------------------------------------------------------
+ 
+ // The prompt path's ratio-2 chain: tf_ds_compress2_kernel (grid-stride over G*C, here one block per group, the pair
+diff --git a/zig/src/families/dsv41/compress2_norm.zig b/zig/src/families/dsv41/compress2_norm.zig
+index 56663a4..58c6949 100644
+--- a/zig/src/families/dsv41/compress2_norm.zig
++++ b/zig/src/families/dsv41/compress2_norm.zig
+@@ -62,6 +62,29 @@ pub fn pairSum(kv0: f32, kv1: f32, s0: f32, s1: f32) f32 {
+     return ((0.0 + y0) + (0.0 + y1)) + 0.0 + 0.0;
+ }
+ 
++/// tf_ds_compress2_pair's finite path on the host: the maximum side's exp(0) is exactly 1, so only the other
++/// exponential is evaluated, once (the full path's operand order). Above 1e38 the full path is used, as in the kernel.
++pub fn pairSumFinite(kv0: f32, kv1: f32, s0: f32, s1: f32) f32 {
++    if (!(std.math.isFinite(s0) and std.math.isFinite(s1))) return pairSum(kv0, kv1, s0, s1);
++    var sum: f32 = 0;
++    var p0: f32 = 0;
++    var p1: f32 = 0;
++    if (!(s0 < s1)) {
++        const e1 = @exp(s1 - s0);
++        sum = (0.0 + 1.0) + e1;
++        p0 = 1.0 / sum;
++        p1 = e1 / sum;
++    } else {
++        const e0 = @exp(s0 - s1);
++        sum = (0.0 + e0) + 1.0;
++        p0 = e0 / sum;
++        p1 = 1.0 / sum;
++    }
++    const y0 = kv0 * p0;
++    const y1 = kv1 * p1;
++    return ((0.0 + y0) + (0.0 + y1)) + 0.0 + 0.0;
++}
++
+ /// The pair sum as the kernels store it: bf16-rounded.
+ pub fn pairSumBf16(kv0: f32, kv1: f32, s0: f32, s1: f32) f32 {
+     return bf16Round(pairSum(kv0, kv1, s0, s1));
+@@ -189,6 +212,21 @@ test "pairItems: every served geometry is a held-values specialization power of
+     }
+ }
+ 
++test "pairSumFinite: the one-exponential path is the full path on finite scores, ties and signed zeros included" {
++    const kv = [_][2]f32{ .{ 1.5, -2.25 }, .{ 0.0, 0.0 }, .{ -0.0, 3.75 }, .{ 1e-30, -1e-30 } };
++    const scores = [_][2]f32{
++        .{ 1.0, 2.0 }, .{ 2.0, 1.0 }, .{ 1.0, 1.0 }, .{ 0.0, -0.0 }, .{ -0.0, 0.0 },
++        .{ 0.0, -100.0 }, .{ -100.0, 0.0 }, .{ 1000.0, 1000.0001 }, .{ -3.402823466e+38, -3.402823466e+38 }, .{ 65504.0, -65504.0 },
++    };
++    for (kv) |k| for (scores) |sc| {
++        try expectEqual(pairSum(k[0], k[1], sc[0], sc[1]), pairSumFinite(k[0], k[1], sc[0], sc[1]));
++    };
++    // non-finite scores go through the full path, where inf - inf stays NaN
++    try std.testing.expect(std.math.isNan(pairSumFinite(1.0, 1.0, std.math.inf(f32), std.math.inf(f32))));
++    try std.testing.expect(std.math.isNan(pairSumFinite(1.0, 1.0, std.math.nan(f32), 0.0)));
++    try expectEqual(pairSum(1.0, 1.0, 0.0, -std.math.inf(f32)), pairSumFinite(1.0, 1.0, 0.0, -std.math.inf(f32)));
++}
++
+ test "pairSum: the softmax pair, bf16 rounding at the store" {
+     // s0 == s1: the softmax splits 0.5/0.5; the pair sum is the mean of the kv values
+     const v = pairSum(2.0, 4.0, 1.0, 1.0);

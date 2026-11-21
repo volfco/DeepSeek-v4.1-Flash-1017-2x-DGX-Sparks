@@ -1,0 +1,194 @@
+# port-patches.sh: second-pass-int @ 432d800ec5e8 over 08ffdfc @ 08ffdfc31b80 (commits c190309e932c..432d800ec5e8)
+# dsv41: TF_DS_SNAP_TRIM (off by default) keeps no window ring for the decoder's last half in a Snap - 2.81 MiB a kept state the replay rebuilds anyway
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 4361013bee52ce30822e8ae657724591e397d041..7e4a45607a26812d04eb7f8e78638eaf337d6c29 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -129,6 +129,8 @@ pub const Options = struct {
+     greedy_argmax: bool = false,
+     // TF_DS_HEAD_LAST_CHUNK (0188): skip the head of a prompt chunk that is not the pass's last ('1'/'on')
+     head_last_chunk: bool = false,
++    // TF_DS_SNAP_TRIM (0190): a Snap carries no decoder-layer rings (needs TF_DS_REPLAY_FLOOR=1)
++    snap_trim: bool = false,
+     // TF_DS_BF16_PARTIALS (0185, LOSSY): the chunk's attention partial rounded to bf16 before its gather
+     bf16_partials: bool = false,
+     engram_aio: bool = false, // a round's Engram reads by Linux AIO on O_DIRECT (else the reader pool)
+@@ -233,6 +235,9 @@ pub const Model = struct {
+     // TF_DS_EXACT_RESUME: every slot's tail (prompt.Tail: the last window rows of a prompt pass's decoder input, a ring)
+     // and the device buffer they share; no tails with the switch off
+     exact_resume: bool = false,
++    // TF_DS_SNAP_TRIM (0190): a kept state carries no ring for the decoder's last half (the replay rebuilds it);
++    // refused without TF_DS_REPLAY_FLOOR=1's bounded replay, which is the only path verified to rebuild them
++    snap_trim: bool = false,
+     // TF_DS_HEAD_LAST_CHUNK (0188): a chunk that is not the pass's last runs no head (its logits are discarded)
+     head_last_chunk: bool = false,
+     // TF_DS_GREEDY_ARGMAX (0186): the switch, and each round's choice (lanes.zig arms round.Round.map from it)
+@@ -543,6 +548,8 @@ pub const Model = struct {
+         if (o.gather_overlap and prompt.overlapWorks(sp.world, m.two != null)) try m.useGatherSide();
+         m.argmax_map = o.greedy_argmax;
+         m.head_last_chunk = o.head_last_chunk;
++        if (o.snap_trim and !prompt.replay_floor) return error.SnapTrimNeedsReplayFloor;
++        m.snap_trim = o.snap_trim;
+         if (o.drafts) {
+             m.dpool = try draft.Pool.init(&m.eng, &m.arena, m.streams);
+             m.dr = try draft.Drafter.init(&m.eng, &m.arena, sp);
+@@ -981,7 +988,7 @@ pub const Model = struct {
+     /// extent): one slot's window ring of every layer and positional stores of every ratio-2 layer.
+     pub fn snapBytes(m: *const Model) usize {
+         const pb = prompt.raw_rows * m.eng.c.head_dim * 4;
+-        var n: usize = m.rings.len * m.eng.ringBytes();
++        var n: usize = m.snap_rings() * m.eng.ringBytes();
+         for (m.caches.raw_kv[0..m.eng.c.layers], m.caches.raw_score[0..m.eng.c.layers]) |k, sc| {
+             if (k != 0) n += pb;
+             if (sc != 0) n += pb;
+@@ -989,13 +996,20 @@ pub const Model = struct {
+         return n;
+     }
+ 
++    /// The layers whose window rings a Snap carries: all of them, or with TF_DS_SNAP_TRIM only the encoder's (the
++    /// decoder's last half is rebuilt by the replay, so its rings are dead weight in every kept state).
++    pub fn snap_rings(m: *const Model) usize {
++        return if (m.snap_trim) m.eng.c.layers / 2 else m.rings.len;
++    }
++
+     /// Slot `slot`'s own state into `buf` (save: true) or back from it, in the stream's order (no wait): with the
+     /// extent's compressed rows, the state a prompt pass stands in at a chunk end.
+     pub fn snapCopy(m: *Model, slot: usize, buf: u64, save: bool) !void {
+         const rb = m.eng.ringBytes();
+         const pb = prompt.raw_rows * m.eng.c.head_dim * 4;
+         var at = buf;
+-        for (m.rings) |r| {
++        // TF_DS_SNAP_TRIM: the decoder layers' rings are not in the Snap (the replay rebuilds them before a read)
++        for (m.rings[0..m.snap_rings()]) |r| {
+             try m.copyState(r + slot * rb, at, rb, save);
+             at += rb;
+         }
+@@ -1255,9 +1269,11 @@ pub const Model = struct {
+         const layers = m.eng.w.layers;
+         if (layers.len > spill.max_layers) return error.SpillLayoutMismatch;
+         var shapes: [spill.max_layers]spill.LayerShape = undefined;
+-        for (layers, shapes[0..layers.len]) |lay, *s| {
++        for (layers, shapes[0..layers.len], 0..) |lay, *s, i| {
+             const kv = lay.comp_wkv != null;
+-            s.* = .{ .ratio = if (kv) lay.ratio else 0, .kv = kv, .idx = kv and lay.idx_wk != null, .raw = kv and lay.ratio > 1 };
++            // TF_DS_SNAP_TRIM: the layout carries no planes for the decoder layers' rings (the digest follows, so a
++            // store of the other layout is foreign to this one and vice versa)
++            s.* = .{ .ratio = if (kv) lay.ratio else 0, .kv = kv, .idx = kv and lay.idx_wk != null, .raw = kv and lay.ratio > 1, .ring = i < m.snap_rings() };
+         }
+         const sh = m.caches.shard;
+         const raw = try spill.StateLayout.init(shapes[0..layers.len], spill.Geometry.of(m.eng.c, chunk_rows, prompt.ring_extra, prompt.raw_rows), if (sh != null) .owner_sharded else .replicated);
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index d8e0dd82a2bbe48b809d96cc91a595046e251307..2da2f5e21e2b462d2ac3673eefa009e08903e102 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -86,6 +86,14 @@
+ //!                                               is in flight; the same all-gather on the same ranks, so bits identical
+ //!                                               (set alike on both ranks; no frame, no bytes, no fingerprint bit). A lone
+ //!                                               rank or the four-node 2D split keeps the main stream. Off: nothing changes
++//!   TF_DS_SNAP_TRIM=1                         a kept state (the Snap a prompt chunk end saves) carries no window ring for
++//!                                               the decoder's last half: the bounded replay rebuilds every one of them before
++//!                                               anything reads a row below the replay floor, so those rings (2.81 MiB a
++//!                                               slot) are dead weight. The state layout carries no plane for them, so the
++//!                                               layout digest changes: a store of the other layout is foreign (old kept
++//!                                               states miss, and the pair refuses a mixed start). Refused with
++//!                                               TF_DS_REPLAY_FLOOR=0 (that path reads ring rows below the floor). Bits
++//!                                               identical, both ranks alike; off: every layer's ring, as served
+ //!   TF_DS_HEAD_LAST_CHUNK=1                   a prompt chunk that is not the pass's last runs no head: the decoder's last
+ //!                                               window of rows straddling a chunk end had its logits computed and thrown
+ //!                                               away (the next chunk's head is the prompt's), so collapse_norm, the
+@@ -354,6 +362,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+         .bf16_partials = ops_mod.onValue(getenv("TF_DS_BF16_PARTIALS")), // 0185, LOSSY (a lone rank and the 2D split keep fp32: Model.open)
+         .greedy_argmax = ops_mod.onValue(getenv("TF_DS_GREEDY_ARGMAX")), // 0186 (a greedy round's rule: sampling.argmaxMapWorks)
+         .head_last_chunk = ops_mod.onValue(getenv("TF_DS_HEAD_LAST_CHUNK")), // 0188 (Model.sliceRun's head)
++        .snap_trim = ops_mod.onValue(getenv("TF_DS_SNAP_TRIM")), // 0190 (refused without TF_DS_REPLAY_FLOOR=1: Model.open)
+         .engram_aio = if (getenv("TF_DS_ENGRAM_AIO")) |v| !std.mem.eql(u8, v, "0") else false,
+         .pool = try pool_mod.resolve(o.context, getenv("TF_DS_POOL")), // may exceed the window: more kept prompts stay resident
+         .window = o.context, // (a follower takes TF_DS_WINDOW, else rank 0's: Model.open)
+@@ -925,6 +934,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+         error.SpillFingerprintMismatch => "the ranks' configurations differ (the log names the rank and field): start every rank from the same image, model, kit and TF_DS_* settings, with the spill tier on both (rank 1: TF_DS_SPILL_DIR/TF_DS_SPILL_GIB)",
+         error.SpillNotStarted => "rank 0 runs the spill tier (--spill-dir/--spill-gib): start this rank with it too (TF_DS_SPILL_DIR and TF_DS_SPILL_GIB, or tf-dsv41-lanes --spill-dir/--spill-gib)",
+         error.BadSpillSetting => "TF_DS_SPILL_STAGING_MIB: the spill staging cap in MiB, at least 16 (default 128)",
++        error.SnapTrimNeedsReplayFloor => "TF_DS_SNAP_TRIM=1 drops the decoder layers' rings from a kept state, which only the bounded replay rebuilds: run with TF_DS_REPLAY_FLOOR=1 (the served setting) or unset TF_DS_SNAP_TRIM",
+         error.StagingTooSmall => "the spill staging cap (TF_DS_SPILL_STAGING_MIB) holds too few slots for this model's blocks and small state: raise it",
+         error.BadKvShardSetting => "TF_DS_KV_SHARD_CARRY and TF_DS_KV_SHARD_TWINS: 1 (on, the default) or 0; TF_DS_KV_SHARD_CHECK: decode rounds between the ranks' planner checks (0: at start only); TF_DS_KV_SHARD_STATS_MS: 0 (the default, rank 0's own kv_shard row only) up to 3600000 ms between asks for the followers' rows (only while /health or /metrics read them)",
+         error.ShardLayoutMismatch => "TF_DS_KV_SHARD=1: the ranks cut the pool into different parts or plan with other switches (another TF_DS_POOL, --pool, TF_DS_KV_SHARD_CARRY, TF_DS_KV_SHARD_TWINS or build on rank 1): give every rank the same TF_DS_* environment and build",
+@@ -1041,7 +1051,7 @@ test "the spill tier's refusals from the environment come before anything loads,
+     E.weights = "rev-1";
+     E.engram = "/engram";
+     try std.testing.expectError(error.NoEngramId, spillPreflight(E.get));
+-    for ([_]anyerror{ error.SpillNeedsTwoRanks, error.NoWeightsId, error.NoEngramId, error.SpillNotStarted, error.NoEngineId, error.PairNotAgreed, error.SpillNoPart, error.SpillCarryMismatch, error.SpillLayoutMismatch, error.SpillSelfCheckSharded }) |err|
++    for ([_]anyerror{ error.SpillNeedsTwoRanks, error.NoWeightsId, error.NoEngramId, error.SpillNotStarted, error.NoEngineId, error.PairNotAgreed, error.SpillNoPart, error.SpillCarryMismatch, error.SpillLayoutMismatch, error.SpillSelfCheckSharded, error.SnapTrimNeedsReplayFloor }) |err|
+         try std.testing.expect(explain(null, err) != null);
+     try std.testing.expect(std.mem.indexOf(u8, explain(null, error.SpillNotStarted).?, "TF_DS_SPILL_DIR") != null);
+     try std.testing.expect(std.mem.indexOf(u8, explain(null, error.NoWeightsId).?, "TF_DS_RANK_CACHE_SHA") != null);
+diff --git a/zig/src/families/dsv41/spill_state.zig b/zig/src/families/dsv41/spill_state.zig
+index b9a2b3a39afd9b4198c2e2fdb56993b39223bcdd..5b7f50d45274554fcfe6c483be333d0436c011c9 100644
+--- a/zig/src/families/dsv41/spill_state.zig
++++ b/zig/src/families/dsv41/spill_state.zig
+@@ -71,8 +71,9 @@ pub const Plane = struct {
+ };
+ 
+ /// What a target layer carries, as Caches.init reads it from the loaded weights: a kv source (compressor), its
+-/// ratio, an index source over it, ratio-2 raw stores.
+-pub const LayerShape = struct { ratio: u8 = 0, kv: bool = false, idx: bool = false, raw: bool = false };
++/// ratio, an index source over it, ratio-2 raw stores; and whether its window ring is part of the state (TF_DS_SNAP_TRIM
++/// drops the decoder layers' rings, which the replay rebuilds).
++pub const LayerShape = struct { ratio: u8 = 0, kv: bool = false, idx: bool = false, raw: bool = false, ring: bool = true };
+ 
+ /// The dimensions the planes are sized by (from the loaded model: config.json, prompt.ring_extra, prompt.raw_rows,
+ /// model.chunk_rows).
+@@ -100,7 +101,7 @@ pub fn shapesOf(c: *const Config, out: []LayerShape) ![]LayerShape {
+     if (c.layers > out.len) return error.TooManyLayers;
+     for (out[0..c.layers], 0..) |*s, i| {
+         const kv = c.kv_sources.has(i);
+-        s.* = .{ .ratio = if (kv) c.ratios[i] else 0, .kv = kv, .idx = kv and c.index_sources.has(i), .raw = kv and c.ratios[i] > 1 };
++        s.* = .{ .ratio = if (kv) c.ratios[i] else 0, .kv = kv, .idx = kv and c.index_sources.has(i), .raw = kv and c.ratios[i] > 1 }; // (ring: every layer's, as served)
+     }
+     return out[0..c.layers];
+ }
+@@ -151,7 +152,7 @@ pub const StateLayout = struct {
+             }
+         }
+         const ring_rows: u32 = @intCast(g.ringRows());
+-        for (0..shapes.len) |i| try l.add(.{ .kind = .ring, .layer = @intCast(i), .row = hd * 2, .rows = ring_rows, .dtype = .bf16 });
++        for (shapes, 0..) |s, i| if (s.ring) try l.add(.{ .kind = .ring, .layer = @intCast(i), .row = hd * 2, .rows = ring_rows, .dtype = .bf16 });
+         for (shapes, 0..) |s, i| if (s.raw) {
+             try l.add(.{ .kind = .raw_kv, .layer = @intCast(i), .row = hd * 4, .rows = @intCast(g.raw_rows), .dtype = .f32 });
+             try l.add(.{ .kind = .raw_score, .layer = @intCast(i), .row = hd * 4, .rows = @intCast(g.raw_rows), .dtype = .f32 });
+@@ -706,6 +707,35 @@ fn fixtureLayout(owner: OwnerLayout) !StateLayout {
+     return StateLayout.fromConfig(&c, Geometry.of(&c, 2048, 16, 64), owner);
+ }
+ 
++test "TF_DS_SNAP_TRIM: the decoder layers' rings leave the layout, so the small state and the digest follow" {
++    var shapes: [8]LayerShape = undefined;
++    for (&shapes) |*s| s.* = .{ .ratio = 2, .kv = true, .idx = true, .raw = true };
++    const geo = Geometry{ .block_tokens = 16, .window = 8, .ring_extra = 4, .raw_rows = 4, .head_dim = 64, .index_head_dim = 64 };
++    const whole = try StateLayout.init(&shapes, geo, .replicated);
++    var trimmed = shapes;
++    for (trimmed[4..]) |*s| s.ring = false; // the decoder's last half
++    const cut = try StateLayout.init(&trimmed, geo, .replicated);
++    const ring: usize = @intCast(geo.ringRows() * geo.head_dim * 2);
++    try std.testing.expectEqual(whole.small_bytes - 4 * ring, cut.small_bytes);
++    var rings_whole: usize = 0;
++    var rings_cut: usize = 0;
++    for (whole.smallPlanes()) |p| if (p.kind == .ring) {
++        rings_whole += 1;
++    };
++    for (cut.smallPlanes()) |p| if (p.kind == .ring) {
++        rings_cut += 1;
++    };
++    try std.testing.expectEqual(@as(usize, 8), rings_whole);
++    try std.testing.expectEqual(@as(usize, 4), rings_cut);
++    // the digest is what the pair and the store compare: the two layouts must never look alike
++    try std.testing.expect(!std.mem.eql(u8, &whole.digest(), &cut.digest()));
++    // and the planes that remain keep their order: the rings first, then each ratio-2 layer's raw stores
++    var saw_raw = false;
++    for (cut.smallPlanes()) |p| {
++        if (p.kind == .raw_kv or p.kind == .raw_score) saw_raw = true else try std.testing.expect(!saw_raw);
++    }
++}
++
+ test "the fixture checkpoint's state layout: 288/68-byte rows, 890 B a token, 1,822,720 B a block, 6,684,672 B small" {
+     const l = try fixtureLayout(.replicated);
+     // four kv sources (layers 2, 8, 14 at ratio 2; 20 at ratio 1), each with index keys

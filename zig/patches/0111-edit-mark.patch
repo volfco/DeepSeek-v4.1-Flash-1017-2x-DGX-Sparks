@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000111 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:14:43 +0000
+Subject: [PATCH] dsv41: TF_DS_EDIT_MARK=1 keeps a history edit's stable mark past an absolute
+ floor instead of the history's half
+
+Store.marks kept the previous prompt's divergence point (an edit's
+recovery mark) only at or past the history's midpoint, so any edit in the
+first half of the history dropped it: the deepest match fell back to an
+old turn's chunk end or the shared system cut, and every later turn
+re-prefilled from there (prefix cache review finding 2; its validator
+correction rates this history_len/2 gate, not the comparison prompt's
+staleness, as the operative miss cause).
+
+With TF_DS_EDIT_MARK=1 (off by default; only exactly "1" on) the gate
+becomes an absolute floor: the mark is kept when stable > 0, stable <
+history_len, stable >= from + rules.min_gap and stable >= rules.min_prompt
+/ 4. min_gap is the distance the mark plan already requires between the
+resume point and any other mark, so the floor never keeps a mark the
+mark loop's resume-point distance filter (at - from < min_gap) would drop
+(the loop's neighbour-proximity filter still applies); min_prompt / 4 is
+a quarter of min_prompt's
+cost floor, since the recovery mark replaces a full re-prefill of the
+remaining history on every later turn.
+
+With the switch off (unset, or anything but exactly "1") the old
+history_len/2 gate runs unchanged: same marks, same keeps, byte-identical
+to base. The switch is read where the store is built (native/cuda.zig
+openWith and lanes_main.zig) into Rules.edit_mark, and joins
+rank_identity's Features named "edit_mark=1;" only when on, so an off
+pair's string, fingerprint and spill store namespace are unchanged and a
+pair that disagrees is refused at the hello. The comparison prompt stays
+e.last (the review's note-ring proposal is deliberately out of scope).
+
+Tests: zig build test and zig/tests/server/zig_test.sh pass; the patch's
+own tests: prompt_cache_test.zig's early edit kept on and dropped off,
+the late-edit same-marks case, the min_prompt / 4 floor and min_gap from
+the resume point and its neighbours, prompt_cache.zig's "1"-only editMark
+parse, and rank_identity.zig's feature-string on and off shapes. Not run
+on a pair.
+---
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+index 821d8fcd..a236fe9d 100644
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -111,6 +111,16 @@ test imageCacheOn {
+     try std.testing.expect(imageCacheOn(" 0") and imageCacheOn("0 ")); // (exact, as round 2 read it)
+ }
+ 
++/// TF_DS_EDIT_MARK's value: exactly "1" turns the history-edit mark on (off by default).
++pub fn editMark(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse "0", "1");
++}
++
++test editMark {
++    try std.testing.expect(editMark("1"));
++    for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!editMark(v));
++}
++
+ /// Cache ids at or above this are pictures' (`pictureId`); a vocabulary id is always below it.
+ pub const picture_ids: u32 = 0x8000_0000;
+ 
+@@ -397,6 +407,9 @@ pub const Rules = struct {
+     min_gap: u32 = 256,
+     /// Shorter prompts keep nothing: below it a mark's extra prompt call costs more than a later turn's reuse saves.
+     min_prompt: u32 = 4096,
++    /// TF_DS_EDIT_MARK=1 (edit_mark): an edit's stable mark clears the floor `from + min_gap` and `min_prompt / 4`
++    /// rather than the history's half, so an edit in the first half of the history keeps its recovery mark.
++    edit_mark: bool = false,
+     /// Rows a resumed pass must still run past its state (DeepSeek's sliding window): a state nearer the end is passed over.
+     tail: u32 = 0,
+     /// The family's own resume grid (dsv41: its 2048-row chunk; 0: none): durable points and shared marks stand on it.
+@@ -930,7 +943,8 @@ pub const Store = struct {
+         try want.append(a, history_len);
+         if (previous.len > 0) {
+             const stable: u32 = @intCast(std.mem.indexOfDiff(u32, previous, prompt) orelse @min(previous.len, prompt.len));
+-            if (stable > 0 and stable < history_len and stable >= history_len / 2) try want.append(a, stable);
++            const keeps = if (s.rules.edit_mark) stable >= from + s.rules.min_gap and stable >= s.rules.min_prompt / 4 else stable >= history_len / 2;
++            if (stable > 0 and stable < history_len and keeps) try want.append(a, stable);
+         }
+         try want.appendSlice(a, shared);
+         for (want.items, 0..) |w, k| {
+diff --git a/zig/src/core/prompt_cache_test.zig b/zig/src/core/prompt_cache_test.zig
+index 2a74cd67..b80cf8ce 100644
+--- a/zig/src/core/prompt_cache_test.zig
++++ b/zig/src/core/prompt_cache_test.zig
+@@ -301,6 +301,57 @@ test "marks: the stable prefix with the last prompt and shared blocks, past the
+     try std.testing.expectEqualSlices(u32, &.{10}, try s.marks(a, &prompt, 0, 10, &.{9}, &.{}, &.{})); // a block next to the history
+ }
+ 
++test "TF_DS_EDIT_MARK: an early history edit keeps its stable mark on and drops it off" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var f: Fake = .{ .gpa = gpa };
++    var on = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_gap = 1, .min_prompt = 8, .edit_mark = true }, 1 << 20);
++    defer on.deinit();
++    var off = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_gap = 1, .min_prompt = 8 }, 1 << 20);
++    defer off.deinit();
++    const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 }; // history 16
++    const early = [_]u32{ 1, 2, 3, 4, 0, 0, 0, 0 }; // edited at 4: below the history's half
++    try std.testing.expectEqualSlices(u32, &.{ 4, 16 }, try on.marks(a, &prompt, 0, 16, &.{}, &.{}, &early));
++    try std.testing.expectEqualSlices(u32, &.{16}, try off.marks(a, &prompt, 0, 16, &.{}, &.{}, &early));
++    const edge = [_]u32{ 1, 0, 0, 0 }; // edited at 1: under min_prompt / 4, so no mark even on
++    try std.testing.expectEqualSlices(u32, &.{16}, try on.marks(a, &prompt, 0, 16, &.{}, &.{}, &edge));
++}
++
++test "TF_DS_EDIT_MARK: a late edit keeps its stable mark in both modes" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var f: Fake = .{ .gpa = gpa };
++    var on = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_gap = 2, .min_prompt = 8, .edit_mark = true }, 1 << 20);
++    defer on.deinit();
++    var off = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_gap = 2, .min_prompt = 8 }, 1 << 20);
++    defer off.deinit();
++    const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 }; // history 16
++    const late = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0 }; // edited at 13: at the history's half or later
++    try std.testing.expectEqualSlices(u32, &.{ 13, 16 }, try on.marks(a, &prompt, 0, 16, &.{}, &.{}, &late));
++    try std.testing.expectEqualSlices(u32, &.{ 13, 16 }, try off.marks(a, &prompt, 0, 16, &.{}, &.{}, &late));
++}
++
++test "TF_DS_EDIT_MARK: the stable mark keeps min_gap from the resume point and from its neighbours" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var f: Fake = .{ .gpa = gpa };
++    var on = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_gap = 2, .min_prompt = 8, .edit_mark = true }, 1 << 20);
++    defer on.deinit();
++    const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 }; // history 16
++    const near_from = [_]u32{ 1, 2, 3, 4, 5, 6, 0, 0 }; // edited at 6: min_gap from a resume at 5
++    try std.testing.expectEqualSlices(u32, &.{16}, try on.marks(a, &prompt, 5, 16, &.{}, &.{}, &near_from));
++    const away = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 0 }; // edited at 7: the floor's distance from 5
++    try std.testing.expectEqualSlices(u32, &.{ 7, 16 }, try on.marks(a, &prompt, 5, 16, &.{}, &.{}, &away));
++    const near_history = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0 }; // edited at 15: next to the history's mark
++    try std.testing.expectEqualSlices(u32, &.{16}, try on.marks(a, &prompt, 0, 16, &.{}, &.{}, &near_history));
++}
++
+ test "prompts under min_prompt keep nothing (their extra prompt call would cost more than reuse saves), longer ones keep as before" {
+     const gpa = std.testing.allocator;
+     var arena: std.heap.ArenaAllocator = .init(gpa);
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 2fd11e06..97f7e194 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -310,7 +310,7 @@ pub fn main(init: std.process.Init) !u8 {
+     if (spill != null) {
+         const L = dsv41.lanes.Lanes;
+         snap_vt = .{ .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .usable = L.usableFn };
+-        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window) }, @intFromFloat(cache_gib * (1 << 30)));
++        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")) }, @intFromFloat(cache_gib * (1 << 30)));
+         var seed: [4]u8 = undefined;
+         io.random(&seed);
+         store_v.setTier(ln.spill.?.tier(), std.mem.readInt(u32, &seed, .little));
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 6ba59539..f5cdda2f 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -493,10 +493,11 @@ pub fn rankExchange(gpa: std.mem.Allocator, io: std.Io, mo: model.Options, m: *m
+     const envp = try rank_identity.Extra.envFor(getenvFn, s != null);
+     var fbuf: [256]u8 = undefined;
+     const image_cache = spill_tier.Settings.imageCache(getenv("TF_DS_IMAGE_CACHE"));
++    const edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")); // (the marks gate: the fingerprint's reading)
+     // TF_DS_KV_SHARD's switches every rank's planner takes (carry, twins) and its part size: agreed in `features`
+     const kvs: kv_lanes.Settings = if (m.kvs != null) try kv_lanes.Settings.fromEnv(getenvFn) else .{ .carry = false, .twins = false };
+     const part_rows: u64 = if (m.caches.shard) |x| x.part else 0;
+-    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
++    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
+     var pbuf: [model.Model.spill.StateLayout.max_encoded]u8 = undefined;
+     const lp = try rank_identity.layoutPart(layout, m.world, &pbuf);
+     var arena = std.heap.ArenaAllocator.init(gpa);
+diff --git a/zig/src/families/dsv41/rank_identity.zig b/zig/src/families/dsv41/rank_identity.zig
+index 38ed2c2c..4f95e637 100644
+--- a/zig/src/families/dsv41/rank_identity.zig
++++ b/zig/src/families/dsv41/rank_identity.zig
+@@ -130,22 +130,24 @@ pub const Features = struct {
+     part_rows: u64 = 0, // TF_DS_KV_SHARD: positions a part (the pool / world)
+     engram_lanes: u8 = 1,
+     image_cache: bool = true,
++    edit_mark: bool = false, // TF_DS_EDIT_MARK (named in the string only when on)
+     streams: u32,
+     round_rows: u32,
+     pool: u64,
+     drafts: bool,
+ };
+ 
+-/// TF_DS_KV_SHARD adds "part=N;" (the part size: the owner layout's, also in the planes field); off, the bytes are
+-/// what they always were.
++/// TF_DS_KV_SHARD adds "part=N;" (the part size: the owner layout's, also in the planes field) and TF_DS_EDIT_MARK=1
++/// "edit_mark=1;"; with neither on, the bytes are what they always were.
+ pub fn featureString(buf: []u8, f: Features) ![]const u8 {
+     const head = try std.fmt.bufPrint(buf, "spill={d};spill_min={d};kv_shard={d};kv_carry={d};twins={d};engram_lanes={d};image_cache={d};streams={d};round_rows={d};pool={d};drafts={d};", .{
+         @intFromBool(f.spill), f.spill_min_tokens, @intFromBool(f.kv_shard), @intFromBool(f.kv_carry), @intFromBool(f.twins),
+         f.engram_lanes, @intFromBool(f.image_cache), f.streams, f.round_rows, f.pool, @intFromBool(f.drafts),
+     });
+-    if (!f.kv_shard) return head;
+-    const tail = try std.fmt.bufPrint(buf[head.len..], "part={d};", .{f.part_rows});
+-    return buf[0 .. head.len + tail.len];
++    var n = head.len;
++    if (f.kv_shard) n += (try std.fmt.bufPrint(buf[n..], "part={d};", .{f.part_rows})).len;
++    if (f.edit_mark) n += (try std.fmt.bufPrint(buf[n..], "edit_mark=1;", .{})).len; // named only when on: a mismatch with an off peer is a hello refusal
++    return buf[0..n];
+ }
+ 
+ /// The split of every rank (prompt2d.split's rule: world 2 is plain TP2; world 4 is two TP2 pairs).
+@@ -603,6 +605,12 @@ test "the features: off as they always were; TF_DS_KV_SHARD adds its switches an
+     try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=1;kv_carry=1;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=2101248;drafts=1;part=1050624;", on);
+ }
+ 
++test "TF_DS_EDIT_MARK is named in the features only when on (an off pair's string is unchanged)" {
++    var b: [256]u8 = undefined;
++    const edit = try featureString(&b, .{ .spill = true, .spill_min_tokens = 8192, .edit_mark = true, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
++    try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;edit_mark=1;", edit);
++}
++
+ test "TF_DS_KV_SHARD alone: a missing recipe identity reads unset, never a refusal; with the spill tier it is refused" {
+     const e = try Extra.envFor(noEnv, false);
+     try testing.expectEqualStrings("unset", e.engine_id);
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index 032b9dd6..a7b8bbc4 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -453,7 +453,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+         const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 0.5) * gib);
+         if (want > 0) {
+             h.snap_vt = .{ .bytes = sn.bytes, .save = sn.save, .restore = sn.restore, .drop = sn.drop };
+-            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0 }, want);
++            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")) }, want);
+             // the spill tier (off by default: nothing below runs then)
+             if (@hasField(@TypeOf(loaded), "tier")) {
+                 const store = &h.cache.?;

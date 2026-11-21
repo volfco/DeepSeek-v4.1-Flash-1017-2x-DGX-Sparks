@@ -1,0 +1,63 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 4daa6082448d..77dc1dcf52d1)
+# dsv41: pass_send_ms on both profile lines (--profile / TF_DS_ROUND_PROFILE) - the draft pass frame's send, from its issue to the pass timer's start
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 354668084aef0f97f213f5c0ccbce599098482b5..6e6ccd56648ee7adbe38bdecef80948075407afe 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -375,6 +375,7 @@ pub const Profile = struct {
+     logits: u64 = 0,
+     sample: u64 = 0,
+     pass: u64 = 0,
++    pass_send: u64 = 0, // the pass frame's send: from its issue to the pass timer's start (0146)
+     prefill: u64 = 0,
+     rounds: u64 = 0,
+     rows: u64 = 0,
+@@ -1688,6 +1689,7 @@ fn chunkRows(start: usize, len: usize) usize {
+         self.spec_gen += 1;
+         // the sampler's keys go to the pass only with TF_DS_T26_KEYED_DRAFT (the drafter's kernel loaded) and a sampled stream
+         const keyed = sampled and m.dr.?.nz != 0;
++        var frame_at: u64 = 0; // the pass frame's issue (0: no frame, no peer)
+         if (try self.begin(if (keyed) .pass_keyed else .pass)) {
+             try self.wire.int(gpa, u32, @intCast(n));
+             try self.wire.int(gpa, u32, @intCast(steps));
+@@ -1700,11 +1702,13 @@ fn chunkRows(start: usize, len: usize) usize {
+                     try self.wire.int(gpa, u64, @bitCast(temps[i]));
+                 }
+             }
++            if (self.prof != null) frame_at = m.now(); // the frame is whole: the pass timer starts once it is sent
+             try self.flush();
+         }
+         const t0 = m.now();
+         try m.pass(tokens[0..n], q0[0..n], slots[0..n], steps, if (keyed) .{ .seeds = seeds[0..n], .temps = temps[0..n] } else null);
+         if (self.prof) |*p| {
++            if (frame_at != 0) p.pass_send += t0 - frame_at;
+             p.pass += m.now() - t0;
+             p.passes += 1;
+             p.pass_streams += n;
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 16ef50b47376229c0e93af3fd21a143ec295df1e..0e327a2595726adbae5f31e3303a1981aac3ad4a 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -438,7 +438,7 @@ pub fn main(init: std.process.Init) !u8 {
+                 return if (n == 0) 0 else @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(n)) / 1e6;
+             }
+         }.f;
+-        try w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": {d:.2}, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}\n", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(step_ns, core.steps), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), p.prefills, ms(p.prefill, p.prefills) });
++        try w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": {d:.2}, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"pass_send_ms\": {d:.3}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}\n", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(step_ns, core.steps), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), ms(p.pass_send, p.passes), p.prefills, ms(p.prefill, p.prefills) });
+         try w.flush();
+         try printClock(w, 0, m);
+         try printKvShard(w, 0, m);
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 7174d2873a48c8b203b885660c344523f1463b00..0c169f26724eb6e319431f96b27acfa70ef20b4c 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -381,7 +381,7 @@ fn printRoundProfile(ctx: *anyopaque) void {
+             return if (n == 0) 0 else @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(n)) / 1e6;
+         }
+     }.f;
+-    w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": -1, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), p.prefills, ms(p.prefill, p.prefills) }) catch return;
++    w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": -1, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"pass_send_ms\": {d:.3}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), ms(p.pass_send, p.passes), p.prefills, ms(p.prefill, p.prefills) }) catch return;
+     std.log.info("{s}", .{out.written()});
+     out.clearRetainingCapacity();
+     // lanes_main.zig's printClock, ported: the rounds' GPU clock gaps and launch counts (only with useClock, i.e.

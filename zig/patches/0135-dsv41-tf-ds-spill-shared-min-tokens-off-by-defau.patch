@@ -1,0 +1,247 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 063bae4f8661..daa21b2e74af)
+# dsv41: TF_DS_SPILL_SHARED_MIN_TOKENS (off by default) writes a shared cut to the spill tier below SPILL_MIN_TOKENS - short agent sessions keep the state every follower re-prefills
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/core/spill/store.zig b/zig/src/core/spill/store.zig
+index 26c8919fa0606f57640c1f99d484f41186297298..814f4671faa2f562f6b1f02ec92c648b8a4bac06 100644
+--- a/zig/src/core/spill/store.zig
++++ b/zig/src/core/spill/store.zig
+@@ -82,6 +82,9 @@ pub const Config = struct {
+     stride: u32 = 0,
+     /// Shorter states are not written.
+     min_tokens: u32 = 8192,
++    /// A shared cut (the prompt cache's shared mark) is written from this many tokens on, even below `min_tokens`:
++    /// other conversations resume it, so its write is amortized (0: off, `min_tokens` alone).
++    shared_min_tokens: u32 = 0,
+     /// Bytes of unpublished writes (rows still in device memory, queued staging) past which a keep is refused.
+     backlog_bytes: u64 = 16 << 30,
+     /// The caller's staging buffers (block slots of `limits.block_bytes`, small slots of `limits.max_small_bytes`).
+@@ -95,6 +98,12 @@ pub const Config = struct {
+     hooks: Hooks = .{},
+ };
+ 
++/// The smallest a keep may be: `min_tokens`, or a shared cut's own floor (`Config.shared_min_tokens`): the lower of
++/// the two, so the switch only ever exempts, never raises.
++pub fn keepFloor(min_tokens: u32, shared_min_tokens: u32, shared: bool) u32 {
++    return if (shared and shared_min_tokens > 0) @min(min_tokens, shared_min_tokens) else min_tokens;
++}
++
+ pub const SectionSpec = struct { name: []const u8, len: u64 };
+ 
+ /// What `keep` stores.
+@@ -1287,7 +1296,7 @@ pub const Store = struct {
+         const gpa = s.gpa;
+         const l = s.cfg.limits;
+         const at: u32 = @intCast(@min(k.keyed.len, std.math.maxInt(u32)));
+-        if (at < s.cfg.min_tokens or at == 0) return s.refuse(.short);
++        if (at == 0 or at < keepFloor(s.cfg.min_tokens, s.cfg.shared_min_tokens, k.shared)) return s.refuse(.short);
+         if (!s.validKeep(k)) return s.refuse(.invalid);
+         // hashing runs before the lock (the writer and readers never wait on it), one pass over the ids: the chain,
+         // from which the key and the block names derive
+diff --git a/zig/src/core/spill/store_test.zig b/zig/src/core/spill/store_test.zig
+index 21ac6f0bf3a4ba8b681ef62782506400075d02aa..452bd9c8ccb0051f610e5d58692330b32475c7c8 100644
+--- a/zig/src/core/spill/store_test.zig
++++ b/zig/src/core/spill/store_test.zig
+@@ -533,6 +533,31 @@ fn checkRefusals(gpa: Allocator) !void {
+     try ensure(ct.committed == 2 and ct.points == 2, @src());
+ }
+ 
++/// TF_DS_SPILL_SHARED_MIN_TOKENS: a shared cut is written below `min_tokens` down to its own floor; a conversation's
++/// own state still needs `min_tokens`, and the floor never rises above it.
++fn checkKeepFloor(gpa: Allocator) !void {
++    try ensure(store.keepFloor(8192, 0, true) == 8192, @src()); // off: the gate alone
++    try ensure(store.keepFloor(8192, 2048, false) == 8192, @src());
++    try ensure(store.keepFloor(8192, 2048, true) == 2048, @src());
++    try ensure(store.keepFloor(2048, 8192, true) == 2048, @src());
++    const h = try H.init(gpa, .{ .tag = "sharedmin" });
++    defer h.deinit();
++    h.cfg.min_tokens = 2 * block_tokens;
++    h.cfg.shared_min_tokens = block_tokens;
++    try h.reopen();
++    const tiny = try idsOf(gpa, block_tokens / 2, 2300); // under even the shared floor
++    defer gpa.free(tiny);
++    try ensure(keepIds(h, tiny, .{ .lineage = lin(1), .source = 1, .shared = true }) == .short, @src());
++    const floor = try idsOf(gpa, block_tokens, 2301);
++    defer gpa.free(floor);
++    try ensure(keepIds(h, floor, .{ .lineage = lin(2), .source = 2 }) == .short, @src()); // its own state: min_tokens
++    const key = try write(h, floor, .{ .lineage = lin(3), .source = 3, .shared = true });
++    try ensure(h.s.presence(key), @src());
++    const big = try idsOf(gpa, 2 * block_tokens, 2302);
++    defer gpa.free(big);
++    _ = try write(h, big, .{ .lineage = lin(4), .source = 4 });
++}
++
+ /// Shared flag 3: the same ids kept again as a shared prefix make the stored point shared, its manifest rewritten
+ /// through a temporary name, fsynced, renamed, then the folder fsynced; a restart reads it shared.
+ fn checkSharedUpgrade(gpa: Allocator) !void {
+@@ -1771,6 +1796,7 @@ const checks = [_]Check{
+     .{ .name = "tail", .f = checkTail },
+     .{ .name = "upto", .f = checkUpto },
+     .{ .name = "shared upgrade", .f = checkSharedUpgrade },
++    .{ .name = "shared min tokens", .f = checkKeepFloor },
+     .{ .name = "shared waiting", .f = checkSharedWaiting },
+     .{ .name = "shared during write", .f = checkSharedDuringWrite },
+     .{ .name = "drop during rewrite", .f = checkDropDuringRewrite },
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 1c8e71d8f6e5f870ae2c65c1d5359a5b82797cb7..c160a8ecbd9e3ea32b0cfc60b454d37f5756f648 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -578,10 +578,12 @@ pub fn spillPreflight(env: *const fn ([:0]const u8) ?[]const u8) !void {
+     if (nonEmpty(env("TF_DS_ENGRAM")) != null and (env("TF_DS_ENGRAM_REVISION") orelse @as([]const u8, "")).len == 0) return error.NoEngramId;
+ }
+ 
+-/// The spill tier's switches from the server's (rank 0; api.Spill's fields) and TF_DS_SPILL_STAGING_MIB.
++/// The spill tier's switches from the server's (rank 0; api.Spill's fields), TF_DS_SPILL_STAGING_MIB and
++/// TF_DS_SPILL_SHARED_MIN_TOKENS.
+ pub fn spillSettings(dir: []const u8, gib: f64, min_free_gib: f64, quota: f64, min_tokens: u32, turns: u32, stride: u32, flush_ms: u32) !spill_tier.Settings {
+     var s: spill_tier.Settings = .{ .dir = dir, .gib = gib, .min_free_gib = min_free_gib, .quota = quota, .min_tokens = min_tokens, .turns = turns, .stride = stride, .flush_ms = flush_ms };
+     if (getenv("TF_DS_SPILL_STAGING_MIB")) |v| s.staging_mib = std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch return error.BadSpillSetting;
++    if (getenv("TF_DS_SPILL_SHARED_MIN_TOKENS")) |v| s.shared_min_tokens = std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch return error.BadSpillSetting;
+     if (s.staging_mib < spill_tier.min_staging_mib) return error.BadSpillSetting;
+     s.image_cache = spill_tier.Settings.imageCache(getenv("TF_DS_IMAGE_CACHE")); // (pictures' points: the fingerprint's reading)
+     return s;
+@@ -619,7 +621,7 @@ pub fn rankExchange(gpa: std.mem.Allocator, io: std.Io, mo: model.Options, m: *m
+     // TF_DS_KV_SHARD's switches every rank's planner takes (carry, twins) and its part size: agreed in `features`
+     const kvs: kv_lanes.Settings = if (m.kvs != null) try kv_lanes.Settings.fromEnv(getenvFn) else .{ .carry = false, .twins = false };
+     const part_rows: u64 = if (m.caches.shard) |x| x.part else 0;
+-    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .keep_protect = keep_protect, .exact_resume = exact_resume, .spec_sample = spec_sample, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
++    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .spill_shared_min = if (s) |x| x.shared_min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .keep_protect = keep_protect, .exact_resume = exact_resume, .spec_sample = spec_sample, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
+     var pbuf: [model.Model.spill.StateLayout.max_encoded]u8 = undefined;
+     const lp = try rank_identity.layoutPart(layout, m.world, &pbuf);
+     var arena = std.heap.ArenaAllocator.init(gpa);
+diff --git a/zig/src/families/dsv41/rank_identity.zig b/zig/src/families/dsv41/rank_identity.zig
+index 7184955afb79a9c91bb77778ded007383193a3ce..5e8dbac7a4d8f4ca9c123f88804435b9d913c832 100644
+--- a/zig/src/families/dsv41/rank_identity.zig
++++ b/zig/src/families/dsv41/rank_identity.zig
+@@ -124,6 +124,7 @@ pub fn layoutPart(l: *const spill_state.StateLayout, world: u32, buf: *[spill_st
+ pub const Features = struct {
+     spill: bool = false,
+     spill_min_tokens: u32 = 0,
++    spill_shared_min: u32 = 0, // TF_DS_SPILL_SHARED_MIN_TOKENS (named in the string only when on)
+     kv_shard: bool = false,
+     kv_carry: bool = false,
+     twins: bool = false,
+@@ -141,8 +142,8 @@ pub const Features = struct {
+ };
+ 
+ /// TF_DS_KV_SHARD adds "part=N;" (the part size: the owner layout's, also in the planes field), TF_DS_EDIT_MARK=1
+-/// "edit_mark=1;", TF_DS_KEEP_PROTECT=1 "keep_protect=1;", TF_DS_EXACT_RESUME=1 "exact_resume=1;" and TF_DS_SPEC_SAMPLE=1
+-/// "spec_sample=1;"; with none on, the
++/// "edit_mark=1;", TF_DS_KEEP_PROTECT=1 "keep_protect=1;", TF_DS_EXACT_RESUME=1 "exact_resume=1;", TF_DS_SPEC_SAMPLE=1
++/// "spec_sample=1;" and TF_DS_SPILL_SHARED_MIN_TOKENS=N "spill_shared_min=N;"; with none on, the
+ /// bytes are what they always were.
+ pub fn featureString(buf: []u8, f: Features) ![]const u8 {
+     const head = try std.fmt.bufPrint(buf, "spill={d};spill_min={d};kv_shard={d};kv_carry={d};twins={d};engram_lanes={d};image_cache={d};streams={d};round_rows={d};pool={d};drafts={d};", .{
+@@ -155,6 +156,8 @@ pub fn featureString(buf: []u8, f: Features) ![]const u8 {
+     if (f.keep_protect) n += (try std.fmt.bufPrint(buf[n..], "keep_protect=1;", .{})).len;
+     if (f.exact_resume) n += (try std.fmt.bufPrint(buf[n..], "exact_resume=1;", .{})).len; // (a mismatch with an off peer refuses at the hello)
+     if (f.spec_sample) n += (try std.fmt.bufPrint(buf[n..], "spec_sample=1;", .{})).len;
++    // a keep's smallest size on every rank's store: an off peer would refuse the shared keeps rank 0 queues
++    if (f.spill_shared_min > 0) n += (try std.fmt.bufPrint(buf[n..], "spill_shared_min={d};", .{f.spill_shared_min})).len;
+     return buf[0..n];
+ }
+ 
+@@ -626,6 +629,9 @@ test "TF_DS_EDIT_MARK, TF_DS_KEEP_PROTECT and TF_DS_EXACT_RESUME are named in th
+     var b4: [256]u8 = undefined;
+     const spec = try featureString(&b4, .{ .spill = true, .spill_min_tokens = 8192, .spec_sample = true, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
+     try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;spec_sample=1;", spec);
++    var b5: [256]u8 = undefined;
++    const shared_min = try featureString(&b5, .{ .spill = true, .spill_min_tokens = 8192, .spill_shared_min = 2048, .streams = 8, .round_rows = 16, .pool = 1 << 20, .drafts = true });
++    try testing.expectEqualStrings("spill=1;spill_min=8192;kv_shard=0;kv_carry=0;twins=0;engram_lanes=1;image_cache=1;streams=8;round_rows=16;pool=1048576;drafts=1;spill_shared_min=2048;", shared_min);
+ }
+ 
+ test "TF_DS_KV_SHARD alone: a missing recipe identity reads unset, never a refusal; with the spill tier it is refused" {
+diff --git a/zig/src/families/dsv41/spill_tier.zig b/zig/src/families/dsv41/spill_tier.zig
+index 5b0ea6b08c314f24438a975f1ce6035a28dc6da7..6d324af11642498de2a2d35307d1175e9c9b9924 100644
+--- a/zig/src/families/dsv41/spill_tier.zig
++++ b/zig/src/families/dsv41/spill_tier.zig
+@@ -47,6 +47,9 @@ pub const Settings = struct {
+     min_free_gib: f64 = 50,
+     quota: f64 = 0,
+     min_tokens: u32 = 8192,
++    /// TF_DS_SPILL_SHARED_MIN_TOKENS: a kept state at a shared cut is written from this many tokens on, even below
++    /// `min_tokens` (0: off, the gate alone). Every rank reads it: the features name it when on.
++    shared_min_tokens: u32 = 0,
+     turns: u32 = 4,
+     stride: u32 = 0,
+     flush_ms: u32 = 60_000,
+@@ -82,8 +85,8 @@ pub const Settings = struct {
+ 
+     /// A follower's settings: its flags first (`flag` returns a flag's value or null), else the environment
+     /// (TF_DS_SPILL_DIR, TF_DS_SPILL_GIB, TF_DS_SPILL_MIN_FREE_GIB, TF_DS_SPILL_MIN_TOKENS, TF_DS_SPILL_QUOTA,
+-    /// TF_DS_SPILL_STAGING_MIB, and the server's TF_SPILL_TURNS / TF_SPILL_STRIDE / TF_SPILL_FLUSH_MS); null when
+-    /// spill is off there.
++    /// TF_DS_SPILL_STAGING_MIB, TF_DS_SPILL_SHARED_MIN_TOKENS, and the server's TF_SPILL_TURNS / TF_SPILL_STRIDE /
++    /// TF_SPILL_FLUSH_MS); null when spill is off there.
+     pub fn follower(flag: *const fn ([]const u8) ?[]const u8, env: *const fn ([:0]const u8) ?[]const u8) !?Settings {
+         const dir = flag("--spill-dir") orelse env("TF_DS_SPILL_DIR") orelse return null;
+         if (dir.len == 0) return null;
+@@ -92,6 +95,7 @@ pub const Settings = struct {
+         if (!s.enabled()) return null;
+         s.min_free_gib = try num(f64, flag("--spill-min-free-gib") orelse env("TF_DS_SPILL_MIN_FREE_GIB"), s.min_free_gib);
+         s.min_tokens = try num(u32, flag("--spill-min-tokens") orelse env("TF_DS_SPILL_MIN_TOKENS"), s.min_tokens);
++        s.shared_min_tokens = try num(u32, env("TF_DS_SPILL_SHARED_MIN_TOKENS"), s.shared_min_tokens);
+         s.quota = try num(f64, flag("--spill-quota") orelse env("TF_DS_SPILL_QUOTA"), s.quota);
+         s.staging_mib = try num(u32, flag("--spill-staging-mib") orelse env("TF_DS_SPILL_STAGING_MIB"), s.staging_mib);
+         s.turns = try num(u32, env("TF_SPILL_TURNS"), s.turns);
+@@ -397,6 +401,7 @@ pub fn Side(comptime Dev: type) type {
+                 .turns = s.turns,
+                 .stride = s.stride,
+                 .min_tokens = s.min_tokens,
++                .shared_min_tokens = s.shared_min_tokens,
+                 .staging = .{ .write = &self.lists[0], .read = &self.lists[1], .small = &self.lists[2], .restore = &self.lists[3] },
+                 .readers = s.readers,
+                 .max_reads = s.restores,
+@@ -944,6 +949,7 @@ pub fn Leader(comptime Dev: type) type {
+         lead: ?*rank_wire.Leader,
+         own_lead: bool = true, // false: the pair's one Leader (Lanes.rw), shared with the KV parts and freed by them
+         min_tokens: u32,
++        shared_min_tokens: u32, // Settings.shared_min_tokens: a shared cut's own floor (0: off)
+         image_cache: bool, // Settings.image_cache: pictures' points kept and found
+         pictures_kept: u64 = 0, // points written with pictures before their cut
+         pictures_refused: u64 = 0, // keeps and lookups with pictures turned away (their ids and media disagree, or image cache off)
+@@ -994,7 +1000,7 @@ pub fn Leader(comptime Dev: type) type {
+             const self = try gpa.create(Self);
+             errdefer gpa.destroy(self);
+             const wf: []rank_wire.Fork = if (wire != null) try gpa.alloc(rank_wire.Fork, rank_wire.max_keep_forks) else &.{};
+-            self.* = .{ .gpa = gpa, .side = side, .fam = fam, .wire = wire, .lead = lead, .min_tokens = s.min_tokens, .image_cache = s.image_cache, .max_restores = @intCast(@max(1, @min(s.restores, rank_wire.max_restores))), .flush_ms = s.flush_ms, .boot = boot, .wire_forks = wf };
++            self.* = .{ .gpa = gpa, .side = side, .fam = fam, .wire = wire, .lead = lead, .min_tokens = s.min_tokens, .shared_min_tokens = s.shared_min_tokens, .image_cache = s.image_cache, .max_restores = @intCast(@max(1, @min(s.restores, rank_wire.max_restores))), .flush_ms = s.flush_ms, .boot = boot, .wire_forks = wf };
+             return self;
+         }
+ 
+@@ -1219,7 +1225,7 @@ pub fn Leader(comptime Dev: type) type {
+             if (self.broken != null) return null;
+             const bt = self.side.bt;
+             const at = kept.at;
+-            if (at == 0 or at % bt != 0 or at < self.min_tokens or kept.key.len < at) return null;
++            if (at == 0 or at % bt != 0 or at < spill.store.keepFloor(self.min_tokens, self.shared_min_tokens, kept.shared) or kept.key.len < at) return null;
+             // pictures: recorded with their spans and full digests (those before the cut), the keyed ids checked to
+             // derive from them and the prompt's model ids kept beside them; any disagreement keeps nothing on disk
+             var pics: Pictures = .{};
+diff --git a/zig/src/families/dsv41/spill_tier_test.zig b/zig/src/families/dsv41/spill_tier_test.zig
+index d4565cdd2c9e1521226e0f80c7250c901f3b1bca..28a085fabc5e407838c23cc820bb4215288ce277 100644
+--- a/zig/src/families/dsv41/spill_tier_test.zig
++++ b/zig/src/families/dsv41/spill_tier_test.zig
+@@ -632,9 +632,14 @@ test "follower settings: flags over the environment, off without a directory or
+             if (std.mem.eql(u8, n, "TF_DS_SPILL_DIR")) return "/nvme/spill";
+             if (std.mem.eql(u8, n, "TF_DS_SPILL_GIB")) return "2";
+             if (std.mem.eql(u8, n, "TF_DS_SPILL_MIN_TOKENS")) return "4096";
++            if (std.mem.eql(u8, n, "TF_DS_SPILL_SHARED_MIN_TOKENS")) return "2048";
+             if (std.mem.eql(u8, n, "TF_SPILL_STRIDE")) return "3";
+             return null;
+         }
++        fn envWithout(n: [:0]const u8) ?[]const u8 {
++            if (std.mem.eql(u8, n, "TF_DS_SPILL_SHARED_MIN_TOKENS")) return null;
++            return env(n);
++        }
+         fn none(_: [:0]const u8) ?[]const u8 {
+             return null;
+         }
+@@ -648,6 +653,8 @@ test "follower settings: flags over the environment, off without a directory or
+     try testing.expectEqualStrings("/nvme/spill", s.dir);
+     try testing.expectEqual(@as(f64, 8), s.gib);
+     try testing.expectEqual(@as(u32, 4096), s.min_tokens);
++    try testing.expectEqual(@as(u32, 2048), s.shared_min_tokens);
++    try testing.expectEqual(@as(u32, 0), (try tier.Settings.follower(Env.flagSome, Env.envWithout)).?.shared_min_tokens);
+     try testing.expectEqual(@as(u32, 3), s.stride);
+     try testing.expect(try tier.Settings.follower(Env.flagNone, Env.none) == null);
+     try testing.expectError(error.BadSpillSetting, tier.Settings.follower(Env.flagNone, Env.bad));

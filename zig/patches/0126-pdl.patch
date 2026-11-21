@@ -1,0 +1,1144 @@
+From 8ff4797957e96de3ce5c493cdcda1bd4cee41212 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Sun, 15 Nov 2026 12:18:31 -0800
+Subject: [PATCH 4/6] dsv41: TF_DS_PDL (off by default) programmatic dependent
+ launches for the hand-written kernels, and the nsys gap script the pair run
+ will use to size it
+
+Switch: TF_DS_PDL ("1" or "on"; unset, "0", "off" or anything else: off). Read at load on every rank (ops.zig's Ops.load, next to the spec read; exact.zig's Exact.load) through ops.zig's onValue/pdl_env (onValue made pub for exact.zig's use; no other behavior change), stored as o.pdl / x.pdl. Both ranks read it; no fingerprint bit, no switches bit: it changes no frames and no bytes (launch timing only, and the pair may run mixed ranks bit-identically - setting it alike on both is the convention, like the other serve switches). native.zig's purpose comment carries the one line for it (not to be confused with TF_RDMA_PDL / TF_DS_TRITON_PDL; changes no frames, no bytes; no fingerprint bit, no switches bit).
+
+The contract (CUDA programming guide; Baseten's crates/kernels/cu/common.cuh:14-15; this repo's dsv41/rdma_gather.cu pdl_enter):
+- Every kernel in the four files takes int pdl as its LAST parameter and, at its entry, before any global read, exactly like rdma_gather's pdl_enter (one such inline per file, copied per file; no cross-file includes):
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+        if (pdl) { asm volatile("griddepcontrol.wait;" ::: "memory"); asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
+    #endif
+  Every thread block executes both when pdl != 0. If the predecessor never executes launch_dependents (or is a plain kernel), the trigger happens implicitly when all of the predecessor's blocks exit - a PDL'd dependent's wait then blocks until the predecessor completes and flushes to global memory, which is fully correct either way.
+- Every launch of these kernels passes cudaLaunchAttributeProgrammaticStreamSerialization = 1 (cuda.launch's .pdl, which selects cuLaunchKernelEx; plain cuLaunchKernel otherwise): ops.zig's go() helper and every direct launch site, and exact.zig's five launch sites. The host-side development launchers in torch_ops pass pdl = 0 (their C entry-point ABI is unchanged), as do the raw C launchers; nemotron's and vit.zig's launches pass trailing 0 (below). With the switch off, every launch takes .pdl = false and every kernel takes pdl == 0, so the asm is never even branched to: the instruction stream is today's.
+- A PDL'd kernel after a non-PDL predecessor is safe (implicit completion). Stream capture is supported: the captured attribute records as a programmatic edge (cudaGraphDependencyTypeProgrammatic); nothing to do. Bits are identical: same launches, same inputs, same arithmetic.
+
+Kernel files (int pdl last, pdl_enter at entry):
+- zig/kernels/cuda/dsv41_ops.cu: 27 of its 28 kernels (including tf_ds_accept_chain_kernel from 0124). The one exception, tf_ds_l2_prefetch_kernel, is EXCLUDED: it reads the NEXT kernels' weights into L2 and must not run mid-flight against its predecessor's working set, so it neither takes pdl nor launches with the attribute; it stays a full stop like today (ops.zig does not pass .pdl for it either).
+- zig/kernels/cuda/dsv41_torch.cu: all 5 (tf_ds_rms_norm_kernel, tf_ds_compress2_kernel, tf_ds_rope_kernel, tf_ds_bf16_scale_kernel, tf_ds_hc_mean4_kernel).
+- zig/kernels/cuda/torch_ops/pointwise.cu: all 3 (tf_bf16_to_f32_kernel, tf_f32_to_bf16_kernel, tf_tap_add_kernel).
+- zig/kernels/cuda/torch_ops/movement.cu: all 3 (tf_copy_spans_kernel, tf_gather_rows_kernel, tf_strided_copy_kernel).
+
+Excluded, and why:
+- tf_ds_l2_prefetch_kernel (above).
+- dsv41_shard.cu (TF_DS_KV_SHARD's e.shard.*: the fetch/select/union kernels launched from shard_ops.zig): out of this patch; the known next candidate for the same treatment. (Its ring stage/collect pair already carries the attribute via rdma.zig's TF_RDMA_PDL.)
+- The torch_ops files not among the four above (grammar_mask, nucleus, logprob, topk/argmax/indexing/cast_f64/norm_rotary, nemotron_*): none are launched by the served decode path or the e.ops/e.exact wrappers; skipped and noted here for the record.
+- Two launch sites outside ops.zig/exact.zig had to change for the ABI alone (the trailing kernel parameter changed under them): vit.zig's eight direct vision-tower launches of these kernels (k_rope, k_rot, k_to_bf16, k_add, k_silu_mul, k_unfold, k_gelu, k_span) and nemotron's cuda_torch_ops.zig launches of tf_bf16_to_f32 (pointwise image) and tf_strided_copy (movement image). They pass trailing 0 and take no PDL attribute; TF_DS_PDL is read at load in ops.zig/exact.zig only, so the switch does not reach the vision tower or Nemotron. vit.zig's rmsNorm calls ride exact.zig, which does carry the attribute when the switch is on.
+- tools/dsv41-zig/rec/zrec_torchlab.py raw-launches these fatbins over ctypes: its argument lists gained the trailing c_int(0) so the qualification harness still launches against the new ABI (bits identical).
+
+Bits: identical. Launch timing only. Gates on the pair (not run on this host; host-only patch): tools/exact.py IDENTICAL with TF_DS_PDL=1; then the nsys script below (or tf-dsv41-lanes --profile / TF_DS_ROUND_PROFILE) to size the overlap the chain buys on GB10. The kit's Triton kernels already launch PDL (TF_DS_TRITON_PDL is on in the served build; zig/src/families/dsv41/tri.zig) - this closes the chain for the hand-written kernels between them.
+
+The nsys script: tools/nsys_breakdown.py (new, untracked on purpose - no commits in the Sparks repo from here). Modelled on Baseten's tools/nsys_breakdown.py, same CLI shape and output format: reads the sqlite of `nsys export --type sqlite -o out.sqlite out.nsys-rep`; groups this engine's kernel names (scatter/gather/byte movers; top-k / selection; norm/rope/cast/compress (exact); head/sampler/drafter (our kernels); clock (marks); L2 prefetch; RDMA gathers; NCCL / all-reduce; kit Triton kernels (tri_ prefix - the recorded names are unknown until a trace exists; the --help epilog tells the operator to adjust the prefix if the trace shows otherwise); embed; other); steps segmented by a chosen kernel (--first, default tf_ds_clock_kernel: the start-of-round clock kernel opens a round when TF_DS_ROUND_PROFILE=1/2 (or --profile plus TF_DS_CLOCK_MARKS) is active; with TF_DS_GRAPHS=1 each stretch of the round gets one, so the script segments stretches - pass your own --first); mean wall time per step; a markdown table of launches/step, us/step, share. Does NOT filter `graphNodeId is not null` by default (this engine runs eager rounds when GRAPHS=0; Baseten's filter hides everything there); --graphs-only applies it. --device/--kernels/--top kept as in the model; the (no kernel running) guard kept; sane exit codes; the --help epilog documents producing the export, that whether nsys works on GB10/sm_121 is UNCHECKED, and that the script only reads the sqlite. Self-test run here: a synthetic 221-row fixture (5 tf_ds_clock_kernel boundaries, 4 steps) printed the table; python3 -m py_compile clean. NOT verified against a real pair trace.
+
+Tests (host): zig build test green (this host's flaky runner reported one phantom "failed command" on an earlier run - the dsv41 family binary passes standalone 409/409 - its "failure" is sched_setaffinity errno 22 in this sandbox, unrelated to this patch - and the full re-run passed clean). No launch-Config-enumerating test pattern existed in ops.zig (the launch-geometry test covers blocks() only; the switches parse-test pattern is the spec-sample one), so no new launch-enumeration infrastructure was built; one parse test for TF_DS_PDL was added next to the spec-sample parse test. The .cu byte-correctness is pair-gated (exact.py); say so. Type-check/build: zig build install native -Dfatbins=... succeeds (binaries rebuilt).
+
+Judgement calls:
+- vit.zig, nemotron's cuda_torch_ops.zig and zrec_torchlab.py were not in the task's file list; they were mandatory ABI repairs (the trailing kernel parameter changed under them), made with trailing 0 / no attribute, matching the development-launcher rule. The switch does not reach them.
+- The four .cu files were checked only with a clang stub syntax check: scratch stub CUDA headers, plain `clang++ -fsyntax-only -x c++` on copies with the <<<>>> launch tokens stripped (plain clang has no CUDA frontend), once with the host preprocessor path and once with -D__CUDA_ARCH__=900 (exercising the pdl_enter asm path). Honest limits: this checks syntax and the plain-call type agreement of the host launchers' argument lists against the new kernel signatures; it does NOT check nvcc name mangling, ptxas, or the sm_90 asm encoding. The image nvcc is the first real compile of these files; nothing here has been run on a GPU.
+- native.zig carries only the one purpose-comment line; no fingerprint bit, no switches bit, no env read there.
+- l2_prefetch deliberately does not take the parameter (above).
+- ops.zig's onValue was made pub (exact.zig reuses it and pdl_env); no other behavior change.
+
+Unverified on the pair: exact.py IDENTICAL with TF_DS_PDL=1 (the point of the gate); the size of the overlap (nsys on GB10/sm_121 is UNCHECKED; the script has not seen a real trace); graph capture of the PDL edge (constructed from the CUDA graph model, not observed); the vision tower under TF_DS_PDL=1 (rmsNorm rides exact.zig's attribute; the eight other vision kernels take pdl = 0 by design).
+
+Patches: this is 0126 in the decode-step-structure series; item C of docs/baseten-ultrafast-plan.md.
+
+base: series-0119 (TF_REF fbbc971 + zig/patches 0001-0122) + 0123 + 0124 + 0125
+---
+ tools/dsv41-zig/rec/zrec_torchlab.py         | 20 ++---
+ zig/kernels/cuda/dsv41_ops.cu                | 94 ++++++++++++++------
+ zig/kernels/cuda/dsv41_torch.cu              | 27 ++++--
+ zig/kernels/cuda/torch_ops/movement.cu       | 27 ++++--
+ zig/kernels/cuda/torch_ops/pointwise.cu      | 27 ++++--
+ zig/src/families/dsv41/exact.zig             | 19 ++--
+ zig/src/families/dsv41/native.zig            |  1 +
+ zig/src/families/dsv41/ops.zig               | 92 +++++++++++++------
+ zig/src/families/dsv41/vit.zig               |  8 ++
+ zig/src/families/nemotron/cuda_torch_ops.zig |  5 +-
+ 10 files changed, 233 insertions(+), 87 deletions(-)
+
+diff --git a/tools/dsv41-zig/rec/zrec_torchlab.py b/tools/dsv41-zig/rec/zrec_torchlab.py
+index 3b3d660..8c56a9e 100644
+--- a/tools/dsv41-zig/rec/zrec_torchlab.py
++++ b/tools/dsv41-zig/rec/zrec_torchlab.py
+@@ -104,7 +104,7 @@ def main() -> None:
+                 launch(k["tf_ds_rms_norm_kernel"], ((rows + h - 1) // h, 1, 1), (lanes, h, 1),
+                        lanes * h * 4 if lanes > 32 else 0,
+                        [ptr(x), ctypes.c_longlong(d), ptr(w), ptr(out), ctypes.c_longlong(d), ctypes.c_int(rows),
+-                        ctypes.c_int(d), ctypes.c_float(factor), ctypes.c_float(eps)])
++                        ctypes.c_int(d), ctypes.c_float(factor), ctypes.c_float(eps), ctypes.c_int(0)])  # pdl: pass 0
+                 torch.cuda.synchronize()
+                 report(op="rms_norm", d=d, rows=rows, scale=scale, lanes=lanes, differ=differ(out, ref))
+ 
+@@ -127,7 +127,7 @@ def main() -> None:
+             out = torch.empty((groups, c), dtype=torch.bfloat16, device="cuda")
+             n = groups * c
+             launch(k["tf_ds_compress2_kernel"], (min(4096, (n + 255) // 256), 1, 1), (256, 1, 1), 0,
+-                   [ptr(kv), ptr(sc), ptr(out), ctypes.c_int(groups), ctypes.c_int(c)])
++                   [ptr(kv), ptr(sc), ptr(out), ctypes.c_int(groups), ctypes.c_int(c), ctypes.c_int(0)])  # pdl: pass 0
+             torch.cuda.synchronize()
+             report(op="compress2", groups=groups, case=case, differ=differ(out, ref))
+ 
+@@ -149,7 +149,7 @@ def main() -> None:
+                 n = rows * half
+                 launch(k["tf_ds_rope_kernel"], (min(4096, (n + 255) // 256), 1, 1), (256, 1, 1), 0,
+                        [ptr(out), ctypes.c_longlong(width), ctypes.c_int(width - 2 * half), ptr(cos), ptr(sin),
+-                        ptr(pos), ctypes.c_int(rows), ctypes.c_int(half), ctypes.c_int(int(inverse))])
++                        ptr(pos), ctypes.c_int(rows), ctypes.c_int(half), ctypes.c_int(int(inverse)), ctypes.c_int(0)])  # pdl: pass 0
+                 torch.cuda.synchronize()
+                 report(op="rope", width=width, rows=rows, inverse=inverse, differ=differ(out, ref))
+     # a DSpark tap: h.to(fp32).mean(1).to(bf16) over the 4 streams
+@@ -171,7 +171,7 @@ def main() -> None:
+         ref = h.to(torch.float32).mean(1).to(torch.bfloat16)
+         out = torch.empty((rows, d), dtype=torch.bfloat16, device="cuda")
+         launch(hm, (min(4096, (rows * d + 255) // 256), 1, 1), (256, 1, 1), 0,
+-               [ptr(h), ptr(out), ctypes.c_longlong(d), ctypes.c_int(rows), ctypes.c_int(d)])
++               [ptr(h), ptr(out), ctypes.c_longlong(d), ctypes.c_int(rows), ctypes.c_int(d), ctypes.c_int(0)])  # pdl: pass 0
+         torch.cuda.synchronize()
+         report(op="hc_mean4", rows=rows, case=case, differ=differ(out, ref))
+ 
+@@ -196,7 +196,7 @@ def main() -> None:
+             ref = view.topk(k, dim=1, sorted=False).values.sort(dim=1).values
+             out = torch.full((rows, k), 7, dtype=torch.int64, device="cuda")
+             launch(t, (rows, 1, 1), (1024, 1, 1), 0,
+-                   [ptr(keys), ctypes.c_longlong(ks), ctypes.c_int(n), ctypes.c_int(k), ptr(out)])
++                   [ptr(keys), ctypes.c_longlong(ks), ctypes.c_int(n), ctypes.c_int(k), ptr(out), ctypes.c_int(0)])  # pdl: pass 0
+             torch.cuda.synchronize()
+             got = out.sort(dim=1).values
+             report(op="topk_i64", rows=rows, n=n, k=k, ks=ks, case=case, differ=int((got != ref).sum()))
+@@ -224,7 +224,7 @@ def main() -> None:
+             ref = torch.where(top < vis[:, None], top, -1)
+             out = torch.full((rows, k), 7, dtype=torch.int64, device="cuda")
+             launch(ti, (rows, 1, 1), (1024, 1, 1), 0,
+-                   [ptr(sc), ctypes.c_longlong(n), ctypes.c_int(n), ctypes.c_int(k), ptr(vis), ptr(out)])
++                   [ptr(sc), ctypes.c_longlong(n), ctypes.c_int(n), ctypes.c_int(k), ptr(vis), ptr(out), ctypes.c_int(0)])  # pdl: pass 0
+             torch.cuda.synchronize()
+             report(op="topk_indices", rows=rows, n=n, k=k, case=case, differ=int((out != ref).sum()))
+         # the candidate pool past 2,048 blocks: model._candidates' mask and rounds._candidate_blocks' list from
+@@ -253,16 +253,16 @@ def main() -> None:
+             bmax = torch.empty((rows, nb), dtype=torch.float32, device="cuda")
+             launch(fs["tf_ds_block_max_kernel"], ((nb + 255) // 256, rows, 1), (256, 1, 1), 0,
+                    [ptr(sc), ctypes.c_longlong(width), ctypes.c_int(width), ctypes.c_int(8), ptr(vis), ptr(bmax),
+-                    ctypes.c_longlong(nb), ctypes.c_int(nb)])
++                    ctypes.c_longlong(nb), ctypes.c_int(nb), ctypes.c_int(0)])  # pdl: pass 0
+             every = torch.full((rows,), 1 << 40, dtype=torch.int64, device="cuda")
+             pidx = torch.full((rows, k), 7, dtype=torch.int64, device="cuda")
+             launch(fs["tf_ds_topk_indices_kernel"], (rows, 1, 1), (1024, 1, 1), 0,
+-                   [ptr(bmax), ctypes.c_longlong(nb), ctypes.c_int(nb), ctypes.c_int(k), ptr(every), ptr(pidx)])
++                   [ptr(bmax), ctypes.c_longlong(nb), ctypes.c_int(nb), ctypes.c_int(k), ptr(every), ptr(pidx), ctypes.c_int(0)])  # pdl: pass 0
+             mask = torch.full((rows, nb), 7, dtype=torch.uint8, device="cuda")
+             cblk = torch.full((rows, k), 7, dtype=torch.int32, device="cuda")
+             launch(fs["tf_ds_pool_pick_kernel"], (rows, 1, 1), (1024, 1, 1), 0,
+                    [ptr(bmax), ctypes.c_longlong(nb), ctypes.c_int(nb), ptr(pidx), ctypes.c_int(k), ptr(mask),
+-                    ctypes.c_longlong(nb), ptr(cblk)])
++                    ctypes.c_longlong(nb), ptr(cblk), ctypes.c_int(0)])  # pdl: pass 0
+             torch.cuda.synchronize()
+             ref_mask = served_model._candidates(sc, vis[:, None], 2048, 8)
+             ref_cblk = served_rounds._candidate_blocks(sc, vis, 2048, 8)
+@@ -273,7 +273,7 @@ def main() -> None:
+             got = sc.clone()
+             launch(fs["tf_ds_apply_pool_kernel"], ((width + 255) // 256, rows, 1), (256, 1, 1), 0,
+                    [ptr(got), ctypes.c_longlong(width), ctypes.c_int(width), ctypes.c_int(8), ptr(mask),
+-                    ctypes.c_longlong(nb)])
++                    ctypes.c_longlong(nb), ctypes.c_int(0)])  # pdl: pass 0
+             torch.cuda.synchronize()
+             report(op="apply_candidates", rows=rows, width=width, case=case,
+                    differ=int((got.view(torch.int32) != ref.view(torch.int32)).sum()))
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index b804195..08a2176 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -5,8 +5,22 @@
+ #include <cuda_bf16.h>
+ #include <stdint.h>
+ 
++// TF_DS_PDL: wait for the kernel this one follows (its memory flushed), then let the next one launch (programmatic
++// dependent launches, sm_90+). Every kernel in this file takes `pdl` as its last argument (0: same instruction stream as
++// before); the l2 prefetch kernel is the one exception: it reads the NEXT kernels' weights into L2 and must not run
++// mid-flight against its predecessor's working set, so it neither takes `pdl` nor is launched with the attribute.
++__device__ __forceinline__ void pdl_enter(int pdl) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
++    if (pdl) {
++        asm volatile("griddepcontrol.wait;" ::: "memory");
++        asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++    }
++#endif
++}
++
+ // `.float()` of fp16 values (exact): the MoE gate's weights before torch's fp32 GEMM (model.py moe, prompt rows).
+-extern "C" __global__ void tf_ds_f16_to_f32_kernel(const __half* input, float* output, uint64_t count) {
++extern "C" __global__ void tf_ds_f16_to_f32_kernel(const __half* input, float* output, uint64_t count, int pdl) {
++    pdl_enter(pdl);
+     for (uint64_t i = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+          i += uint64_t(gridDim.x) * blockDim.x) output[i] = __half2float(input[i]);
+ }
+@@ -14,14 +28,16 @@ extern "C" __global__ void tf_ds_f16_to_f32_kernel(const __half* input, float* o
+ // Comm.sum of two ranks' fp32 partials, then `.to(bf16)`: acc = g0 + g1 (one fp32 add, rank order), rounded to nearest
+ // even into bf16 (model.py engram_apply: comm.sum(mm(engram_wkv, e, F32)).to(BF16)).
+ extern "C" __global__ void tf_ds_add2_bf16_kernel(const float* g0, const float* g1, __nv_bfloat16* output,
+-                                                  uint64_t count) {
++                                                  uint64_t count, int pdl) {
++    pdl_enter(pdl);
+     for (uint64_t i = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+          i += uint64_t(gridDim.x) * blockDim.x) output[i] = __float2bfloat16_rn(__fadd_rn(g0[i], g1[i]));
+ }
+ 
+ // A profile's GPU clock (ns, %globaltimer) when the stream reaches it, appended with its tag: buf[0] the count (reset
+ // first when `reset`), then (clock, tag) pairs, at most `cap` (round phase timing; in a graph like any kernel).
+-extern "C" __global__ void tf_ds_clock_kernel(uint64_t* buf, uint32_t tag, uint32_t reset, uint32_t cap) {
++extern "C" __global__ void tf_ds_clock_kernel(uint64_t* buf, uint32_t tag, uint32_t reset, uint32_t cap, int pdl) {
++    pdl_enter(pdl);
+     if (threadIdx.x == 0) {
+         uint64_t t;
+         asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+@@ -40,7 +56,8 @@ extern "C" __global__ void tf_ds_clock_kernel(uint64_t* buf, uint32_t tag, uint3
+ // order); every key above it is written to top [rows, k], then copies of it fill the rest (in no particular order).
+ // keys [rows, n] (row stride ks).
+ extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_i64_kernel(const long long* keys, long long ks, int n, int k,
+-                                                                           long long* top) {
++                                                                           long long* top, int pdl) {
++    pdl_enter(pdl);
+     __shared__ unsigned int hist[256];
+     __shared__ unsigned long long prefix_s, mask_s;
+     __shared__ int want_s, count_s;
+@@ -93,7 +110,8 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_i64_kernel(const l
+ // t[idx] = rows of whole rows (index_put_ with distinct indices: the window ring's and the positional store's slots):
+ // dst row idx[r] = src row r, `bytes` bytes a row (16-byte words when the rows are aligned so), a row a block.
+ extern "C" __global__ void tf_ds_scatter_rows_kernel(const uint8_t* src, long long src_ld, const long long* idx,
+-                                                     uint8_t* dst, long long dst_ld, long long bytes, int rows) {
++                                                     uint8_t* dst, long long dst_ld, long long bytes, int rows, int pdl) {
++    pdl_enter(pdl);
+     const int r = blockIdx.x;
+     if (r >= rows) return;
+     const uint8_t* s = src + (long long)r * src_ld;
+@@ -126,7 +144,8 @@ __device__ __forceinline__ unsigned long long tf_ds_score_key(float x, int j) {
+ // pool's top blocks: k = 2048).
+ extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(const float* score, long long ss, int n,
+                                                                               int k, const long long* vis,
+-                                                                              long long* out) {
++                                                                              long long* out, int pdl) {
++    pdl_enter(pdl);
+     __shared__ unsigned int hist[256];
+     __shared__ unsigned long long prefix_s, mask_s;
+     __shared__ int want_s, count_s;
+@@ -263,7 +282,8 @@ extern "C" __global__ void __launch_bounds__(128) tf_ds_l2_prefetch_kernel(TfDsP
+ // The indexer's selection when its top-k takes every key it scans (nb <= index_topk): kernels.topk_indices of all nb
+ // keys is 0 .. nb - 1 whatever the scores, then the visible mask: out[r, j] = j if j < vis[r] else -1. vis [rows] int64,
+ // out [rows, nb] int64; grid (blocks, rows).
+-extern "C" __global__ void tf_ds_iota_vis_kernel(const long long* vis, long long* out, int nb) {
++extern "C" __global__ void tf_ds_iota_vis_kernel(const long long* vis, long long* out, int nb, int pdl) {
++    pdl_enter(pdl);
+     const int r = blockIdx.y;
+     const long long v = vis[r];
+     for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < nb; j += gridDim.x * blockDim.x) {
+@@ -281,7 +301,8 @@ struct TfDsPrune { float topp; int min_k, renorm, apply, topk, slots, rows, cap,
+ #define TF_DS_PRUNE_ROWS 64
+ #define TF_DS_PRUNE_TOPK 8
+ #define TF_DS_PRUNE_EXPERTS 512
+-extern "C" __global__ void __launch_bounds__(TF_DS_PRUNE_ROWS) tf_ds_expert_prune_kernel(int* pick, float* wts, TfDsPrune a, unsigned long long* stats) {
++extern "C" __global__ void __launch_bounds__(TF_DS_PRUNE_ROWS) tf_ds_expert_prune_kernel(int* pick, float* wts, TfDsPrune a, unsigned long long* stats, int pdl) {
++    pdl_enter(pdl);
+     __shared__ unsigned mb[16], ma[16], acc[3], ins[16];
+     __shared__ int sp[TF_DS_PRUNE_ROWS * TF_DS_PRUNE_TOPK];
+     __shared__ float sf[TF_DS_PRUNE_ROWS * TF_DS_PRUNE_TOPK], score[TF_DS_PRUNE_EXPERTS];
+@@ -416,7 +437,8 @@ extern "C" __global__ void __launch_bounds__(TF_DS_PRUNE_ROWS) tf_ds_expert_prun
+ // (vis - 1) // bsize (floor division). score [rows, nb * bsize] fp32 (row stride ss), vis [rows], out [rows, nb] (row
+ // stride os); grid (blocks, rows).
+ extern "C" __global__ void tf_ds_cand_fast_kernel(const float* score, long long ss, int nb, int bsize,
+-                                                  const long long* vis, uint8_t* out, long long os) {
++                                                  const long long* vis, uint8_t* out, long long os, int pdl) {
++    pdl_enter(pdl);
+     const int r = blockIdx.y;
+     const long long t = vis[r] - 1;
+     const long long last = t >= 0 ? t / bsize : -((-t + bsize - 1) / bsize);
+@@ -437,7 +459,8 @@ extern "C" __global__ void tf_ds_cand_fast_kernel(const float* score, long long
+ // division), pinned to +inf. score [rows, width] fp32 (row stride ss), vis [rows] int64, out [rows, nb] fp32 (row
+ // stride os), nb = ceil(width / bsize); grid (blocks, rows).
+ extern "C" __global__ void tf_ds_block_max_kernel(const float* score, long long ss, int width, int bsize,
+-                                                  const long long* vis, float* out, long long os, int nb) {
++                                                  const long long* vis, float* out, long long os, int nb, int pdl) {
++    pdl_enter(pdl);
+     const int r = blockIdx.y;
+     const long long t = vis[r] - 1;
+     const long long last = t >= 0 ? t / bsize : -((-t + bsize - 1) / bsize);
+@@ -462,7 +485,8 @@ extern "C" __global__ void tf_ds_block_max_kernel(const float* score, long long
+ // -inf) and/or rounds.py _candidate_blocks' list (int32 [rows, k]: the block, or -1 when its maximum is not above -inf).
+ // A row a block of threads.
+ extern "C" __global__ void tf_ds_pool_pick_kernel(const float* bmax, long long bs, int nb, const long long* idx, int k,
+-                                                  uint8_t* mask, long long ms, int* cblk) {
++                                                  uint8_t* mask, long long ms, int* cblk, int pdl) {
++    pdl_enter(pdl);
+     const int r = blockIdx.x;
+     const float ninf = -__int_as_float(0x7f800000);
+     if (mask != nullptr) {
+@@ -480,7 +504,8 @@ extern "C" __global__ void tf_ds_pool_pick_kernel(const float* bmax, long long b
+ // model.py apply_candidates: -inf at every position whose block the row's pool leaves out (mask u8 [rows, >= ceil(width
+ // / bsize)], row stride ms), in place. score [rows, width] fp32 (row stride ss); grid (blocks, rows).
+ extern "C" __global__ void tf_ds_apply_pool_kernel(float* score, long long ss, int width, int bsize, const uint8_t* mask,
+-                                                   long long ms) {
++                                                   long long ms, int pdl) {
++    pdl_enter(pdl);
+     const int r = blockIdx.y;
+     const float ninf = -__int_as_float(0x7f800000);
+     for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < width; j += gridDim.x * blockDim.x) {
+@@ -492,7 +517,8 @@ extern "C" __global__ void tf_ds_apply_pool_kernel(float* score, long long ss, i
+ // row and a byte a thread; this one a word a thread over grid (ceil(n16 / blockDim), rows). Every pointer, stride and
+ // row length a multiple of 16 bytes (ops.copyRows checks).
+ extern "C" __global__ void tf_ds_copy_rows16_kernel(const uint4* src, unsigned long long src_ld, uint4* dst,
+-                                                    unsigned long long dst_ld, unsigned long long n16) {
++                                                    unsigned long long dst_ld, unsigned long long n16, int pdl) {
++    pdl_enter(pdl);
+     const unsigned long long r = blockIdx.y;
+     const unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+     if (i < n16) dst[r * dst_ld + i] = src[r * src_ld + i];
+@@ -546,7 +572,8 @@ __device__ unsigned tf_ds_block_argmax(const float* row, int n) {
+ 
+ // logits [rows, n] fp32 (row stride ld), out [rows] u32; a row a block (1024 threads).
+ extern "C" __global__ void __launch_bounds__(1024) tf_ds_argmax_rows_kernel(const float* logits, unsigned long long ld,
+-                                                                             int n, unsigned* out) {
++                                                                             int n, unsigned* out, int pdl) {
++    pdl_enter(pdl);
+     const float* row = logits + (unsigned long long)blockIdx.x * ld;
+     const unsigned token = tf_ds_block_argmax(row, n);
+     if (threadIdx.x == 0) out[blockIdx.x] = token;
+@@ -557,7 +584,8 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_argmax_rows_kernel(cons
+ // (i64) and the picks (u32) are the buffers the forward already wrote, so no new data crosses the pair.
+ extern "C" __global__ void __launch_bounds__(32) tf_ds_accept_chain_kernel(
+         const long long* ids, const unsigned* picks, const unsigned* row0, const unsigned* wrows,
+-        int nwin, unsigned* keep_out) {
++        int nwin, unsigned* keep_out, int pdl) {
++    pdl_enter(pdl);
+     const int w = blockIdx.x;
+     if (w >= nwin) return;
+     const unsigned r0 = row0[w], rows = wrows[w];
+@@ -585,7 +613,8 @@ extern "C" __global__ void __launch_bounds__(32) tf_ds_accept_chain_kernel(
+ // get_vision_cos_sin on the GPU: a patch at grid row h, column w (row-major over n_w columns) gets
+ // freqs[c] = float(c < 16 ? h : w) * inv_freq[c % 16], inv_freq[j] = 1 / powf(theta, float(2j) / 32), then cosf, sinf;
+ // out [n, 32] fp32 each.
+-extern "C" __global__ void tf_ds_vrope_kernel(float* cos_out, float* sin_out, int n, int nw, float theta) {
++extern "C" __global__ void tf_ds_vrope_kernel(float* cos_out, float* sin_out, int n, int nw, float theta, int pdl) {
++    pdl_enter(pdl);
+     const int i = blockIdx.x * blockDim.x + threadIdx.x;
+     if (i >= n * 32) return;
+     const int r = i / 32, c = i % 32, j = c % 16;
+@@ -601,7 +630,8 @@ extern "C" __global__ void tf_ds_vrope_kernel(float* cos_out, float* sin_out, in
+ // x1 = x[:32], x2 = x[32:], cat(x1 * cos - x2 * sin, x2 * cos + x1 * sin).to(bf16)) and every value then .float() for the
+ // fp32 attention: q32, k32, v32 fp32 [n, 16, 64]. One thread a (row, head, d < 32) pair.
+ extern "C" __global__ void tf_ds_vrot_kernel(const __nv_bfloat16* qkv, const float* cosb, const float* sinb, float* q32,
+-                                             float* k32, float* v32, int n) {
++                                             float* k32, float* v32, int n, int pdl) {
++    pdl_enter(pdl);
+     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+     if (i >= (long long)n * 16 * 32) return;
+     const long long r = i / 512;
+@@ -622,14 +652,16 @@ extern "C" __global__ void tf_ds_vrot_kernel(const __nv_bfloat16* qkv, const flo
+ }
+ 
+ // `.to(bf16)` of count fp32 values (round to nearest even).
+-extern "C" __global__ void tf_ds_f32_to_bf16_kernel(const float* in, __nv_bfloat16* out, unsigned long long count) {
++extern "C" __global__ void tf_ds_f32_to_bf16_kernel(const float* in, __nv_bfloat16* out, unsigned long long count, int pdl) {
++    pdl_enter(pdl);
+     for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < count;
+          i += (unsigned long long)gridDim.x * blockDim.x)
+         out[i] = __float2bfloat16_rn(in[i]);
+ }
+ 
+ // x + y of bf16 values in place on x (torch's add: fp32 sum, rounded once).
+-extern "C" __global__ void tf_ds_add_bf16_kernel(__nv_bfloat16* x, const __nv_bfloat16* y, unsigned long long count) {
++extern "C" __global__ void tf_ds_add_bf16_kernel(__nv_bfloat16* x, const __nv_bfloat16* y, unsigned long long count, int pdl) {
++    pdl_enter(pdl);
+     for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < count;
+          i += (unsigned long long)gridDim.x * blockDim.x)
+         x[i] = __float2bfloat16_rn(__bfloat162float(x[i]) + __bfloat162float(y[i]));
+@@ -637,7 +669,8 @@ extern "C" __global__ void tf_ds_add_bf16_kernel(__nv_bfloat16* x, const __nv_bf
+ 
+ // The MLP's F.silu(gate) * up of w1's output gu bf16 [n, 2 * inter]: silu in fp32 (x / (1 + expf(-x))) rounded to bf16,
+ // then the bf16 product rounded again; out bf16 [n, inter].
+-extern "C" __global__ void tf_ds_vsilu_mul_kernel(const __nv_bfloat16* gu, __nv_bfloat16* out, int n, int inter) {
++extern "C" __global__ void tf_ds_vsilu_mul_kernel(const __nv_bfloat16* gu, __nv_bfloat16* out, int n, int inter, int pdl) {
++    pdl_enter(pdl);
+     const long long total = (long long)n * inter;
+     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (long long)gridDim.x * blockDim.x) {
+         const long long r = i / inter, c = i % inter;
+@@ -652,7 +685,8 @@ extern "C" __global__ void tf_ds_vsilu_mul_kernel(const __nv_bfloat16* gu, __nv_
+ // 3x3 cells: out bf16 [dim * 9, cells] (F.unfold's [C * k * k, L] layout), feature f = c * 9 + ki * 3 + kj of cell
+ // l = lh * cells_w + lw taking x at grid (3 * lh + ki, 3 * lw + kj), 0 outside the grid.
+ extern "C" __global__ void tf_ds_vunfold3_kernel(const __nv_bfloat16* x, __nv_bfloat16* out, int n_h, int n_w, int dim,
+-                                                 int cells_h, int cells_w) {
++                                                 int cells_h, int cells_w, int pdl) {
++    pdl_enter(pdl);
+     const long long cells = (long long)cells_h * cells_w;
+     const long long total = (long long)dim * 9 * cells;
+     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (long long)gridDim.x * blockDim.x) {
+@@ -664,7 +698,8 @@ extern "C" __global__ void tf_ds_vunfold3_kernel(const __nv_bfloat16* x, __nv_bf
+ }
+ 
+ // F.gelu (erf) of bf16 values in place: x * 0.5 * (1 + erf(x * M_SQRT1_2)) in fp32, rounded to bf16.
+-extern "C" __global__ void tf_ds_vgelu_kernel(__nv_bfloat16* x, unsigned long long count) {
++extern "C" __global__ void tf_ds_vgelu_kernel(__nv_bfloat16* x, unsigned long long count, int pdl) {
++    pdl_enter(pdl);
+     for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; i < count;
+          i += (unsigned long long)gridDim.x * blockDim.x) {
+         const float v = __bfloat162float(x[i]);
+@@ -676,7 +711,8 @@ extern "C" __global__ void tf_ds_vgelu_kernel(__nv_bfloat16* x, unsigned long lo
+ // IMAGE the aligner's rows in reading order. types: 0 start, 1 image, 2 newline, 3 end.
+ extern "C" __global__ void tf_ds_vspan_kernel(const unsigned char* types, const __nv_bfloat16* rows, const __nv_bfloat16* start,
+                                               const __nv_bfloat16* newline, const __nv_bfloat16* end, __nv_bfloat16* out,
+-                                              int tokens, int dim, const int* row_of) {
++                                              int tokens, int dim, const int* row_of, int pdl) {
++    pdl_enter(pdl);
+     const long long total = (long long)tokens * dim;
+     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (long long)gridDim.x * blockDim.x) {
+         const int t = int(i / dim), c = int(i % dim);
+@@ -707,7 +743,8 @@ __device__ __forceinline__ uint64_t tf_ds_mix64(uint64_t x) {
+ 
+ // grid (ceil(width / blockDim), streams); the row table is device memory so a captured graph reads each pass's seeds.
+ extern "C" __global__ void tf_ds_keyed_noise_kernel(float* logits, uint64_t l_row, uint32_t width, uint64_t col0,
+-                                                    const TfDsKeyedRow* rows, uint32_t step) {
++                                                    const TfDsKeyedRow* rows, uint32_t step, int pdl) {
++    pdl_enter(pdl);
+     const TfDsKeyedRow k = rows[blockIdx.y];
+     if (!(k.temp > 0.0)) return;
+     const double t = fmax(k.temp, 1e-6);
+@@ -733,7 +770,8 @@ extern "C" __global__ void tf_ds_keyed_noise_kernel(float* logits, uint64_t l_ro
+ extern "C" __global__ void tf_ds_spec_clean_kernel(const float* logits, uint64_t l_row, uint32_t width,
+                                                    const TfDsKeyedRow* rows, const int64_t* tok, uint64_t t_stride,
+                                                    const int32_t* slot, const __half* cache, const __half* stage,
+-                                                   uint64_t b_row, float* clean, uint64_t c_row) {
++                                                   uint64_t b_row, float* clean, uint64_t c_row, int pdl) {
++    pdl_enter(pdl);
+     const TfDsKeyedRow k = rows[blockIdx.y];
+     if (!(k.temp > 0.0)) return;
+     const float inv_t = float(1.0 / fmax(k.temp, 1e-6));
+@@ -785,7 +823,8 @@ extern "C" __global__ void tf_ds_spec_clean_kernel(const float* logits, uint64_t
+ 
+ // TF_DS_SPEC_SAMPLE: out[i] = src[idx[i]] (fp32; idx < 0: -inf, an element this rank does not hold): the verify's
+ // gather of the clean scores at the target's candidates and of the normaliser partials. One thread an index.
+-extern "C" __global__ void tf_ds_gather_cols_kernel(const float* src, const long long* idx, long long n, float* out) {
++extern "C" __global__ void tf_ds_gather_cols_kernel(const float* src, const long long* idx, long long n, float* out, int pdl) {
++    pdl_enter(pdl);
+     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+     if (i >= n) return;
+     const long long c = idx[i];
+@@ -818,7 +857,8 @@ __device__ __forceinline__ uint64_t tf_ds_draw_key(float v, int id) {
+ }
+ 
+ extern "C" __global__ void __launch_bounds__(1024) tf_ds_draw_rows_kernel(const float* logits, unsigned long long ld, int n,
+-                                                                           const TfDsDrawRow* rules, unsigned* out) {
++                                                                           const TfDsDrawRow* rules, unsigned* out, int pdl) {
++    pdl_enter(pdl);
+     const float* row = logits + (unsigned long long)blockIdx.x * ld;
+     const TfDsDrawRow rule = rules[blockIdx.x];
+     if (rule.temp <= 0.0) {
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index cb4dcb9..a336ef9 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -7,6 +7,18 @@
+ #include <cuda_bf16.h>
+ #include <stdint.h>
+ 
++// TF_DS_PDL: wait for the kernel this one follows (its memory flushed), then let the next one launch (programmatic
++// dependent launches, sm_90+). Every kernel in this file takes `pdl` as its last argument (0: same instruction stream as
++// before).
++__device__ __forceinline__ void pdl_enter(int pdl) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
++    if (pdl) {
++        asm volatile("griddepcontrol.wait;" ::: "memory");
++        asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++    }
++#endif
++}
++
+ #define TF_FULL_MASK 0xffffffffu
+ 
+ // ops.rms_norm(x, w, eps) of rows of D bf16 values (D a multiple of 4, at least 128): out = bf16(w * (x * r)),
+@@ -16,7 +28,8 @@
+ // shuffle with decreasing offsets; times `factor` (torch's float(rows) / (rows * D)). Block (L, H): a row a y.
+ extern "C" __global__ void tf_ds_rms_norm_kernel(const __nv_bfloat16* x, long long ldx, const __nv_bfloat16* w,
+                                                  __nv_bfloat16* out, long long ldo, int rows, int D, float factor,
+-                                                 float eps) {
++                                                 float eps, int pdl) {
++    pdl_enter(pdl);
+     extern __shared__ float shared[];   // L * H floats when L > 32
+     __shared__ float rs[64];            // each row's r
+     const int L = blockDim.x;
+@@ -68,7 +81,8 @@ extern "C" __global__ void tf_ds_rms_norm_kernel(const __nv_bfloat16* x, long lo
+ // bf16((kv * score.softmax(dim=1)).sum(1)) at torch's rounding points: the spatial softmax over the pair (max, the
+ // sum of exp(s - max) from 0, then exp(s - max) / sum), the products, and the pair's sum as reduce_kernel's
+ // thread_reduce_impl adds it (four accumulators from 0, two of them used, combined in order).
+-extern "C" __global__ void tf_ds_compress2_kernel(const float* kv, const float* score, __nv_bfloat16* out, int G, int C) {
++extern "C" __global__ void tf_ds_compress2_kernel(const float* kv, const float* score, __nv_bfloat16* out, int G, int C, int pdl) {
++    pdl_enter(pdl);
+     const long long n = (long long)G * C;
+     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (long long)gridDim.x * blockDim.x) {
+         const long long g = i / C, c = i % C;
+@@ -97,7 +111,8 @@ extern "C" __global__ void tf_ds_compress2_kernel(const float* kv, const float*
+ // multiply-add over the other product: fma(a, c, -(b*d)) and fma(b, c, a*d) (the bytes of torch.mul on GB10, the
+ // four other roundings of the pair differ: zrec_torchlab.py).
+ extern "C" __global__ void tf_ds_rope_kernel(__nv_bfloat16* x, long long ldx, int off, const float* cos,
+-                                             const float* sin, const long long* pos, int n, int half, int inverse) {
++                                             const float* sin, const long long* pos, int n, int half, int inverse, int pdl) {
++    pdl_enter(pdl);
+     const long long total = (long long)n * half;
+     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (long long)gridDim.x * blockDim.x) {
+         const long long r = i / half, k = i % half;
+@@ -114,7 +129,8 @@ extern "C" __global__ void tf_ds_rope_kernel(__nv_bfloat16* x, long long ldx, in
+ 
+ // The indexer's head weights (model.py attention_k): wts = wl.to(bf16) * s, wl fp32: rounded to bf16, then times the
+ // Python scalar as torch's mul with a scalar computes it (fp32 opmath: float(bf16) * float(s)), rounded to bf16 again.
+-extern "C" __global__ void tf_ds_bf16_scale_kernel(const float* in, __nv_bfloat16* out, uint64_t count, float s) {
++extern "C" __global__ void tf_ds_bf16_scale_kernel(const float* in, __nv_bfloat16* out, uint64_t count, float s, int pdl) {
++    pdl_enter(pdl);
+     for (uint64_t i = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < count; i += uint64_t(gridDim.x) * blockDim.x)
+         out[i] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(__float2bfloat16_rn(in[i])), s));
+ }
+@@ -124,7 +140,8 @@ extern "C" __global__ void tf_ds_bf16_scale_kernel(const float* in, __nv_bfloat1
+ // values a thread to split them over the block), times MeanOps' factor 0.25, rounded to bf16. h [rows, 4, D] bf16,
+ // out [rows, D] (row stride os).
+ extern "C" __global__ void tf_ds_hc_mean4_kernel(const __nv_bfloat16* h, __nv_bfloat16* out, long long os, int rows,
+-                                                 int D) {
++                                                 int D, int pdl) {
++    pdl_enter(pdl);
+     const long long total = (long long)rows * D;
+     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (long long)gridDim.x * blockDim.x) {
+         const long long r = i / D, d = i % D;
+diff --git a/zig/kernels/cuda/torch_ops/movement.cu b/zig/kernels/cuda/torch_ops/movement.cu
+index 12adbec..87895e7 100644
+--- a/zig/kernels/cuda/torch_ops/movement.cu
++++ b/zig/kernels/cuda/torch_ops/movement.cu
+@@ -2,13 +2,26 @@
+ #include <stdint.h>
+ #include <limits.h>
+ 
++// TF_DS_PDL: wait for the kernel this one follows (its memory flushed), then let the next one launch (programmatic
++// dependent launches, sm_90+). Every kernel in this file takes `pdl` as its last argument (0: same instruction stream as
++// before).
++__device__ __forceinline__ void pdl_enter(int pdl) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
++    if (pdl) {
++        asm volatile("griddepcontrol.wait;" ::: "memory");
++        asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++    }
++#endif
++}
++
+ struct TfCopySpan {
+     const uint8_t* source;
+     uint8_t* destination;
+     uint64_t bytes;
+ };
+ 
+-extern "C" __global__ void tf_copy_spans_kernel(const TfCopySpan* spans, uint32_t count) {
++extern "C" __global__ void tf_copy_spans_kernel(const TfCopySpan* spans, uint32_t count, int pdl) {
++    pdl_enter(pdl);
+     const uint32_t item = blockIdx.x;
+     if (item >= count) return;
+     const TfCopySpan span = spans[item];
+@@ -19,13 +32,14 @@ extern "C" __global__ void tf_copy_spans_kernel(const TfCopySpan* spans, uint32_
+ extern "C" cudaError_t tf_copy_spans(const TfCopySpan* spans, uint32_t count, cudaStream_t stream) {
+     if (count == 0) return cudaSuccess;
+     if (!spans || count > INT_MAX) return cudaErrorInvalidValue;
+-    tf_copy_spans_kernel<<<count, 256, 0, stream>>>(spans, count);
++    tf_copy_spans_kernel<<<count, 256, 0, stream>>>(spans, count, 0);
+     return cudaGetLastError();
+ }
+ 
+ extern "C" __global__ void tf_gather_rows_kernel(const uint8_t* source, uint8_t* destination,
+                                      const int64_t* indices, uint64_t rows,
+-                                     uint64_t source_rows, uint64_t row_bytes, uint32_t* invalid) {
++                                     uint64_t source_rows, uint64_t row_bytes, uint32_t* invalid, int pdl) {
++    pdl_enter(pdl);
+     const uint64_t row = blockIdx.x;
+     if (row >= rows) return;
+     const int64_t pick = indices[row];
+@@ -45,14 +59,15 @@ extern "C" cudaError_t tf_gather_rows(const void* source, void* destination, con
+         rows > UINT64_MAX / row_bytes || source_rows > UINT64_MAX / row_bytes)
+         return cudaErrorInvalidValue;
+     tf_gather_rows_kernel<<<uint32_t(rows), 256, 0, stream>>>(static_cast<const uint8_t*>(source),
+-        static_cast<uint8_t*>(destination), indices, rows, source_rows, row_bytes, invalid);
++        static_cast<uint8_t*>(destination), indices, rows, source_rows, row_bytes, invalid, 0);
+     return cudaGetLastError();
+ }
+ 
+ extern "C" __global__ void tf_strided_copy_kernel(const uint8_t* source, uint8_t* destination,
+                                       uint64_t outer, uint64_t middle, uint64_t inner_bytes,
+                                       uint64_t source_outer, uint64_t source_middle,
+-                                      uint64_t destination_outer, uint64_t destination_middle) {
++                                      uint64_t destination_outer, uint64_t destination_middle, int pdl) {
++    pdl_enter(pdl);
+     const uint64_t group = blockIdx.x;
+     const uint64_t total = middle * inner_bytes;
+     for (uint64_t i = threadIdx.x; group < outer && i < total; i += blockDim.x) {
+@@ -86,6 +101,6 @@ extern "C" cudaError_t tf_strided_copy(const void* source, void* destination, ui
+         return cudaErrorInvalidValue;
+     tf_strided_copy_kernel<<<uint32_t(outer), 256, 0, stream>>>(static_cast<const uint8_t*>(source),
+         static_cast<uint8_t*>(destination), outer, middle, inner_bytes, source_outer, source_middle,
+-        destination_outer, destination_middle);
++        destination_outer, destination_middle, 0);
+     return cudaGetLastError();
+ }
+diff --git a/zig/kernels/cuda/torch_ops/pointwise.cu b/zig/kernels/cuda/torch_ops/pointwise.cu
+index 987e545..caaa810 100644
+--- a/zig/kernels/cuda/torch_ops/pointwise.cu
++++ b/zig/kernels/cuda/torch_ops/pointwise.cu
+@@ -3,18 +3,33 @@
+ #include <stdint.h>
+ #include "launch_shape.h"
+ 
+-extern "C" __global__ void tf_bf16_to_f32_kernel(const __nv_bfloat16* input, float* output, uint64_t count) {
++// TF_DS_PDL: wait for the kernel this one follows (its memory flushed), then let the next one launch (programmatic
++// dependent launches, sm_90+). Every kernel in this file takes `pdl` as its last argument (0: same instruction stream as
++// before).
++__device__ __forceinline__ void pdl_enter(int pdl) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
++    if (pdl) {
++        asm volatile("griddepcontrol.wait;" ::: "memory");
++        asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++    }
++#endif
++}
++
++extern "C" __global__ void tf_bf16_to_f32_kernel(const __nv_bfloat16* input, float* output, uint64_t count, int pdl) {
++    pdl_enter(pdl);
+     for (uint64_t i = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+          i += uint64_t(gridDim.x) * blockDim.x) output[i] = __bfloat162float(input[i]);
+ }
+ 
+-extern "C" __global__ void tf_f32_to_bf16_kernel(const float* input, __nv_bfloat16* output, uint64_t count) {
++extern "C" __global__ void tf_f32_to_bf16_kernel(const float* input, __nv_bfloat16* output, uint64_t count, int pdl) {
++    pdl_enter(pdl);
+     for (uint64_t i = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+          i += uint64_t(gridDim.x) * blockDim.x) output[i] = __float2bfloat16_rn(input[i]);
+ }
+ 
+ extern "C" __global__ void tf_tap_add_kernel(const __nv_bfloat16* residual, const __nv_bfloat16* pending,
+-                                __nv_bfloat16* output, uint64_t count) {
++                                __nv_bfloat16* output, uint64_t count, int pdl) {
++    pdl_enter(pdl);
+     for (uint64_t i = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+          i += uint64_t(gridDim.x) * blockDim.x) {
+         const float sum = __fadd_rn(__bfloat162float(residual[i]), __bfloat162float(pending[i]));
+@@ -28,7 +43,7 @@ extern "C" cudaError_t tf_bf16_to_f32(const void* input, void* output, uint64_t
+     if (count == 0) return cudaSuccess;
+     if (!input || !output || count > UINT64_MAX / sizeof(float)) return cudaErrorInvalidValue;
+     tf_bf16_to_f32_kernel<<<tf_launch_blocks(count, 256), 256, 0, stream>>>(static_cast<const __nv_bfloat16*>(input),
+-        static_cast<float*>(output), count);
++        static_cast<float*>(output), count, 0);
+     return cudaGetLastError();
+ }
+ 
+@@ -36,7 +51,7 @@ extern "C" cudaError_t tf_f32_to_bf16(const void* input, void* output, uint64_t
+     if (count == 0) return cudaSuccess;
+     if (!input || !output || count > UINT64_MAX / sizeof(float)) return cudaErrorInvalidValue;
+     tf_f32_to_bf16_kernel<<<tf_launch_blocks(count, 256), 256, 0, stream>>>(static_cast<const float*>(input),
+-        static_cast<__nv_bfloat16*>(output), count);
++        static_cast<__nv_bfloat16*>(output), count, 0);
+     return cudaGetLastError();
+ }
+ 
+@@ -45,6 +60,6 @@ extern "C" cudaError_t tf_tap_add(const void* residual, const void* pending, voi
+     if (count == 0) return cudaSuccess;
+     if (!residual || !pending || !output || count > UINT64_MAX / sizeof(float)) return cudaErrorInvalidValue;
+     tf_tap_add_kernel<<<tf_launch_blocks(count, 256), 256, 0, stream>>>(static_cast<const __nv_bfloat16*>(residual),
+-        static_cast<const __nv_bfloat16*>(pending), static_cast<__nv_bfloat16*>(output), count);
++        static_cast<const __nv_bfloat16*>(pending), static_cast<__nv_bfloat16*>(output), count, 0);
+     return cudaGetLastError();
+ }
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index a616b8c..545deee 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -4,6 +4,7 @@
+ //! head weights and the DSpark taps' mean over the streams.
+ const std = @import("std");
+ const cuda = @import("cuda");
++const ops = @import("ops.zig");
+ 
+ /// launch_shape.h's tf_launch_blocks: a block a `threads` elements, at most 65535.
+ fn blocks(count: usize, threads: usize) u32 {
+@@ -32,13 +33,16 @@ pub const Exact = struct {
+     k_rope: cuda.Function,
+     k_bf16_scale: cuda.Function,
+     k_hc_mean4: cuda.Function,
++    pdl: bool = false, // TF_DS_PDL (ops.pdl_env)
+ 
+     /// cuda.kernels.dsv41_torch (or the fatbin's bytes).
+     pub fn load(d: *const cuda.Driver, image: []const u8) !Exact {
+         var m = try cuda.Module.load(d, image);
+         errdefer m.unload();
++        const pdl = ops.onValue(if (std.c.getenv(ops.pdl_env)) |p| std.mem.span(p) else null);
+         return .{
+             .module = m,
++            .pdl = pdl,
+             .k_rms_norm = try m.function("tf_ds_rms_norm_kernel"),
+             .k_compress2 = try m.function("tf_ds_compress2_kernel"),
+             .k_rope = try m.function("tf_ds_rope_kernel"),
+@@ -71,8 +75,9 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(d)));
+         a.add(factor);
+         a.add(eps);
++        a.add(@as(c_int, @intFromBool(e.pdl)));
+         const smem: u32 = if (lanes > 32) @intCast(lanes * h * 4) else 0;
+-        try cuda.launch.launch(e.k_rms_norm, .{ .grid = .{ .x = @intCast((rows + h - 1) / h) }, .block = .{ .x = @intCast(lanes), .y = @intCast(h) }, .shared = smem }, s, &a);
++        try cuda.launch.launch(e.k_rms_norm, .{ .grid = .{ .x = @intCast((rows + h - 1) / h) }, .block = .{ .x = @intCast(lanes), .y = @intCast(h) }, .shared = smem, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// _compress at ratio 2: kv, score fp32 [g, 2, c] -> out bf16 [g, c] = bf16((kv * score.softmax(dim=1)).sum(1)).
+@@ -84,7 +89,8 @@ pub const Exact = struct {
+         a.add(out);
+         a.add(@as(c_int, @intCast(g)));
+         a.add(@as(c_int, @intCast(c)));
+-        try cuda.launch.launch(e.k_compress2, .{ .grid = .{ .x = @min(4096, blocks(g * c, 256)) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_compress2, .{ .grid = .{ .x = @min(4096, blocks(g * c, 256)) }, .block = .{ .x = 256 }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// ops.rope_(x[..., off : off + 2 * half], complex(cos, sin)[pos]) of n rows of x bf16 (row stride ldx), in place;
+@@ -101,7 +107,8 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(n)));
+         a.add(@as(c_int, @intCast(half)));
+         a.add(@as(c_int, @intFromBool(inverse)));
+-        try cuda.launch.launch(e.k_rope, .{ .grid = .{ .x = @min(4096, blocks(n * half, 256)) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_rope, .{ .grid = .{ .x = @min(4096, blocks(n * half, 256)) }, .block = .{ .x = 256 }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// wl.to(bf16) * scale of `count` fp32 values (the indexer's head weights).
+@@ -112,7 +119,8 @@ pub const Exact = struct {
+         a.add(out);
+         a.add(@as(u64, count));
+         a.add(scale);
+-        try cuda.launch.launch(e.k_bf16_scale, .{ .grid = .{ .x = blocks(count, 256) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_bf16_scale, .{ .grid = .{ .x = blocks(count, 256) }, .block = .{ .x = 256 }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// h.to(fp32).mean(1).to(bf16) of the streams h [rows, 4, d] bf16 into out [rows, d] (row stride os): a DSpark tap.
+@@ -124,7 +132,8 @@ pub const Exact = struct {
+         a.add(@as(c_longlong, @intCast(os)));
+         a.add(@as(c_int, @intCast(rows)));
+         a.add(@as(c_int, @intCast(d)));
+-        try cuda.launch.launch(e.k_hc_mean4, .{ .grid = .{ .x = @min(4096, blocks(rows * d, 256)) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_hc_mean4, .{ .grid = .{ .x = @min(4096, blocks(rows * d, 256)) }, .block = .{ .x = 256 }, .pdl = e.pdl }, s, &a);
+     }
+ };
+ 
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 21cfff9..711c504 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -40,6 +40,7 @@
+ //!                                               --graph-cap, the same number on both ranks
+ //!   TF_DS_HC_SIDE=1                             the mixes' side work on a stream of its own
+ //!   TF_DS_L2_PREFETCH=1                         the paced L2 prefetch of the next kernels' weights
++//!   TF_DS_PDL=1                            the hand-written kernels launch with programmatic dependent launches (griddepcontrol.wait + launch_dependents at every kernel's entry, the attribute on every launch of these kernels); both ranks, read at load via ops/exact; launch-timing only, bits identical (not TF_RDMA_PDL / not TF_DS_TRITON_PDL; changes no frames, no bytes, so the pair may run mixed ranks bit-identically, though setting it alike on both is the convention); no fingerprint bit, no switches bit
+ //!   TF_DS_COMPRESS_SIDE=1                       the compressor chain (ratio 1/2) on a stream of its own (set alike on both ranks), forked behind the input linears and joined before the indexer select block; a reorder of independent launches, so the bytes are the same; off: nothing changes
+ //!   TF_DS_ENGRAM_AIO=1                          a round's Engram reads by Linux AIO on O_DIRECT
+ //!   TF_DS_PREFILL_SLICE=<layers>                (rank 0; with TF_DS_PREFILL_INTERLEAVE_MS) a prompt chunk runs this many layers
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 1913858..5f5fe13 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -35,7 +35,12 @@ fn envOn(name: [:0]const u8) bool {
+ /// proposal and tf_ds_gather_cols_kernel's verify gather); read at load on every rank.
+ pub const spec_env = "TF_DS_SPEC_SAMPLE";
+ 
+-fn onValue(v: ?[]const u8) bool {
++/// The switch for programmatic dependent launches (the hand-written kernels wait for the one before and let the next
++/// one launch; launch-timing only, bits identical); read at load on every rank. Not TF_RDMA_PDL / TF_DS_TRITON_PDL.
++pub const pdl_env = "TF_DS_PDL";
++
++/// The series' switches' parse ("1" or "on"; unset, "0", "off", "" or anything else: off).
++pub fn onValue(v: ?[]const u8) bool {
+     const s = v orelse return false;
+     return std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "on");
+ }
+@@ -108,6 +113,7 @@ pub const Ops = struct {
+     spec_clean: ?cuda.Function = null, // TF_DS_SPEC_SAMPLE, looked up only when on
+     gather_cols: ?cuda.Function = null, // TF_DS_SPEC_SAMPLE, looked up only when on
+     spec: bool = false, // TF_DS_SPEC_SAMPLE
++    pdl: bool = false, // TF_DS_PDL
+     draw_rows: ?cuda.Function = null, // TF_DS_T27_DEVICE_DRAW, looked up only when on
+     lora_add: ?cuda.Function = null, // TF_DS_LORA: the adapter epilogue's add, looked up only when on
+ 
+@@ -124,6 +130,7 @@ pub const Ops = struct {
+             std.log.err("dsv41: {s}", .{spec_keyed_why});
+             return err;
+         };
++        const pdl = onValue(envSpan(pdl_env));
+         return .{
+             .pointwise = pw,
+             .movement = mv,
+@@ -153,6 +160,7 @@ pub const Ops = struct {
+             .spec_clean = if (spec) try fm.function("tf_ds_spec_clean_kernel") else null,
+             .gather_cols = if (spec) try fm.function("tf_ds_gather_cols_kernel") else null,
+             .spec = spec,
++            .pdl = pdl,
+             .draw_rows = if (envOn(draw_env)) try fm.function("tf_ds_draw_rows_kernel") else null,
+             .lora_add = if (loraOn()) try fm.function("tf_ds_add_bf16_kernel") else null,
+         };
+@@ -165,8 +173,8 @@ pub const Ops = struct {
+         o.* = undefined;
+     }
+ 
+-    fn go(f: cuda.Function, s: cuda.Stream, grid: usize, block: u32, args: *cuda.Args) !void {
+-        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(grid) }, .block = .{ .x = block } }, s, args);
++    fn go(o: *const Ops, f: cuda.Function, s: cuda.Stream, grid: usize, block: u32, args: *cuda.Args) !void {
++        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(grid) }, .block = .{ .x = block }, .pdl = o.pdl }, s, args);
+     }
+ 
+     /// `.float()` of `count` bf16 values (exact).
+@@ -176,7 +184,8 @@ pub const Ops = struct {
+         a.add(in);
+         a.add(out);
+         a.add(@as(u64, count));
+-        try go(o.to_f32, s, blocks(count, 256), 256, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.to_f32, s, blocks(count, 256), 256, &a);
+     }
+ 
+     /// `.float()` of `count` fp16 values (exact).
+@@ -186,7 +195,8 @@ pub const Ops = struct {
+         a.add(in);
+         a.add(out);
+         a.add(@as(u64, count));
+-        try go(o.f16_to_f32, s, blocks(count, 256), 256, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.f16_to_f32, s, blocks(count, 256), 256, &a);
+     }
+ 
+     /// Comm.sum of two ranks' fp32 partials then `.to(bf16)`: out = bf16(g0 + g1), one fp32 add in rank order.
+@@ -197,7 +207,8 @@ pub const Ops = struct {
+         a.add(g1);
+         a.add(out);
+         a.add(@as(u64, count));
+-        try go(o.add2_bf16, s, blocks(count, 256), 256, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.add2_bf16, s, blocks(count, 256), 256, &a);
+     }
+ 
+     /// x + y of bf16 values in place on x (torch's add: fp32 sum, rounded once; tf_ds_add_bf16_kernel). TF_DS_LORA's
+@@ -209,7 +220,8 @@ pub const Ops = struct {
+         a.add(x);
+         a.add(y);
+         a.add(@as(u64, count));
+-        try go(f, s, blocks(count, 256), 256, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, f, s, blocks(count, 256), 256, &a);
+     }
+ 
+     /// keys.topk(k, sorted=False).values of unique int64 keys [rows, n] (row stride ks) into top [rows, k], the set in no
+@@ -223,7 +235,8 @@ pub const Ops = struct {
+         a.add(@as(c_int, @intCast(n)));
+         a.add(@as(c_int, @intCast(k)));
+         a.add(top);
+-        try cuda.launch.launch(o.topk_i64, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.topk_i64, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// kernels.topk_indices(score, k) with torch.where(top < vis, top, -1): each row's k highest fp32 scores' columns
+@@ -239,7 +252,8 @@ pub const Ops = struct {
+         a.add(@as(c_int, @intCast(k)));
+         a.add(vis);
+         a.add(out);
+-        try cuda.launch.launch(o.topk_indices, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.topk_indices, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// dst row idx[i] = src row i (`t[idx] = rows`, distinct int64 indices): `rows` rows of `bytes` bytes, src rows
+@@ -254,7 +268,8 @@ pub const Ops = struct {
+         a.add(@as(c_longlong, @intCast(dst_ld)));
+         a.add(@as(c_longlong, @intCast(bytes)));
+         a.add(@as(c_int, @intCast(rows)));
+-        try go(o.scatter, s, rows, 256, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.scatter, s, rows, 256, &a);
+     }
+ 
+     /// rounds.py _candidates_fast's mask when the pool takes every block: out [rows, nb] u8 (row stride os) = the block
+@@ -269,7 +284,8 @@ pub const Ops = struct {
+         a.add(vis);
+         a.add(out);
+         a.add(@as(c_longlong, @intCast(os)));
+-        try cuda.launch.launch(o.cand_fast, .{ .grid = .{ .x = blocks(nb, 256), .y = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.cand_fast, .{ .grid = .{ .x = blocks(nb, 256), .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// Every 128-byte line of `pf`'s ranges touched into L2 (one block of 128 threads); writes nothing.
+@@ -295,7 +311,8 @@ pub const Ops = struct {
+         a.add(wts);
+         a.add(expert_prune.kargs(m, rows, topk, slots));
+         a.add(stats);
+-        try cuda.launch.launch(o.prune_fn orelse return error.ExpertPruneOff, .{ .grid = .{ .x = 1 }, .block = .{ .x = expert_prune.max_rows } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.prune_fn orelse return error.ExpertPruneOff, .{ .grid = .{ .x = 1 }, .block = .{ .x = expert_prune.max_rows }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// The indexer's selection of every scanned key (its top-k takes all nb): out [rows, nb] int64 = j where j <
+@@ -306,7 +323,8 @@ pub const Ops = struct {
+         a.add(vis);
+         a.add(out);
+         a.add(@as(c_int, @intCast(nb)));
+-        try cuda.launch.launch(o.iota_vis, .{ .grid = .{ .x = blocks(nb, 256), .y = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.iota_vis, .{ .grid = .{ .x = blocks(nb, 256), .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// The candidate pool's block maxima (model.py _candidates, rounds.py _candidate_blocks): out [rows, nb] fp32 (row
+@@ -324,7 +342,8 @@ pub const Ops = struct {
+         a.add(out);
+         a.add(@as(c_longlong, @intCast(os)));
+         a.add(@as(c_int, @intCast(nb)));
+-        try cuda.launch.launch(o.block_max, .{ .grid = .{ .x = blocks(nb, 256), .y = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.block_max, .{ .grid = .{ .x = blocks(nb, 256), .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// The pool from each row's top blocks idx [rows, k] int64 of the block maxima bmax [rows, nb] (row stride bs):
+@@ -341,7 +360,8 @@ pub const Ops = struct {
+         a.add(mask);
+         a.add(@as(c_longlong, @intCast(ms)));
+         a.add(cblk);
+-        try cuda.launch.launch(o.pool_pick, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.pool_pick, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// model.py apply_candidates, in place: -inf at every column of score [rows, width] (row stride ss) whose block of
+@@ -355,7 +375,8 @@ pub const Ops = struct {
+         a.add(@as(c_int, @intCast(bsize)));
+         a.add(mask);
+         a.add(@as(c_longlong, @intCast(ms)));
+-        try cuda.launch.launch(o.apply_pool, .{ .grid = .{ .x = blocks(width, 256), .y = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.apply_pool, .{ .grid = .{ .x = blocks(width, 256), .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// `.to(torch.bfloat16)` of `count` fp32 values (round to nearest even).
+@@ -365,7 +386,8 @@ pub const Ops = struct {
+         a.add(in);
+         a.add(out);
+         a.add(@as(u64, count));
+-        try go(o.to_bf16, s, blocks(count, 256), 256, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.to_bf16, s, blocks(count, 256), 256, &a);
+     }
+ 
+     /// `rows` rows of `bytes` bytes from src (rows `src_ld` bytes apart) to dst (rows `dst_ld` bytes apart).
+@@ -380,7 +402,8 @@ pub const Ops = struct {
+             w.add(dst);
+             w.add(@as(u64, dst_ld / 16));
+             w.add(@as(u64, bytes / 16));
+-            return cuda.launch.launch(o.copy16, .{ .grid = .{ .x = blocks(bytes / 16, 256), .y = @intCast(rows) }, .block = .{ .x = 256 } }, s, &w);
++            w.add(@as(c_int, @intFromBool(o.pdl)));
++            return cuda.launch.launch(o.copy16, .{ .grid = .{ .x = blocks(bytes / 16, 256), .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &w);
+         }
+         var a: cuda.Args = .{};
+         a.add(src);
+@@ -388,7 +411,8 @@ pub const Ops = struct {
+         // tf_strided_copy (outer, middle, inner, source_outer, source_middle, destination_outer, destination_middle):
+         // a row a block
+         for ([_]u64{ rows, 1, bytes, src_ld, bytes, dst_ld, bytes }) |v| a.add(v);
+-        try go(o.strided, s, rows, 256, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.strided, s, rows, 256, &a);
+     }
+ 
+     /// Each row's greedy token (sampling.argmax's: the first largest, a NaN never larger, 0 when the first value is
+@@ -400,7 +424,8 @@ pub const Ops = struct {
+         a.add(@as(u64, ld));
+         a.add(@as(c_int, @intCast(n)));
+         a.add(out);
+-        try go(o.argmax_rows, s, rows, 1024, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.argmax_rows, s, rows, 1024, &a);
+     }
+ 
+     /// TF_DS_DEVICE_ACCEPT: each window's chain keep (acceptPath's, for a chain: 1 + the longest prefix of drafts whose
+@@ -416,7 +441,8 @@ pub const Ops = struct {
+         a.add(tab + @as(u64, @intCast(nwin)) * 4);
+         a.add(@as(c_int, @intCast(nwin)));
+         a.add(out);
+-        try go(o.accept_chain, s, nwin, 32, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.accept_chain, s, nwin, 32, &a);
+     }
+ 
+     /// Each row's sampled token (sampling.sampleRow of the row's rule, or its argmax at temperature <= 0): out [rows] u32
+@@ -430,7 +456,8 @@ pub const Ops = struct {
+         a.add(@as(c_int, @intCast(n)));
+         a.add(table);
+         a.add(out);
+-        try go(f, s, rows, 1024, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, f, s, rows, 1024, &a);
+     }
+ 
+     /// Adds T * gumbel(seed, pos + step, col0 + v) to column v of each of `rows` streams' logits row (fp32, rows `l_row`
+@@ -445,7 +472,8 @@ pub const Ops = struct {
+         a.add(@as(u64, col0));
+         a.add(table);
+         a.add(@as(u32, @intCast(step)));
+-        try cuda.launch.launch(f, .{ .grid = .{ .x = blocks(width, 256), .y = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(f, .{ .grid = .{ .x = blocks(width, 256), .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// TF_DS_SPEC_SAMPLE (tf_ds_spec_clean_kernel): for each of `rows` streams with T > 0, clean row r (`c_row` floats
+@@ -469,7 +497,8 @@ pub const Ops = struct {
+         a.add(@as(u64, b_row));
+         a.add(clean);
+         a.add(@as(u64, c_row));
+-        try cuda.launch.launch(f, .{ .grid = .{ .x = spec_parts, .y = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(f, .{ .grid = .{ .x = spec_parts, .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// TF_DS_SPEC_SAMPLE (tf_ds_gather_cols_kernel): out[i] = the fp32 buffer `src`'s element idx[i] (int64; < 0: -inf),
+@@ -482,7 +511,8 @@ pub const Ops = struct {
+         a.add(idx);
+         a.add(@as(i64, @intCast(n)));
+         a.add(out);
+-        try go(f, s, blocks(n, 64), 64, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, f, s, blocks(n, 64), 64, &a);
+     }
+ 
+     /// The GPU clock (ns) into buf[i] when the stream reaches it (a profile).
+@@ -492,7 +522,8 @@ pub const Ops = struct {
+         a.add(tag);
+         a.add(@as(u32, @intFromBool(reset)));
+         a.add(cap);
+-        try go(o.gpu_clock, s, 1, 32, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.gpu_clock, s, 1, 32, &a);
+     }
+ 
+     /// dst row i = src row idx[i] (int64 indices, rows of `bytes` bytes); an index outside [0, src_rows) sets the
+@@ -507,7 +538,8 @@ pub const Ops = struct {
+         a.add(@as(u64, src_rows));
+         a.add(@as(u64, bytes));
+         a.add(invalid);
+-        try go(o.gather, s, rows, 256, &a);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, o.gather, s, rows, 256, &a);
+     }
+ };
+ 
+@@ -544,3 +576,9 @@ test "TF_DS_SPEC_SAMPLE parses like the series' switches and refuses TF_DS_T26_K
+     for ([_]?[]const u8{ null, "0", "", "on", "true", "01" }) |k| try std.testing.expect(try specSample("1", k));
+     try std.testing.expect(isOne("1") and !isOne("0") and !isOne("on") and !isOne(null) and !isOne(""));
+ }
++
++test "TF_DS_PDL parses like the series' switches" {
++    try std.testing.expectEqualStrings("TF_DS_PDL", pdl_env);
++    try std.testing.expect(onValue("1") and onValue("on"));
++    for ([_]?[]const u8{ null, "0", "off", "", "ON", "yes", "01", "true" }) |v| try std.testing.expect(!onValue(v));
++}
+diff --git a/zig/src/families/dsv41/vit.zig b/zig/src/families/dsv41/vit.zig
+index d564d57..74df4b5 100644
+--- a/zig/src/families/dsv41/vit.zig
++++ b/zig/src/families/dsv41/vit.zig
+@@ -265,6 +265,7 @@ pub const Tower = struct {
+             a.add(@as(c_int, @intCast(n)));
+             a.add(@as(c_int, @intCast(g.n_vit_w)));
+             a.add(theta);
++            a.add(@as(c_int, 0)); // pdl: pass 0 (TF_DS_PDL is read at load in ops.zig/exact.zig only)
+             try cuda.launch.launch(tw.k_rope, .{ .grid = .{ .x = blocksFor(n * 32, 256) }, .block = .{ .x = 256 } }, s, &a);
+         }
+         try Probe.call(probe, "cos", 0, w.cos, n * 32 * 4);
+@@ -285,6 +286,7 @@ pub const Tower = struct {
+             a.add(@as(c_int, dim));
+             a.add(@as(c_int, @intCast(g.n_llm_h)));
+             a.add(@as(c_int, @intCast(g.n_llm_w)));
++            a.add(@as(c_int, 0)); // pdl: pass 0 (the switch is read at load in ops.zig/exact.zig only)
+             try cuda.launch.launch(tw.k_unfold, .{ .grid = .{ .x = blocksFor(unfold_dim * l, 256) }, .block = .{ .x = 256 } }, s, &a);
+         }
+         try tw.lt.linearBias(w.unfold, true, tw.al_w1, tw.al_b1, w.a1, l, unfold_dim, model_dim);
+@@ -292,6 +294,7 @@ pub const Tower = struct {
+             var a: cuda.Args = .{};
+             a.add(w.a1);
+             a.add(@as(c_ulonglong, l * model_dim));
++            a.add(@as(c_int, 0)); // pdl: pass 0 (the switch is read at load in ops.zig/exact.zig only)
+             try cuda.launch.launch(tw.k_gelu, .{ .grid = .{ .x = blocksFor(l * model_dim, 256) }, .block = .{ .x = 256 } }, s, &a);
+         }
+         try tw.lt.linearBias(w.a1, false, tw.al_w2, tw.al_b2, w.rows, l, model_dim, model_dim);
+@@ -313,6 +316,7 @@ pub const Tower = struct {
+             a.add(w.k32);
+             a.add(w.v32);
+             a.add(@as(c_int, @intCast(n)));
++            a.add(@as(c_int, 0)); // pdl: pass 0 (the switch is read at load in ops.zig/exact.zig only)
+             try cuda.launch.launch(tw.k_rot, .{ .grid = .{ .x = blocksFor(n * heads * 32, 256) }, .block = .{ .x = 256 } }, s, &a);
+         }
+         try tw.fmha.run(s, w.q32, w.k32, w.v32, w.o32, n, heads);
+@@ -321,6 +325,7 @@ pub const Tower = struct {
+             a.add(w.o32);
+             a.add(w.h);
+             a.add(@as(c_ulonglong, count));
++            a.add(@as(c_int, 0)); // pdl: pass 0 (the switch is read at load in ops.zig/exact.zig only)
+             try cuda.launch.launch(tw.k_to_bf16, .{ .grid = .{ .x = blocksFor(count, 256) }, .block = .{ .x = 256 } }, s, &a);
+         }
+         try tw.lt.linearBias(w.h, false, b.wo, b.bo, w.a, n, dim, dim);
+@@ -333,6 +338,7 @@ pub const Tower = struct {
+             a.add(w.m);
+             a.add(@as(c_int, @intCast(n)));
+             a.add(@as(c_int, inter));
++            a.add(@as(c_int, 0)); // pdl: pass 0 (the switch is read at load in ops.zig/exact.zig only)
+             try cuda.launch.launch(tw.k_silu_mul, .{ .grid = .{ .x = blocksFor(n * inter, 256) }, .block = .{ .x = 256 } }, s, &a);
+         }
+         try tw.blas.linearBf16(w.m, b.w2, w.a, n, inter, dim);
+@@ -351,6 +357,7 @@ pub const Tower = struct {
+         a.add(x);
+         a.add(y);
+         a.add(@as(c_ulonglong, count));
++        a.add(@as(c_int, 0)); // pdl: pass 0 (the switch is read at load in ops.zig/exact.zig only)
+         try cuda.launch.launch(tw.k_add, .{ .grid = .{ .x = blocksFor(count, 256) }, .block = .{ .x = 256 } }, tw.stream, &a);
+     }
+ 
+@@ -382,6 +389,7 @@ pub const Tower = struct {
+         a.add(@as(c_int, @intCast(t)));
+         a.add(@as(c_int, model_dim));
+         a.add(rows_at);
++        a.add(@as(c_int, 0)); // pdl: pass 0 (the switch is read at load in ops.zig/exact.zig only)
+         try cuda.launch.launch(tw.k_span, .{ .grid = .{ .x = blocksFor(t * model_dim, 256) }, .block = .{ .x = 256 } }, tw.stream, &a);
+     }
+ };
+diff --git a/zig/src/families/nemotron/cuda_torch_ops.zig b/zig/src/families/nemotron/cuda_torch_ops.zig
+index faaf561..7896e45 100644
+--- a/zig/src/families/nemotron/cuda_torch_ops.zig
++++ b/zig/src/families/nemotron/cuda_torch_ops.zig
+@@ -68,12 +68,14 @@ pub const Torch = struct {
+         try t.go(t.f.argmax, .{ rows, 1 }, 1024, &a);
+     }
+ 
+-    /// `.float()` of `count` bf16 values (exact).
++    /// `.float()` of `count` bf16 values (exact). The kernel takes programmatic-dependent-launch's `pdl` last;
++    /// Nemotron does not launch with the PDL attribute and passes 0 (same instruction stream as before).
+     pub fn toF32(t: Torch, in: u64, out: u64, count: usize) !void {
+         var a: cuda.Args = .{};
+         a.add(in);
+         a.add(out);
+         a.add(@as(u64, count));
++        a.add(@as(c_int, 0));
+         try t.go(t.f.to_f32, .{ blocks(count, 256), 1 }, 256, &a);
+     }
+ 
+@@ -132,6 +134,7 @@ pub const Torch = struct {
+         a.add(src);
+         a.add(dst);
+         for ([_]u64{ count, 1, bytes, src_ld, bytes, dst_ld, bytes }) |v| a.add(v);
++        a.add(@as(c_int, 0)); // tf_strided_copy_kernel's trailing pdl: no PDL on this path
+         try t.go(t.f.strided, .{ count, 1 }, 256, &a);
+     }
+ 
+-- 
+2.56.0
+

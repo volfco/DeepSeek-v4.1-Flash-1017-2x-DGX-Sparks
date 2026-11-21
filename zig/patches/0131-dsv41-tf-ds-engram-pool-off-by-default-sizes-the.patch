@@ -1,0 +1,51 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 08ee52fef852..45a83ff69e02)
+# dsv41: TF_DS_ENGRAM_POOL (off by default) sizes the Engram read pool, 64 unless 1..256
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index e86530d8dacc63aa9a657f72a4d3347c373e545d..2a33d2ef60fb07c186941deed106a263beaf7d7b 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -510,7 +510,7 @@ pub const Model = struct {
+             });
+             // TF_DS_ENGRAM_SCALES=map-warm: madvise the scale mappings on a detached thread (Linux only); open does not wait
+             if (prompt.scalesWarm(scales_env)) engram_io.Tables.warmScales(&m.tables.?);
+-            m.epool = try engram_io.Pool.init(gpa, io, 64);
++            m.epool = try engram_io.Pool.init(gpa, io, prompt.poolThreads(if (std.c.getenv("TF_DS_ENGRAM_POOL")) |v| std.mem.span(v) else null));
+             const fast = prompt.fastEnabled(if (std.c.getenv("TF_DS_ENGRAM_FAST")) |v| std.mem.span(v) else null);
+             var hasher = engram.Hasher.init(c.*, map, mult);
+             hasher.fast = fast; // TF_DS_ENGRAM_FAST: the reciprocal modulo, same ids
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index d108fbb57b215b48177344ce3a358c186ada8b0b..9ab52c975277a0e0d905b385e483f4c6067403dc 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1867,6 +1867,14 @@ pub fn decodeThreads(v: ?[]const u8) usize {
+     return n;
+ }
+ 
++/// TF_DS_ENGRAM_POOL=<n>: the Engram read pool's size (the pread path when the AIO ring is off); unset, unparsable or
++/// outside 1 .. 256 reads 64, as before. The bytes are the same either way.
++pub fn poolThreads(v: ?[]const u8) usize {
++    const n = std.fmt.parseInt(u32, v orelse return 64, 10) catch return 64;
++    if (n < 1 or n > 256) return 64;
++    return n;
++}
++
+ /// TF_DS_ENGRAM_FAST's hash cache: forget the chunk `hashes` holds (a round's engramAhead wrote it, or a new pass started).
+ pub fn forgetHashes(eh: *EngramHost) void {
+     eh.hash_start = std.math.maxInt(usize);
+@@ -2166,6 +2174,15 @@ test "TF_DS_ENGRAM_FAST: only 1 turns the host-side economies on" {
+     for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!fastEnabled(v));
+ }
+ 
++test "TF_DS_ENGRAM_POOL: unset or outside 1..256 reads 64, inside is the number" {
++    try std.testing.expectEqual(@as(usize, 64), poolThreads(null));
++    for ([_]?[]const u8{ "", "x", "-1", "0", "257", "4294967296", " 64", "64 ", "1.5" }) |v| try std.testing.expectEqual(@as(usize, 64), poolThreads(v));
++    for ([_]usize{ 1, 2, 64, 256 }) |n| {
++        var buf: [3]u8 = undefined;
++        try std.testing.expectEqual(n, poolThreads(std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable));
++    }
++}
++
+ test "TF_DS_ENGRAM_DECODE_THREADS: unset or outside 1..16 reads 8, inside is the number" {
+     try std.testing.expectEqual(@as(usize, 8), decodeThreads(null));
+     for ([_]?[]const u8{ "", "x", "-1", "0", "17", "4294967296", " 8", "8 ", "1.5" }) |v| try std.testing.expectEqual(@as(usize, 8), decodeThreads(v));

@@ -1,0 +1,166 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits 44b2cbb76857..487cb721af4c)
+# dsv41: TF_DS_ABSORB_AFTER_PICK (off by default) launches the round's pick before the drafter taps' absorb - the absorb runs under the host's accept and the pass frame's send
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 6856e18bede6f0a7003d8ac81a9c1569ab3f7b72..46755a78e39847e48e6b4a0a18e794d002afba1b 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1411,7 +1411,10 @@ fn chunkRows(start: usize, len: usize) usize {
+         const t1 = m.now();
+         if (self.spill) |t| for (wins[0..windows.len]) |w| t.bump(w.base + w.start, w.base + w.start + w.ids.len);
+         const rows = try self.built.build(gpa, &self.seqs, wins[0..windows.len]);
+-        try m.verify(rows, self.built.absorb[0..windows.len]);
++        // 0160 (TF_DS_ABSORB_AFTER_PICK): forward, then the pick, then the taps' absorb left running under the host's
++        // accept and the pass frame's send; off: the served order (forward, absorb, pick)
++        try m.verify(rows);
++        if (!m.absorb_after_pick) try m.absorbRows(rows, self.built.absorb[0..windows.len]);
+         const t2 = m.now();
+         // every row greedy: the device's argmax (R tokens back); every sampled row one the kernel reproduces and
+         // TF_DS_T27_DEVICE_DRAW on: the device's draw (R tokens back); else the logits for the host's draws
+@@ -1465,6 +1468,7 @@ fn chunkRows(start: usize, len: usize) usize {
+             for (0..accept_n) |k| out[k].device_keep = m.amax_host[n_rows + k];
+         }
+         const logits: []const f32 = if (path == .host_draw) try m.roundLogits(n_rows) else &.{};
++        if (m.absorb_after_pick) try m.absorbRows(rows, self.built.absorb[0..windows.len]); // (0160: after the pick's read; runs under the host's accept and the frame send)
+         if (m.ringFailed()) return error.RingFailed; // (robustness: a graph's collect gave up on a dead peer's flags)
+         const t3 = m.now();
+         defer if (self.prof) |*p| {
+@@ -1472,7 +1476,7 @@ fn chunkRows(start: usize, len: usize) usize {
+             p.enqueue += m.t_enqueue;
+             p.forward += m.t_forward;
+             p.absorb += m.t_absorb;
+-            p.logits += t3 - t2;
++            p.logits += (t3 - t2) -| (if (m.absorb_after_pick) m.t_absorb else 0); // (0160: the late absorb sits in this span and is counted in absorb_ms)
+             p.sample += m.now() - t3;
+             p.rounds += 1;
+             p.rows += rows.ids.len;
+@@ -2574,7 +2578,14 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+                 }
+                 const rows = try built.build(gpa, &seqs, wins[0..nw]);
+                 if (spill) |sd| for (wins[0..nw]) |w| sd.bump(w.base + w.start, w.base + w.start + w.ids.len);
+-                m.verify(rows, built.absorb[0..nw]) catch |err| try roundRefused(err);
++                // 0160 (TF_DS_ABSORB_AFTER_PICK): the absorb after the forward, left running to sit under the frame
++                // wait and the pass frame's send; off: done here, as the round's old order had it. A refused verify
++                // skips the absorb as the one call did before: a failed forward's taps never reach the drafter rings
++                m.verify(rows) catch |err| {
++                    try roundRefused(err);
++                    continue;
++                };
++                m.absorbRows(rows, built.absorb[0..nw]) catch |err| try roundRefused(err);
+                 if (m.prof) {
+                     follow_prof.rounds += 1;
+                     follow_prof.enqueue += m.t_enqueue;
+@@ -3531,7 +3542,7 @@ test "spill + shard: an owner-sharded reserve lands only on the follower planner
+     const hold: kv_lanes.WireOp = .{ .hold = .{ .id = 77, .part = 1, .base = 40 * c, .size = 8 * c, .gen = gen } };
+     try kf.shardOps(h, .{ .owner_epoch = 2, .index = 0, .last = true, .ops = &.{hold} });
+     // a spill side not yet agreed (no store): what passes the hold check reaches it and is refused there
+-    const shapes = [_]spill_tier_state.LayerShape{ .{ .ratio = 1, .kv = true, .idx = true } };
++    const shapes = [_]spill_tier_state.LayerShape{.{ .ratio = 1, .kv = true, .idx = true }};
+     const raw = try spill_tier_state.StateLayout.init(&shapes, .{ .block_tokens = c, .window = 8, .ring_extra = 4, .raw_rows = 4, .head_dim = 64, .index_head_dim = 64 }, .owner_sharded);
+     const layout = try raw.withParts(32 * c);
+     const sf = try MiniSpill.create(gpa, std.testing.io, 1, miniFx(1), null, .{ .dev = .{}, .layout = layout, .gens = try spill_tier_state.Generations.init(gpa, cfg.cap, c), .settings = .{ .dir = "/nonexistent", .gib = 1 }, .max_tokens = @intCast(32 * c), .staging = &.{}, .events = &.{} });
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index f53c9b8457436e91cd755b5daa41e026c8795ad5..62e8bed7f5b82addfb8435324be275d2327b99d5 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -210,6 +210,9 @@ pub const Model = struct {
+     exact_resume: bool = false,
+     tails: []prompt.Tail = &.{},
+     tail_buf: ?cuda.DeviceBuffer = null,
++    // TF_DS_ABSORB_AFTER_PICK (0160): the round's drafter-taps absorb launches after the pick's host read and is
++    // left running under the host's accept and the pass frame's send; off: the served order (absorb before the pick)
++    absorb_after_pick: bool = false,
+     // profiling (lanes' --profile): the last round's forward and absorb, synchronized apart (ns)
+     prof: bool = false,
+     timer: ?*round.PhaseTimer = null, // a profile's GPU time by phase (eager rounds)
+@@ -240,6 +243,7 @@ pub const Model = struct {
+         m.* = undefined;
+         m.gpa = gpa;
+         m.exact_resume = api.prompt_cache.exactResume(envOf("TF_DS_EXACT_RESUME")); // every rank alike
++        m.absorb_after_pick = envOnOff(envOf("TF_DS_ABSORB_AFTER_PICK")); // rank-local: an uneven pair stays bit-identical
+         m.tails = &.{};
+         m.tail_buf = null;
+         errdefer if (m.tail_buf) |*b| b.free();
+@@ -1582,11 +1586,11 @@ pub const Model = struct {
+         return m.ch.head_g;
+     }
+ 
+-    /// One round over every stream's window (rows.windows, each with its stream's slot and extent), then each window
+-    /// whose stream drafts has its rows' taps absorbed into its slot's drafter rings at its positions (the served
+-    /// eager absorb: rows past the ones the round keeps sit where the drafter never reads, and the next window
+-    /// overwrites them). absorb[i]: window i's stream drafts.
+-    pub fn verify(m: *Model, rows: round.Rows, absorb: []const bool) !void {
++    /// One round over every stream's window (rows.windows, each with its stream's slot and extent): the forward,
++    /// and, in absorbRows, each window whose stream drafts has its rows' taps absorbed into its slot's drafter rings.
++    /// Split in two by 0160 so a round with TF_DS_ABSORB_AFTER_PICK runs the pick between them; without the switch
++    /// the callers keep the served order (forward, absorb, pick) and the same synchronizations.
++    pub fn verify(m: *Model, rows: round.Rows) !void {
+         if (!m.aheadParked()) m.joinAhead(); // a prompt chunk's Engram read-ahead shares the host buffers a round's Engram reads use
+         const e = &m.eng;
+         if (m.prof) try m.stream.synchronize(); // (the GPU idle, so the issue time shows whether the host keeps it fed)
+@@ -1610,6 +1614,17 @@ pub const Model = struct {
+                 m.clk_rounds += 1;
+             }
+         }
++    }
++
++    /// The served eager absorb (0160, split out of verify): window i's rows' taps into its slot's drafter rings at
++    /// their positions (absorb[i]: the window's stream drafts; rows past the ones the round keeps sit where the
++    /// drafter never reads, and the next window overwrites them). With TF_DS_ABSORB_AFTER_PICK the kernels are left
++    /// running under the host's accept and the pass frame's send; the drafter pass, stream-ordered after them on the
++    /// same stream, sees them (bit-identical: the pick reads rd.logits and writes amax, the absorb reads rd.taps and
++    /// writes the drafter rings - independent kernels of one forward). Without the switch this returns with the
++    /// absorb done, as the round's old order had it.
++    pub fn absorbRows(m: *Model, rows: round.Rows, absorb: []const bool) !void {
++        const e = &m.eng;
+         const t1 = m.now();
+         if (m.dr) |*dr| {
+             const wins = rows.windows orelse return error.BadRound;
+@@ -1622,8 +1637,12 @@ pub const Model = struct {
+             }
+             if (n > 0) try dr.absorbMany(e, &m.ch, &m.dpool.?, items[0..n]);
+         }
+-        try m.stream.synchronize();
+-        if (m.prof) m.t_absorb = m.now() - t1;
++        // the profile's absorb_ms wants the kernels finished (the late path then overlaps nothing); without the
++        // profile and with the switch on, the kernels run under the host's accept and the pass frame's send
++        if (!m.absorb_after_pick or m.prof) {
++            try m.stream.synchronize();
++            if (m.prof) m.t_absorb = m.now() - t1;
++        }
+     }
+ 
+     /// The rounds' GPU clocks (a profile): the forward's start and each stretch's ends, for its gaps.
+@@ -1733,6 +1752,18 @@ pub const Model = struct {
+     }
+ };
+ 
++/// The series' boolean switches' value ("1" or "on"; anything else: off), as envOf hands it over (0160).
++fn envOnOff(v: ?[]const u8) bool {
++    const s = v orelse return false;
++    return std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "on");
++}
++
++test "a boolean switch parses 1 and on, and nothing else" {
++    try std.testing.expect(envOnOff("1"));
++    try std.testing.expect(envOnOff("on"));
++    for ([_]?[]const u8{ null, "", "0", "off", "ON", "yes", "2" }) |bad| try std.testing.expect(!envOnOff(bad));
++}
++
+ test "the slice knob parses to 0 or 1 to 40 layers" {
+     try std.testing.expectEqual(@as(usize, 0), try parseSliceLayers("0"));
+     try std.testing.expectEqual(@as(usize, 5), try parseSliceLayers("5"));
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 4efcfafffae5916f04b0c41e679394b7e1155ce9..56cdb942362e9e6769fd058ee9dde2db61be7f46 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -23,6 +23,9 @@
+ //!                                               sampler's keyed rule, top_k 1..56) and returns the tokens as the greedy argmax
+ //!                                               does, no logits copy; any other rule keeps the host's draw (unset: off;
+ //!                                               set alike on every rank: ops.zig reads it at load)
++//!   TF_DS_ABSORB_AFTER_PICK=1 (or 'on')         the round's pick launches before the drafter taps' absorb, which then
++//!                                               runs under the host's accept and the pass frame's send (0160; bit-identical:
++//!                                               the two read different buffers of one forward; unset: the served order)
+ //!   TF_DS_ROUND_ROWS, TF_DS_STREAMS             a round's rows at most (16; the four-node lane's 48) and the pool's
+ //!                                               streams (4; its 16): --parallel at most the streams
+ //!   TF_DS_PROMPT_WINDOW_ROWS=<rows>             a prompt chunk under these rows (64 .. 128; 64 unset) takes the MoE decode window

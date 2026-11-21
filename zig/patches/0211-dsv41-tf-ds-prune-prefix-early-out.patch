@@ -1,0 +1,127 @@
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index 5390b05..d603e38 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -694,6 +694,20 @@ __device__ __forceinline__ unsigned tf_ds_drop_six(const float (&shares)[6], con
+     }
+     // The first three live slots are guaranteed. Only the three trailing ranks need decisions.
+     float prefix = __fadd_rn(__fadd_rn(s[0].share, s[1].share), s[2].share);
++    // Every share finite and nonnegative: rounding cannot make the running prefix decrease, so the rank that reaches
++    // the threshold drops together with every rank after it and the remaining sums/compares cannot change the mask
++    // (nor the statistics, which read the same bits).
++    bool monotone = true;
++    #pragma unroll
++    for (int i = 0; i < 6; ++i) monotone &= isfinite(s[i].share) && s[i].share >= 0.f;
++    if (monotone) {
++        if (!(prefix < 0.85f)) return s[3].bit | s[4].bit | s[5].bit;
++        prefix = __fadd_rn(prefix, s[3].share);
++        if (!(prefix < 0.85f)) return s[4].bit | s[5].bit;
++        prefix = __fadd_rn(prefix, s[4].share);
++        return prefix < 0.85f ? 0u : s[5].bit;
++    }
++    // A negative, NaN or infinite share can lower the prefix again after it reached the threshold: keep the full rule.
+     unsigned drop = prefix < 0.85f ? 0u : s[3].bit;
+     prefix = __fadd_rn(prefix, s[3].share);
+     if (!(prefix < 0.85f)) drop |= s[4].bit;
+diff --git a/zig/src/families/dsv41/expert_prune.zig b/zig/src/families/dsv41/expert_prune.zig
+index f021928..1c31128 100644
+--- a/zig/src/families/dsv41/expert_prune.zig
++++ b/zig/src/families/dsv41/expert_prune.zig
+@@ -183,6 +183,47 @@ pub fn write(w: *std.Io.Writer, rank: u32, s: Stats) !void {
+ /// What pruneRow did to a row.
+ pub const Outcome = struct { dropped: u32 = 0, mass: f32 = 0 };
+ 
++/// tf_ds_drop_six's trailing-ranks rule after its ordering network, on the host: `shares`/`bits` in slot order (an
++/// unrouted slot is -inf with bit 0), sorted by share descending, ties to the higher bit. The first three live slots are
++/// kept; each later rank drops once the inclusive rounded prefix reaches topp, where "reaches" is `!(prefix < topp)`
++/// (NaN counts as reached, as in the kernel). `monotone` is the item-13 early-out: with every share finite and
++/// nonnegative the premise holds, so the two forms must agree.
++pub const SlotShare = struct { share: f32, bit: u32 };
++
++pub fn dropTrailing(shares: [6]f32, bits: [6]u32, topp: f32, monotone: bool) u32 {
++    var s: [6]SlotShare = undefined;
++    for (shares, bits, 0..) |f, b, i| s[i] = .{ .share = f, .bit = b };
++    std.mem.sort(SlotShare, &s, {}, struct {
++        fn lt(_: void, a: SlotShare, b: SlotShare) bool {
++            if (a.share == b.share) return a.bit > b.bit;
++            return a.share > b.share;
++        }
++    }.lt);
++    var prefix = (s[0].share + s[1].share) + s[2].share;
++    if (monotone) {
++        if (!(prefix < topp)) return s[3].bit | s[4].bit | s[5].bit;
++        prefix += s[3].share;
++        if (!(prefix < topp)) return s[4].bit | s[5].bit;
++        prefix += s[4].share;
++        return if (prefix < topp) 0 else s[5].bit;
++    }
++    var drop: u32 = if (prefix < topp) 0 else s[3].bit;
++    prefix += s[3].share;
++    if (!(prefix < topp)) drop |= s[4].bit;
++    prefix += s[4].share;
++    if (!(prefix < topp)) drop |= s[5].bit;
++    return drop;
++}
++
++/// The kernel's guard for the early-out: every share finite and nonnegative (an unrouted slot is -inf, so a row with
++/// one never takes it).
++pub fn monotoneShares(shares: []const f32) bool {
++    for (shares) |f| {
++        if (!(std.math.isFinite(f) and f >= 0)) return false;
++    }
++    return true;
++}
++
+ /// One row's first `p.len` slots (the routed ones: the shared expert's slot is the caller's to leave out), the
+ /// kernel's arithmetic op for op. A slot with pick < 0 is not routed: it is left as it is and takes no part. f = w / total (fp32 sum
+ /// in slot order); rank by f descending, ties to the lower slot; keep = rank < max(min_k, 1) or the exclusive prefix
+@@ -470,6 +511,49 @@ fn sum(w: []const f32) f32 {
+     return s;
+ }
+ 
++test "dropTrailing: the finite-nonnegative early-out takes the same mask as the full rule" {
++    const bits = [_]u32{ 32, 16, 8, 4, 2, 1 };
++    const inf = std.math.inf(f32);
++    const cases = [_][6]f32{
++        .{ 0.85, 0, 0, 0, 0, 0 }, // exactly at the threshold after the guaranteed three
++        .{ 0.5, 0.2, 0.15, 0.1, 0.05, 0 }, // crosses at rank 3
++        .{ 0.3, 0.3, 0.25, 0.1, 0.05, 0 }, // crosses at rank 4
++        .{ 1.0, 0, 0, 0, 0, 0 },
++        .{ 0, 0, 0, 0, 0, 0 },
++        .{ 0.2, 0.2, 0.2, 0.2, 0.2, 0 }, // 0.6 then 0.8 then 1.0: the last two drop
++        .{ 0.34, 0.33, 0.18, 0.05, 0.04, 0.06 },
++        .{ 0.6, 0.1, 0.1, 0.1, 0.05, 0.05 },
++        .{ 0.8499999, 0, 0, 0.2, 0, 0 },
++        .{ 0.85, 0, 0, 0.2, 0, 0 },
++    };
++    for (cases) |shares| {
++        try std.testing.expect(monotoneShares(&shares));
++        try std.testing.expectEqual(dropTrailing(shares, bits, 0.85, false), dropTrailing(shares, bits, 0.85, true));
++        // the slot order must not matter: reverse the shares with their bits
++        var rev = shares;
++        var rbits = bits;
++        std.mem.reverse(f32, &rev);
++        std.mem.reverse(u32, &rbits);
++        try std.testing.expectEqual(dropTrailing(shares, bits, 0.85, false), dropTrailing(rev, rbits, 0.85, false));
++        try std.testing.expectEqual(dropTrailing(shares, bits, 0.85, true), dropTrailing(rev, rbits, 0.85, true));
++    }
++    // a later negative share lowers the prefix again, so the early-out must not run and the full rule keeps its answer
++    const negative = [6]f32{ 0.85, 0, 0, -0.5, -0.1, -0.1 };
++    try std.testing.expect(!monotoneShares(&negative));
++    const full = dropTrailing(negative, bits, 0.85, false);
++    // the sorted ranks are .85, 0, 0, -.1, -.1, -.5: only the fourth's bit drops (the prefix fell back under the
++    // threshold at the next rank)
++    try std.testing.expectEqual(@as(u32, 2), full);
++    try std.testing.expectEqual(@as(u32, 7), dropTrailing(negative, bits, 0.85, true)); // the shape the guard prevents
++    // NaN and infinite shares also keep the full rule
++    try std.testing.expect(!monotoneShares(&.{ 0.5, 0.3, 0.2, std.math.nan(f32), 0, 0 }));
++    try std.testing.expect(!monotoneShares(&.{ 0.5, 0.3, 0.2, inf, 0, 0 }));
++    // a non-finite share sorts wherever its comparisons put it and the mask follows that order: the point is only
++    // that the early-out is never taken there (the full rule's answer stands, whatever the sort produced)
++    _ = dropTrailing(.{ 0.5, 0.3, 0.2, inf, 0, 0 }, bits, 0.85, false);
++    _ = dropTrailing(.{ 0.5, 0.3, 0.2, std.math.nan(f32), 0, 0 }, bits, 0.85, false);
++}
++
+ test "top-p keeps the heaviest slots until the share is passed" {
+     var p = [_]i32{ 10, 11, 12, 13, 14, 15 };
+     var w = [_]f32{ 0.40 * 1.5, 0.25 * 1.5, 0.15 * 1.5, 0.10 * 1.5, 0.06 * 1.5, 0.04 * 1.5 };

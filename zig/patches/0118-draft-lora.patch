@@ -1,0 +1,746 @@
+From ec5a1e1dfdae7d5ffeb95e46508719fa13a9b5c8 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 11:00:31 -0800
+Subject: [PATCH] drafter: TF_DS_LORA applies a PEFT adapter to the DSpark
+ blocks' attention projections as an additive epilogue (y += (alpha/r) * B *
+ (A * x)) on the rank's own slice, off by default
+
+The drafter fine-tune could not be served without re-quantizing and splicing the 196 GiB pack. This
+adds a runtime adapter: TF_DS_LORA=<dir> loads one PEFT folder (adapter_config.json and
+adapter_model.safetensors) at load and validates it against the plan - the rank, the alpha, the
+target modules and each tensor's dtype and unsharded shape - so a bad folder, or a missing directory
+with the switch on, fails the model open rather than the first request. TP2: a rank uploads only its
+own slice by the same plan its weights came from (plan.Split, the DSpark blocks' TP2 split inside the
+pair): wq_b's B rows are the rank's heads' output columns, wo_b's A columns are the rank's groups'
+input rows, and the replicated wq_a and wkv take the whole adapter. The epilogue is two cuBLAS GEMMs
+into a scratch plus the family's add_bf16 kernel, and rope_heads for wq_b (whose output the glinear
+already roped), issued on the engine's stream inside Drafter.body, so PassGraphs' capture records it
+and a replay keeps it; no EXL3 trellis kernel changes. wo_a's grouped slices and the experts are not
+targeted.
+
+With the switch unset, or a zero adapter (rank 0, an empty target list, alpha 0), nothing is
+allocated and no launch is issued: the pass is bit-identical to base, and a module the adapter does
+not target is a no-op. Multiple adapters, hot reload, per-class acceptance tuning and quantized
+adapter storage are deferred.
+
+Tests: zig build test passes, including the new host tests in lora.zig: the switch's off states, the
+config's rank/alpha/target rules (PEFT's rslora and DoRA refused), the shard's tiling (rank 0 and
+rank 1's wq_b B rows and wo_b A columns disjoint and complete, the replicated projections whole), a
+fixture folder's tensors and every mismatch (missing directory, missing model, wrong shape, unknown
+target module, a non-bf16 dtype), and the epilogue's arithmetic on a host stub (y += (alpha/r) * B *
+(A * x), the rope only on wq_b, nothing for an untargeted module or a zero scale).
+---
+ zig/src/families/dsv41/cublas.zig |  11 +
+ zig/src/families/dsv41/draft.zig  |  16 +
+ zig/src/families/dsv41/dsv41.zig  |   1 +
+ zig/src/families/dsv41/lora.zig   | 549 ++++++++++++++++++++++++++++++
+ zig/src/families/dsv41/ops.zig    |  22 ++
+ 5 files changed, 599 insertions(+)
+ create mode 100644 zig/src/families/dsv41/lora.zig
+
+diff --git a/zig/src/families/dsv41/cublas.zig b/zig/src/families/dsv41/cublas.zig
+index 0411372..bd79702 100644
+--- a/zig/src/families/dsv41/cublas.zig
++++ b/zig/src/families/dsv41/cublas.zig
+@@ -73,6 +73,17 @@ pub const Blas = struct {
+         try b.check(b.api.cublasGemmEx(b.handle, .t, .n, @intCast(n), @intCast(rows), @intCast(k), &one, w, bf16_type, @intCast(k), x, bf16_type, @intCast(k), &zero, out, bf16_type, @intCast(n), 68, 99));
+     }
+ 
++    /// TF_DS_LORA's two GEMMs: out [rows, n] (bf16, or fp32 when `fp32_out`) = alpha * x [rows, k] @ w [n, k]^T +
++    /// beta * out, bf16 operands, the same shape and picks as linearBf16 (the second GEMM's beta accumulates the
++    /// projection's own output, so a projection whose buffer is fp32 needs no add).
++    pub fn gemmBf16(b: *const Blas, x: u64, w: u64, out: u64, rows: usize, k: usize, n: usize, alpha: f32, beta: f32, fp32_out: bool) Error!void {
++        const bf16_type: c_int = 14; // CUDA_R_16BF
++        const c_type: c_int = if (fp32_out) 0 else 14; // CUDA_R_32F / CUDA_R_16BF
++        const al = alpha;
++        const be = beta;
++        try b.check(b.api.cublasGemmEx(b.handle, .t, .n, @intCast(n), @intCast(rows), @intCast(k), &al, w, bf16_type, @intCast(k), x, bf16_type, @intCast(k), &be, out, c_type, @intCast(n), 68, 99));
++    }
++
+     /// torch.matmul of x [rows, k] fp32 (row-major) and w [n, k] fp32 transposed: out [rows, n] fp32, as torch issues
+     /// it (column-major C^T = W x^T: transa T, transb N, m = n, n = rows, lda = ldb = k, ldc = n, alpha 1, beta 0).
+     pub fn xwT(b: *const Blas, x: u64, w: u64, out: u64, rows: usize, k: usize, n: usize) Error!void {
+diff --git a/zig/src/families/dsv41/draft.zig b/zig/src/families/dsv41/draft.zig
+index 4c12972..32d427d 100644
+--- a/zig/src/families/dsv41/draft.zig
++++ b/zig/src/families/dsv41/draft.zig
+@@ -24,6 +24,7 @@ const exl3_linear = @import("exl3_linear.zig");
+ const exl3_experts = @import("exl3_experts.zig");
+ const markov_tokens = @import("markov_tokens.zig");
+ const draft2d = @import("draft2d.zig");
++const lora = @import("lora.zig");
+ 
+ const ops_mod = @import("ops.zig");
+ 
+@@ -250,6 +251,8 @@ pub const Drafter = struct {
+     arows: u64,
+     // the pass's graphs (BatchDraftGraph: one a streams and steps; null: eager)
+     graphs: ?*PassGraphs = null,
++    // TF_DS_LORA: the DSpark blocks' adapter (null: off, or a zero adapter: no buffer, no launch)
++    lora: ?lora.Adapter = null,
+     // the last pass on the host: each stream's drafts and confidences (`steps` of them)
+     streams: usize = 0,
+     steps: usize = 0,
+@@ -378,6 +381,8 @@ pub const Drafter = struct {
+         dr.ao = try a.take(ring * hd * 2);
+         dr.apos = try a.take(ring * 8);
+         dr.arows = try a.take(ring * 8);
++        // TF_DS_LORA: the folder's adapter for this rank, or null (a bad folder fails the load here)
++        dr.lora = try lora.load(e, a, sp, if (std.c.getenv(lora.env)) |v| std.mem.span(v) else null, max_rows);
+         return dr;
+     }
+ 
+@@ -605,11 +610,20 @@ pub const Drafter = struct {
+         const pos = dr.row(1);
+         // attn_in(comp=False): wq_a and wkv, one group
+         try prompt.grouped(e, ch, R, &.{ lay.wq_a, lay.wkv }, &.{ dr.x, dr.x }, &.{ c.hidden, c.hidden }, &.{ dr.qa, dr.ykv }, &.{ lay.wq_a.n, hd }, &.{ .bf16, .bf16 });
++        // TF_DS_LORA: the adapter's term on wq_a's and wkv's outputs (a no-op when the adapter does not target them)
++        var lc: lora.Ctx = .{ .e = e, .rope = rope, .pos = pos, .rd = rd };
++        const lsk = lora.sink(&lc);
++        if (dr.lora) |*ad| {
++            try lora.apply(ad, lsk, j, .wq_a, dr.x, dr.qa, R);
++            try lora.apply(ad, lsk, j, .wkv, dr.x, dr.ykv, R);
++        }
+         // q_proj with rope (rot_q): q's RMSNorm writes wq_b's rotated rows; wq_b's epilogue applies q's RoPE
+         const rot = [_]tri_norm.Rot{.{ .suh = lay.wq_b.suh, .h = dr.xhq }};
+         try tri_norm.rmsnormRot(t, dr.qa, lay.wq_a.n, lay.q_norm, c.eps, &rot, dr.qr, lay.wq_a.n, R, lay.wq_a.n);
+         var qc = [_]exl3_linear.Call{.{ .layer = lay.wq_b, .x = 0, .ldx = 0, .x_dtype = .bf16, .xh = dr.xhq, .y = dr.q, .ldy = @intCast(lay.wq_b.n), .y_dtype = .bf16, .counters = 0, .rope = .{ .cos = rope.cos, .sin = rope.sin, .pos = pos, .hd = @intCast(hd), .rd = @intCast(rd) } }};
+         try prompt.groupedRotated(e, ch, R, &qc);
++        // TF_DS_LORA: wq_b's input is its normed rows (dr.qr, before the rotation), its output the roped q rows
++        if (dr.lora) |*ad| try lora.apply(ad, lsk, j, .wq_b, dr.qr, dr.q, R);
+         // the block rows' keys: normed and roped, stored nowhere (ring row -1)
+         const plane_rows = pool.slots * pool.ring;
+         try tri_norm.kvNormRope(t, dr.ykv, lay.kv_norm, rope.cos, rope.sin, pos, pool.rings[j], plane_rows, dr.row(5), c.eps, true, rd, dr.kvb, R, hd);
+@@ -652,6 +666,8 @@ pub const Drafter = struct {
+         try exl3_linear.glinear(e.lin, e.s, calls[0..lay.groups], R, ch.gz, true, true);
+         var cb = [_]exl3_linear.Call{.{ .layer = lay.wo_b, .x = 0, .ldx = 0, .x_dtype = .bf16, .xh = dr.xb, .y = dr.pa, .ldy = @intCast(lay.wo_b.n), .y_dtype = .f32, .counters = 0 }};
+         try prompt.groupedRotated(e, ch, R, &cb);
++        // TF_DS_LORA: wo_b's input is wo_a's output (this rank's groups), its output the attention partial (fp32)
++        if (dr.lora) |*ad| try lora.apply(ad, lsk, j, .wo_b, dr.u, dr.pa, R);
+     }
+ 
+     /// Model.moe(lay, x, topk) of a pass's rows: the gate's chunk sums (rowmm_gate; past decode_rows rows the gate's fp32
+diff --git a/zig/src/families/dsv41/dsv41.zig b/zig/src/families/dsv41/dsv41.zig
+index 4f47649..70357b3 100644
+--- a/zig/src/families/dsv41/dsv41.zig
++++ b/zig/src/families/dsv41/dsv41.zig
+@@ -47,6 +47,7 @@ pub const round2d = @import("round2d.zig");
+ pub const draft2d = @import("draft2d.zig");
+ pub const markov_tokens = @import("markov_tokens.zig");
+ pub const draft = @import("draft.zig");
++pub const lora = @import("lora.zig");
+ pub const sampling = @import("sampling.zig");
+ pub const model = @import("model.zig");
+ pub const prompt_rows = @import("prompt_rows.zig");
+diff --git a/zig/src/families/dsv41/lora.zig b/zig/src/families/dsv41/lora.zig
+new file mode 100644
+index 0000000..f6dd2bb
+--- /dev/null
++++ b/zig/src/families/dsv41/lora.zig
+@@ -0,0 +1,549 @@
++//! TF_DS_LORA: a PEFT adapter on the DSpark drafter's attention projections, applied as an additive epilogue on a
++//! projection's output (`y += (alpha/r) * B * (A * x)`) after the EXL3 glinear has written y. The EXL3 trellis kernels
++//! are untouched: the term is two GEMMs into a scratch, roped where the projection's own epilogue ropes (wq_b), then
++//! added. Off by default; with the switch off (or an empty/zero-rank adapter) no buffer is taken and no launch is
++//! issued, so the pass is bit-identical to base.
++//!
++//! TP=2: the adapter folder holds the unsharded tensors. A rank loads only its own slice, by the same plan the rank's
++//! weights were loaded with (plan.Split; the DSpark blocks are TP2 inside the pair, so `pair` is null): wq_b's B rows
++//! are the rank's output columns (`wqB`), wo_b's A columns are the rank's input rows (`range(groups * o_lora)`), and the
++//! replicated projections (wq_a, wkv) take the whole adapter on both ranks.
++//!
++//! Capture: every launch here is stream-ordered on the engine's stream inside Drafter.body, which is what
++//! PassGraphs.run captures, so a replayed graph replays the epilogue too. The GEMMs are cuBLAS (already captured in
++//! body for the confidence head); rope_heads is the kit's Triton cubin already in the AOT set; add_bf16 is the
++//! family's fatbin kernel. No new AOT entry is needed.
++const std = @import("std");
++const core = @import("core");
++const plan = @import("plan.zig");
++const config = @import("config.zig");
++const prompt = @import("prompt.zig");
++const tri_norm = @import("tri_norm.zig");
++
++const safetensors = core.safetensors;
++
++pub const env = "TF_DS_LORA";
++pub const config_name = "adapter_config.json";
++pub const model_name = "adapter_model.safetensors";
++
++/// The most rank an adapter may carry (the scratch is [rows, r] bf16).
++pub const max_r = 128;
++/// The DSpark stages an adapter may carry (draft.max_stages).
++pub const max_stages = 4;
++
++/// The projections an adapter may target: the block's dense ones whose output is this rank's buffer and whose input is
++/// a buffer the pass has already written. wo_a (grouped slices) and the experts are not targeted.
++pub const Kind = enum { wq_a, wq_b, wkv, wo_b };
++pub const kind_names = [_][]const u8{ "wq_a", "wq_b", "wkv", "wo_b" };
++pub const n_kinds = kind_names.len;
++
++/// The switch: unset or empty is off.
++pub fn enabled(dir: ?[]const u8) bool {
++    const d = dir orelse return false;
++    return d.len > 0;
++}
++
++pub fn kindOf(name: []const u8) ?Kind {
++    const n = if (std.mem.startsWith(u8, name, "attn.")) name["attn.".len..] else name;
++    inline for (kind_names, 0..) |k, i| if (std.mem.eql(u8, n, k)) return @enumFromInt(i);
++    return null;
++}
++
++/// A projection's widths in the checkpoint and this rank's slice of them.
++pub const Shape = struct {
++    k_full: usize, // the projection's input width (A's columns)
++    n_full: usize, // its output width (B's rows)
++    k_rank: [2]usize, // this rank's input columns
++    n_rank: [2]usize, // this rank's output rows
++};
++
++/// The plan's ranges for one projection on `sp` (the DSpark blocks' TP2 split: `pair` null).
++pub fn shape(sp: plan.Split, c: config.Config, kind: Kind) Shape {
++    const d = c.hidden;
++    const gl = sp.groups(c);
++    return switch (kind) {
++        .wq_a => .{ .k_full = d, .n_full = c.q_lora, .k_rank = .{ 0, d }, .n_rank = .{ 0, c.q_lora } },
++        .wq_b => .{ .k_full = c.q_lora, .n_full = c.heads * c.head_dim, .k_rank = .{ 0, c.q_lora }, .n_rank = sp.wqB(c) },
++        .wkv => .{ .k_full = d, .n_full = c.head_dim, .k_rank = .{ 0, d }, .n_rank = .{ 0, c.head_dim } },
++        .wo_b => .{ .k_full = c.o_groups * c.o_lora, .n_full = d, .k_rank = sp.range(gl * c.o_lora), .n_rank = .{ 0, d } },
++    };
++}
++
++/// adapter_config.json's part the engine reads: the rank, alpha and target modules (PEFT's rslora / DoRA are refused).
++pub const Cfg = struct { r: usize, alpha: f32, kinds: []const Kind, scale: f32 };
++
++fn number(v: std.json.Value) ?f64 {
++    return switch (v) {
++        .integer => |i| @floatFromInt(i),
++        .float => |f| f,
++        .number_string => |s| std.fmt.parseFloat(f64, s) catch null,
++        else => null,
++    };
++}
++
++fn flag(o: std.json.ObjectMap, name: []const u8) bool {
++    const v = o.get(name) orelse return false;
++    return v == .bool and v.bool;
++}
++
++/// The adapter's config: a rank in 0..=max_r, an alpha >= 0, and target modules among `kind_names` (with or without the
++/// "attn." prefix). A zero rank or an empty target list is a zero adapter (a no-op).
++pub fn parseConfig(a: std.mem.Allocator, text: []const u8) !Cfg {
++    const v = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
++    if (v != .object) return error.AdapterConfig;
++    const o = v.object;
++    if (flag(o, "use_rslora")) return error.AdapterRslora;
++    if (flag(o, "use_dora")) return error.AdapterDora;
++    const rf = number(o.get("r") orelse return error.AdapterRank) orelse return error.AdapterRank;
++    if (rf < 0 or rf != @floor(rf)) return error.AdapterRank;
++    const r: usize = @intFromFloat(rf);
++    if (r > max_r) return error.AdapterRankTooLarge;
++    const alpha: f32 = @floatCast(number(o.get("lora_alpha") orelse return error.AdapterAlpha) orelse return error.AdapterAlpha);
++    if (!(alpha >= 0)) return error.AdapterAlpha;
++    var kinds: std.ArrayList(Kind) = .empty;
++    if (o.get("target_modules")) |tv| {
++        if (tv != .array) return error.AdapterTargets;
++        for (tv.array.items) |item| {
++            if (item != .string) return error.AdapterTargets;
++            const k = kindOf(item.string) orelse return error.UnsupportedTargetModule;
++            var dup = false;
++            for (kinds.items) |x| dup = dup or x == k;
++            if (!dup) try kinds.append(a, k);
++        }
++    }
++    const scale: f32 = if (r == 0) 0 else alpha / @as(f32, @floatFromInt(r));
++    return .{ .r = r, .alpha = alpha, .kinds = kinds.items, .scale = scale };
++}
++
++/// A validated adapter folder: the mapped tensors as saved (the unsharded A and B), the rank's plan ranges and the
++/// scale. `close` unmaps it.
++pub const Checked = struct {
++    file: safetensors.File,
++    r: usize,
++    scale: f32,
++    hd: usize,
++    used: u8, // bit per Kind targeted
++    shapes: [n_kinds]Shape,
++    tensors: [max_stages][n_kinds]?AB,
++
++    pub const AB = struct { a: safetensors.Tensor, b: safetensors.Tensor };
++
++    pub fn close(k: *Checked, io: std.Io) void {
++        k.file.close(io);
++    }
++};
++
++fn findTensors(file: *const safetensors.File, j: usize, kind: Kind, r: usize, sh: Shape) !Checked.AB {
++    var out: [2]safetensors.Tensor = undefined;
++    const parts = [_][]const u8{ "lora_A", "lora_B" };
++    const want = [_][2]usize{ .{ r, sh.k_full }, .{ sh.n_full, r } };
++    for (parts, 0..) |part, i| {
++        var suffix: [96]u8 = undefined;
++        const s = try std.fmt.bufPrint(&suffix, ".mtp.{d}.attn.{s}.{s}.weight", .{ j, kind_names[@intFromEnum(kind)], part });
++        var found: ?safetensors.Tensor = null;
++        for (file.names.keys()) |name| {
++            if (!std.mem.endsWith(u8, name, s)) continue;
++            found = file.get(name);
++            break;
++        }
++        const t = found orelse return error.AdapterTensor;
++        if (t.dtype != .bf16) return error.UnsupportedAdapterDType;
++        if (!t.is(.bf16, &want[i])) return error.AdapterShape;
++        out[i] = t;
++    }
++    return .{ .a = out[0], .b = out[1] };
++}
++
++/// Validate a PEFT folder against the plan: the config's rank, alpha and target modules, the tensors' names, dtypes
++/// and (unsharded) shapes. A missing folder or file, or any mismatch, fails here rather than at the first request.
++pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, c: config.Config, sp: plan.Split) !Checked {
++    var d = std.Io.Dir.cwd().openDir(io, dir, .{}) catch return error.AdapterDirMissing;
++    d.close(io);
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    const cfg_path = try std.fs.path.join(a, &.{ dir, config_name });
++    const text = std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 20)) catch return error.AdapterConfigMissing;
++    const cfg = try parseConfig(a, text);
++    if (c.draft_layers > max_stages) return error.AdapterTooManyStages;
++    const model_path = try std.fs.path.join(a, &.{ dir, model_name });
++    var file = safetensors.File.open(gpa, io, model_path) catch return error.AdapterModelMissing;
++    errdefer file.close(io);
++    var used: u8 = 0;
++    var shapes: [n_kinds]Shape = undefined;
++    var tensors: [max_stages][n_kinds]?Checked.AB = @splat(@splat(null));
++    if (cfg.r > 0) {
++        for (cfg.kinds) |k| {
++            const sh = shape(sp, c, k);
++            shapes[@intFromEnum(k)] = sh;
++            used |= @as(u8, 1) << @intFromEnum(k);
++            for (0..c.draft_layers) |j| tensors[j][@intFromEnum(k)] = try findTensors(&file, j, k, cfg.r, sh);
++        }
++    }
++    return .{ .file = file, .r = cfg.r, .scale = cfg.scale, .hd = c.head_dim, .used = used, .shapes = shapes, .tensors = tensors };
++}
++
++/// One module's rank slice on the device: A [r, k] (this rank's input columns) and B [n, r] (this rank's output rows).
++pub const Mod = struct { a: u64, b: u64, k: usize, n: usize };
++
++pub const Stage = struct { mods: [n_kinds]?Mod = @splat(null) };
++
++pub const Adapter = struct {
++    r: usize,
++    scale: f32,
++    hd: usize,
++    t: u64, // bf16 [rows, r]: A * x
++    yl: u64 = 0, // bf16 [rows, n_max]: B * t (0 when no bf16-output projection is targeted)
++    n_max: usize = 0,
++    stages: [max_stages]Stage = @splat(.{ .mods = @splat(null) }),
++};
++
++/// The device work the epilogue issues. The real sink (draft.zig's Ctx) runs cuBLAS and the family's kernels; the tests
++/// run a host stub, which is how the epilogue's arithmetic and launch plan are checked without a GPU.
++pub const Sink = struct {
++    ctx: *anyopaque,
++    gemm: *const fn (ctx: *anyopaque, x: u64, w: u64, y: u64, rows: usize, k: usize, n: usize, alpha: f32, beta: f32, fp32_out: bool) anyerror!void,
++    rope: *const fn (ctx: *anyopaque, y: u64, rows: usize, heads: usize, hd: usize) anyerror!void,
++    add: *const fn (ctx: *anyopaque, y: u64, t: u64, count: usize) anyerror!void,
++};
++
++/// The served sink's state: the engine, the rope tables and position the pass's rows carry.
++pub const Ctx = struct { e: *const prompt.Engine, rope: prompt.Rope, pos: u64, rd: usize };
++
++fn gemm(ctx: *anyopaque, x: u64, w: u64, y: u64, rows: usize, k: usize, n: usize, alpha: f32, beta: f32, fp32_out: bool) anyerror!void {
++    const c: *Ctx = @ptrCast(@alignCast(ctx));
++    try c.e.blas.gemmBf16(x, w, y, rows, k, n, alpha, beta, fp32_out);
++}
++
++fn rope(ctx: *anyopaque, y: u64, rows: usize, heads: usize, hd: usize) anyerror!void {
++    const c: *Ctx = @ptrCast(@alignCast(ctx));
++    try tri_norm.ropeHeads(c.e.t, y, c.rope.cos, c.rope.sin, c.pos, c.rd, false, rows, heads, hd);
++}
++
++fn add(ctx: *anyopaque, y: u64, t: u64, count: usize) anyerror!void {
++    const c: *Ctx = @ptrCast(@alignCast(ctx));
++    try c.e.ops.addBf16(c.e.s, y, t, count);
++}
++
++pub fn sink(c: *Ctx) Sink {
++    return .{ .ctx = c, .gemm = gemm, .rope = rope, .add = add };
++}
++
++/// The additive epilogue on `kind`'s output `y` (bf16 [rows, n], or fp32 for wo_b) from the projection's input `x`:
++/// t = A * x, then y += scale * B * t. wq_b's output is post-RoPE (the glinear epilogue rotates it), so its term takes
++/// the same rotation before it is added. An untargeted module, or a zero scale, issues nothing.
++pub fn apply(ad: *const Adapter, sk: Sink, stage: usize, kind: Kind, x: u64, y: u64, rows: usize) !void {
++    if (rows == 0 or ad.scale == 0 or stage >= ad.stages.len) return;
++    const m = ad.stages[stage].mods[@intFromEnum(kind)] orelse return;
++    try sk.gemm(sk.ctx, x, m.a, ad.t, rows, m.k, ad.r, 1, 0, false);
++    if (kind == .wo_b) return sk.gemm(sk.ctx, ad.t, m.b, y, rows, ad.r, m.n, ad.scale, 1, true);
++    try sk.gemm(sk.ctx, ad.t, m.b, ad.yl, rows, ad.r, m.n, ad.scale, 0, false);
++    if (kind == .wq_b) try sk.rope(sk.ctx, ad.yl, rows, m.n / ad.hd, ad.hd);
++    try sk.add(sk.ctx, y, ad.yl, rows * m.n);
++}
++
++/// A's rank slice: its input columns [k0, k1) of every row, into a device tensor [r, k1 - k0].
++fn uploadA(e: *const prompt.Engine, a: *prompt.Arena, t: safetensors.Tensor, r: usize, k: [2]usize, k_full: usize) !u64 {
++    const w = k[1] - k[0];
++    const dst = try a.take(r * w * 2);
++    if (w == k_full) {
++        try prompt.upload(e, dst, t.bytes.ptr, r * w * 2);
++        return dst;
++    }
++    const stage = try std.heap.page_allocator.alloc(u8, r * w * 2);
++    defer std.heap.page_allocator.free(stage);
++    for (0..r) |i| @memcpy(stage[i * w * 2 ..][0 .. w * 2], t.bytes[i * k_full * 2 ..][k[0] * 2 ..][0 .. w * 2]);
++    try prompt.upload(e, dst, stage.ptr, r * w * 2);
++    return dst;
++}
++
++/// B's rank slice: its output rows [n0, n1) (contiguous rows of the saved [n_full, r] tensor).
++fn uploadB(e: *const prompt.Engine, a: *prompt.Arena, t: safetensors.Tensor, r: usize, n: [2]usize) !u64 {
++    const w = n[1] - n[0];
++    const dst = try a.take(w * r * 2);
++    try prompt.upload(e, dst, t.bytes.ptr + n[0] * r * 2, w * r * 2);
++    return dst;
++}
++
++/// Load TF_DS_LORA's folder for this rank: null when the switch is off, empty, or the adapter is a zero adapter (r = 0,
++/// an empty target list, or alpha = 0) - in those cases nothing is allocated and no launch is issued.
++pub fn load(e: *const prompt.Engine, a: *prompt.Arena, sp: plan.Split, dir: ?[]const u8, rows: usize) !?Adapter {
++    const path = dir orelse return null;
++    if (!enabled(path)) return null;
++    // shortcut: load runs on one thread before serving; the process-wide single-threaded Io is what server/log.zig falls
++    // back to as well (the served threads never touch it).
++    const io = std.Io.Threaded.global_single_threaded.io();
++    const tp2: plan.Split = .{ .rank = sp.rank, .world = sp.world }; // the DSpark blocks stay TP2 inside the pair
++    var ck = check(std.heap.page_allocator, io, path, e.c.*, tp2) catch |err| {
++        std.log.err("dsv41 lora: TF_DS_LORA={s}: {s}", .{ path, @errorName(err) });
++        return err;
++    };
++    defer ck.close(io);
++    if (ck.r == 0 or ck.scale == 0 or ck.used == 0) return null;
++    var ad: Adapter = .{ .r = ck.r, .scale = ck.scale, .hd = ck.hd, .t = 0 };
++    var n_max: usize = 0;
++    for (0..e.c.draft_layers) |j| {
++        for (kind_names, 0..) |_, ki| {
++            if (ck.used & (@as(u8, 1) << @intCast(ki)) == 0) continue;
++            const kind: Kind = @enumFromInt(ki);
++            const ab = ck.tensors[j][ki].?;
++            const sh = ck.shapes[ki];
++            const ap = try uploadA(e, a, ab.a, ck.r, sh.k_rank, sh.k_full);
++            const bp = try uploadB(e, a, ab.b, ck.r, sh.n_rank);
++            ad.stages[j].mods[ki] = .{ .a = ap, .b = bp, .k = sh.k_rank[1] - sh.k_rank[0], .n = sh.n_rank[1] - sh.n_rank[0] };
++            if (kind != .wo_b) n_max = @max(n_max, sh.n_rank[1] - sh.n_rank[0]);
++        }
++    }
++    ad.t = try a.take(rows * ck.r * 2);
++    ad.n_max = n_max;
++    if (n_max > 0) ad.yl = try a.take(rows * n_max * 2);
++    return ad;
++}
++
++const testing = std.testing;
++
++fn testConfig(a: std.mem.Allocator) !config.Config {
++    var why: config.Why = .{};
++    return config.parse(a, config.test_config, &why);
++}
++
++test "TF_DS_LORA is off unless a folder is set" {
++    try testing.expect(!enabled(null));
++    try testing.expect(!enabled(""));
++    try testing.expect(enabled("/adapters/drafter"));
++}
++
++test "config: rank, alpha and target modules; PEFT's rslora and DoRA are refused" {
++    var arena = std.heap.ArenaAllocator.init(testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    const c = try parseConfig(a, "{\"r\": 16, \"lora_alpha\": 32, \"target_modules\": [\"wq_a\", \"attn.wo_b\", \"wq_a\"]}");
++    try testing.expectEqual(@as(usize, 16), c.r);
++    try testing.expectEqual(@as(f32, 2), c.scale);
++    try testing.expectEqual(@as(usize, 2), c.kinds.len);
++    try testing.expectEqual(Kind.wo_b, c.kinds[1]);
++    try testing.expectError(error.AdapterRank, parseConfig(a, "{\"r\": \"x\", \"lora_alpha\": 1}"));
++    try testing.expectError(error.AdapterRankTooLarge, parseConfig(a, "{\"r\": 256, \"lora_alpha\": 1}"));
++    try testing.expectError(error.AdapterAlpha, parseConfig(a, "{\"r\": 8}"));
++    try testing.expectError(error.AdapterAlpha, parseConfig(a, "{\"r\": 8, \"lora_alpha\": -1}"));
++    try testing.expectError(error.UnsupportedTargetModule, parseConfig(a, "{\"r\": 8, \"lora_alpha\": 8, \"target_modules\": [\"gate\"]}"));
++    try testing.expectError(error.AdapterRslora, parseConfig(a, "{\"r\": 8, \"lora_alpha\": 8, \"use_rslora\": true}"));
++    try testing.expectError(error.AdapterDora, parseConfig(a, "{\"r\": 8, \"lora_alpha\": 8, \"use_dora\": true}"));
++    const zero = try parseConfig(a, "{\"r\": 0, \"lora_alpha\": 8}");
++    try testing.expectEqual(@as(f32, 0), zero.scale);
++    const empty = try parseConfig(a, "{\"r\": 8, \"lora_alpha\": 8, \"target_modules\": []}");
++    try testing.expectEqual(@as(usize, 0), empty.kinds.len);
++}
++
++test "shard: the ranks' slices tile the full matrix, and the split is the plan's" {
++    var arena = std.heap.ArenaAllocator.init(testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    const c = try testConfig(a);
++    const r0: plan.Split = .{ .rank = 0, .world = 2 };
++    const r1: plan.Split = .{ .rank = 1, .world = 2 };
++    // wq_b: B's rows are the rank's heads' columns (the full output is every head), disjoint and complete
++    const b0 = shape(r0, c, .wq_b).n_rank;
++    const b1 = shape(r1, c, .wq_b).n_rank;
++    try testing.expectEqual(@as(usize, 0), b0[0]);
++    try testing.expectEqual(b0[1], b1[0]);
++    try testing.expectEqual(c.heads * c.head_dim, b1[1]);
++    // wo_b: A's columns are the rank's groups' input rows, disjoint and complete
++    const a0 = shape(r0, c, .wo_b).k_rank;
++    const a1 = shape(r1, c, .wo_b).k_rank;
++    try testing.expectEqual(@as(usize, 0), a0[0]);
++    try testing.expectEqual(a0[1], a1[0]);
++    try testing.expectEqual(c.o_groups * c.o_lora, a1[1]);
++    try testing.expectEqual(a1[1] - a1[0], a0[1] - a0[0]);
++    // the replicated projections are whole on both ranks
++    for ([_]Kind{ .wq_a, .wkv }) |k| {
++        const s0 = shape(r0, c, k);
++        const s1 = shape(r1, c, k);
++        try testing.expectEqual(s0.k_rank, s1.k_rank);
++        try testing.expectEqual(s0.n_rank, s1.n_rank);
++        try testing.expectEqual(@as(usize, 0), s0.k_rank[0]);
++        try testing.expectEqual(s0.k_full, s0.k_rank[1]);
++    }
++    // the input widths the tensors must have
++    try testing.expectEqual(c.hidden, shape(r1, c, .wq_a).k_full);
++    try testing.expectEqual(c.q_lora, shape(r1, c, .wq_b).k_full);
++    try testing.expectEqual(c.head_dim, shape(r1, c, .wkv).n_full);
++}
++
++const Fixture = struct { name: []const u8, shape: [2]usize };
++
++/// Write a PEFT folder (the config and a BF16 safetensors of zero-filled A/B tensors) into `dir`.
++fn writeFixture(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cfg_text: []const u8, ts: []const Fixture) !void {
++    var json: std.ArrayList(u8) = .empty;
++    defer json.deinit(gpa);
++    var blob: std.ArrayList(u8) = .empty;
++    defer blob.deinit(gpa);
++    try json.appendSlice(gpa, "{");
++    var off: usize = 0;
++    for (ts, 0..) |t, i| {
++        const bytes = t.shape[0] * t.shape[1] * 2;
++        var buf: [256]u8 = undefined;
++        if (i > 0) try json.appendSlice(gpa, ",");
++        try json.appendSlice(gpa, try std.fmt.bufPrint(&buf, "\"{s}\":{{\"dtype\":\"BF16\",\"shape\":[{d},{d}],\"data_offsets\":[{d},{d}]}}", .{ t.name, t.shape[0], t.shape[1], off, off + bytes }));
++        off += bytes;
++    }
++    try json.appendSlice(gpa, "}");
++    var hdr: [8]u8 = undefined;
++    std.mem.writeInt(u64, &hdr, json.items.len, .little);
++    try blob.appendSlice(gpa, &hdr);
++    try blob.appendSlice(gpa, json.items);
++    for (0..off) |_| try blob.append(gpa, 0);
++    try dir.writeFile(io, .{ .sub_path = model_name, .data = blob.items });
++    try dir.writeFile(io, .{ .sub_path = config_name, .data = cfg_text });
++}
++
++test "check: a folder's tensors, and every mismatch fails at load" {
++    const gpa = testing.allocator;
++    const io = std.testing.io;
++    var tmp = std.testing.tmpDir(.{});
++    defer tmp.cleanup();
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    const c = try testConfig(a);
++    const tp2: plan.Split = .{ .rank = 1, .world = 2 };
++    const r = 4;
++    const base = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
++    var names: [8]Fixture = undefined;
++    for (0..c.draft_layers) |j| {
++        names[2 * j] = .{ .name = try std.fmt.allocPrint(a, "base_model.model.mtp.{d}.attn.wq_a.lora_A.weight", .{j}), .shape = .{ r, c.hidden } };
++        names[2 * j + 1] = .{ .name = try std.fmt.allocPrint(a, "base_model.model.mtp.{d}.attn.wq_a.lora_B.weight", .{j}), .shape = .{ c.q_lora, r } };
++    }
++    const cfg_text = try std.fmt.allocPrint(a, "{{\"r\": {d}, \"lora_alpha\": 8, \"target_modules\": [\"wq_a\"]}}", .{r});
++    try writeFixture(gpa, io, tmp.dir, cfg_text, names[0 .. 2 * c.draft_layers]);
++    var ck = try check(gpa, io, base, c, tp2);
++    defer ck.close(io);
++    try testing.expectEqual(@as(usize, r), ck.r);
++    try testing.expectEqual(@as(f32, 2), ck.scale);
++    try testing.expectEqual(@as(u8, 1) << @intFromEnum(Kind.wq_a), ck.used);
++    try testing.expectEqual(@as(usize, r), ck.tensors[0][@intFromEnum(Kind.wq_a)].?.a.shape[0]);
++    try testing.expectEqual(c.hidden, ck.tensors[0][@intFromEnum(Kind.wq_a)].?.a.shape[1]);
++    try testing.expectEqual(@as(?Checked.AB, null), ck.tensors[0][@intFromEnum(Kind.wo_b)]);
++    // a missing folder, a missing model, a wrong shape, an unknown target and a non-bf16 dtype
++    const absent = try std.fmt.allocPrint(a, "{s}/absent", .{base});
++    try testing.expectError(error.AdapterDirMissing, check(gpa, io, absent, c, tp2));
++    try tmp.dir.deleteFile(io, model_name);
++    try testing.expectError(error.AdapterModelMissing, check(gpa, io, base, c, tp2));
++    const bad = [2]Fixture{ .{ .name = names[0].name, .shape = .{ r, c.hidden - 1 } }, .{ .name = names[1].name, .shape = .{ c.q_lora, r } } };
++    try writeFixture(gpa, io, tmp.dir, cfg_text, &bad);
++    try testing.expectError(error.AdapterShape, check(gpa, io, base, c, tp2));
++    try writeFixture(gpa, io, tmp.dir, "{\"r\": 4, \"lora_alpha\": 8, \"target_modules\": [\"wo_a\"]}", names[0 .. 2 * c.draft_layers]);
++    try testing.expectError(error.UnsupportedTargetModule, check(gpa, io, base, c, tp2));
++    try writeFixture(gpa, io, tmp.dir, cfg_text, names[0 .. 2 * c.draft_layers]);
++    var ck2 = try check(gpa, io, base, c, tp2);
++    ck2.close(io);
++}
++
++/// A host stub of the epilogue's device work: the pointers are host arrays' addresses (the tests pass @intFromPtr), the
++/// arithmetic is the real one in f32, and the calls are counted in order.
++const Stub = struct {
++    calls: usize = 0,
++    roped: bool = false,
++    added: bool = false,
++    fp32: bool = false,
++
++    fn gemm(ctx: *anyopaque, x: u64, w: u64, y: u64, rows: usize, k: usize, n: usize, alpha: f32, beta: f32, fp32_out: bool) anyerror!void {
++        const s: *Stub = @ptrCast(@alignCast(ctx));
++        s.calls += 1;
++        s.fp32 = fp32_out;
++        const xs: [*]const f32 = @ptrFromInt(x);
++        const ws: [*]const f32 = @ptrFromInt(w);
++        const ys: [*]f32 = @ptrFromInt(y);
++        for (0..rows) |i| for (0..n) |j| {
++            var acc: f32 = 0;
++            for (0..k) |kk| acc += xs[i * k + kk] * ws[j * k + kk];
++            ys[i * n + j] = alpha * acc + beta * ys[i * n + j];
++        };
++    }
++    fn rope(ctx: *anyopaque, y: u64, rows: usize, heads: usize, hd: usize) anyerror!void {
++        const s: *Stub = @ptrCast(@alignCast(ctx));
++        s.calls += 1;
++        s.roped = true;
++        _ = .{ y, rows, heads, hd };
++    }
++    fn add(ctx: *anyopaque, y: u64, t: u64, count: usize) anyerror!void {
++        const s: *Stub = @ptrCast(@alignCast(ctx));
++        s.calls += 1;
++        s.added = true;
++        const ys: [*]f32 = @ptrFromInt(y);
++        const ts: [*]const f32 = @ptrFromInt(t);
++        for (0..count) |i| ys[i] += ts[i];
++    }
++    fn sinkOf(s: *Stub) Sink {
++        return .{ .ctx = s, .gemm = Stub.gemm, .rope = Stub.rope, .add = Stub.add };
++    }
++};
++
++/// y0 + scale * B * (A * x) in f32, the reference the stub's launches must reproduce.
++fn refEpilogue(y0: []const f32, x: []const f32, av: []const f32, bv: []const f32, rows: usize, k: usize, r: usize, n: usize, scale: f32, out: []f32) void {
++    var t: [64]f32 = undefined;
++    for (0..rows) |i| for (0..r) |j| {
++        var acc: f32 = 0;
++        for (0..k) |kk| acc += av[j * k + kk] * x[i * k + kk];
++        t[i * r + j] = acc;
++    };
++    for (0..rows) |i| for (0..n) |j| {
++        var acc: f32 = 0;
++        for (0..r) |kk| acc += bv[j * r + kk] * t[i * r + kk];
++        out[i * n + j] = y0[i * n + j] + scale * acc;
++    };
++}
++
++test "epilogue: y += (alpha/r) * B * (A * x), the rope only on wq_b, and nothing for an untargeted module" {
++    const rows = 2;
++    const r = 2;
++    const k = 3;
++    const n = 2;
++    const scale: f32 = 0.5; // alpha / r, r = 2, alpha = 1
++    var av = [_]f32{ 0.5, -1, 2, 0.25, 0.75, -0.5 }; // A [r, k]
++    var bv = [_]f32{ 1, 2, -1, 0.5 }; // B [n, r]
++    var xv = [_]f32{ 1, 2, 3, -1, 0.5, 2 }; // x [rows, k]
++    var tv = [_]f32{ 0, 0, 0, 0 };
++    var yl = [_]f32{ 0, 0, 0, 0 };
++    var yv = [_]f32{ 0.5, -0.25, 1, 2 }; // the projection's own output
++    var want: [4]f32 = undefined;
++    refEpilogue(&yv, &xv, &av, &bv, rows, k, r, n, scale, &want);
++
++    // wq_b: gemm, gemm, rope, add - the term lands on the projection's post-rope output
++    var ad: Adapter = .{
++        .r = r,
++        .scale = scale,
++        .hd = n, // one head of n columns: the rope's head count is m.n / hd
++        .t = @intFromPtr(&tv),
++        .yl = @intFromPtr(&yl),
++        .n_max = n,
++    };
++    ad.stages[1].mods[@intFromEnum(Kind.wq_b)] = .{ .a = @intFromPtr(&av), .b = @intFromPtr(&bv), .k = k, .n = n };
++    var st: Stub = .{};
++    const sk = Stub.sinkOf(&st);
++    try apply(&ad, sk, 1, .wq_b, @intFromPtr(&xv), @intFromPtr(&yv), rows);
++    try testing.expectEqual(@as(usize, 4), st.calls);
++    try testing.expect(st.roped and st.added and !st.fp32);
++    try testing.expectEqualSlices(f32, &want, &yv);
++
++    // wo_b: two GEMMs, the second accumulating into the fp32 output - no rope, no add
++    var yf = [_]f32{ 0.5, -0.25, 1, 2 };
++    refEpilogue(&yf, &xv, &av, &bv, rows, k, r, n, scale, &want);
++    ad.stages[0].mods[@intFromEnum(Kind.wo_b)] = .{ .a = @intFromPtr(&av), .b = @intFromPtr(&bv), .k = k, .n = n };
++    st = .{};
++    try apply(&ad, sk, 0, .wo_b, @intFromPtr(&xv), @intFromPtr(&yf), rows);
++    try testing.expectEqual(@as(usize, 2), st.calls);
++    try testing.expect(!st.roped and !st.added and st.fp32);
++    try testing.expectEqualSlices(f32, &want, &yf);
++
++    // an unadapted module and a zero alpha issue nothing (a zero rank is scale 0 too, and load keeps it out entirely)
++    st = .{};
++    try apply(&ad, sk, 0, .wq_a, @intFromPtr(&xv), @intFromPtr(&yv), rows);
++    try testing.expectEqual(@as(usize, 0), st.calls);
++    var zero: Adapter = ad;
++    zero.scale = 0;
++    try apply(&zero, sk, 1, .wq_b, @intFromPtr(&xv), @intFromPtr(&yv), rows);
++    try testing.expectEqual(@as(usize, 0), st.calls);
++    try apply(&ad, sk, 2, .wq_b, @intFromPtr(&xv), @intFromPtr(&yv), rows); // a stage without the module
++    try testing.expectEqual(@as(usize, 0), st.calls);
++}
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 6fbef16..e5cfadf 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -28,6 +28,14 @@ fn envOn(name: [:0]const u8) bool {
+ /// The switch for the device draw of sampled rows (tf_ds_draw_rows_kernel); read at load on every rank.
+ pub const draw_env = "TF_DS_T27_DEVICE_DRAW";
+ 
++/// The switch for a runtime LoRA adapter on the DSpark drafter (lora.zig); a folder, so any non-empty value is on.
++pub const lora_env = "TF_DS_LORA";
++
++fn loraOn() bool {
++    const v = std.c.getenv(lora_env) orelse return false;
++    return std.mem.span(v).len > 0;
++}
++
+ /// One row of tf_ds_draw_rows_kernel's rule table: the sampler's seed, temperature, top_p, min_p, the row's absolute
+ /// position and top_k (1..56 when temp > 0; the host keeps other rules off the kernel).
+ pub const DrawRow = extern struct { seed: u64, temp: f64, top_p: f64, min_p: f64, pos: u64, top_k: u32, pad: u32 = 0 };
+@@ -61,6 +69,7 @@ pub const Ops = struct {
+     prune_fn: ?cuda.Function = null, // looked up only when the switch is on
+     keyed_noise: ?cuda.Function = null, // TF_DS_T26_KEYED_DRAFT, looked up only when on
+     draw_rows: ?cuda.Function = null, // TF_DS_T27_DEVICE_DRAW, looked up only when on
++    lora_add: ?cuda.Function = null, // TF_DS_LORA: the adapter epilogue's add, looked up only when on
+ 
+     /// The three images (cuda.kernels.torch_pointwise, torch_movement and dsv41_ops, or the fatbins' bytes).
+     pub fn load(d: *const cuda.Driver, pointwise: []const u8, movement: []const u8, family: []const u8) !Ops {
+@@ -97,6 +106,7 @@ pub const Ops = struct {
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
+             .keyed_noise = if (envOn(keyed_env)) try fm.function("tf_ds_keyed_noise_kernel") else null,
+             .draw_rows = if (envOn(draw_env)) try fm.function("tf_ds_draw_rows_kernel") else null,
++            .lora_add = if (loraOn()) try fm.function("tf_ds_add_bf16_kernel") else null,
+         };
+     }
+ 
+@@ -142,6 +152,18 @@ pub const Ops = struct {
+         try go(o.add2_bf16, s, blocks(count, 256), 256, &a);
+     }
+ 
++    /// x + y of bf16 values in place on x (torch's add: fp32 sum, rounded once; tf_ds_add_bf16_kernel). TF_DS_LORA's
++    /// epilogue adds its term with it.
++    pub fn addBf16(o: *const Ops, s: cuda.Stream, x: u64, y: u64, count: usize) !void {
++        if (count == 0) return;
++        const f = o.lora_add orelse return error.AdapterAddUnavailable;
++        var a: cuda.Args = .{};
++        a.add(x);
++        a.add(y);
++        a.add(@as(u64, count));
++        try go(f, s, blocks(count, 256), 256, &a);
++    }
++
+     /// keys.topk(k, sorted=False).values of unique int64 keys [rows, n] (row stride ks) into top [rows, k], the set in no
+     /// particular order (_topk_finish sorts the indices).
+     pub fn topkI64(o: *const Ops, s: cuda.Stream, keys: u64, ks: usize, rows: usize, n: usize, k: usize, top: u64) !void {
+-- 
+2.56.0
+

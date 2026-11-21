@@ -1,0 +1,271 @@
+# port-patches.sh: second-pass-int @ bdd92fc3b655 over 15f2c8a @ 15f2c8ae2657 (commits 15f2c8ae2657..bdd92fc3b655)
+# dsv41: TF_DS_PREFILL_GATHER_OVERLAP (off by default) runs a prompt chunk's MoE gather on a stream of its own, forked behind the MoE and joined where the pending post reads it - the next layer's Engram block overlaps it
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 078d74cec4a72c1969a84a34e9fb9ebd8e671cf4..e8d52bb39eadb9eeb113addd2ff460975309cd7c 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -116,6 +116,8 @@ pub const Options = struct {
+     graph_cap: usize = 0, // the captured stretches kept at most, least recently replayed out first (TF_DS_GRAPH_CAP; 0: all)
+     side: bool = false, // the mixes' side work on a stream of its own (round.Round.useSide)
+     prefetch: bool = false, // the paced L2 prefetch (round.Round.usePrefetch)
++    // TF_DS_PREFILL_GATHER_OVERLAP (0183): the chunk's MoE gather on a stream of its own, joined where the post reads it
++    gather_overlap: bool = false,
+     engram_aio: bool = false, // a round's Engram reads by Linux AIO on O_DIRECT (else the reader pool)
+     arena_bytes: usize = 0, // the device arena's first block (0: it grows from 256 MiB blocks as the buffers ask)
+     round_rows: usize = round.default_rows, // a round's rows at most (TF_DS_ROUND_ROWS; the four-node lane's 48)
+@@ -170,6 +172,11 @@ pub const Model = struct {
+     rings: []u64, // each layer's window rings, max_streams slots
+     ring_view: []u64, // a filling stream's slot of them
+     rd: round.Round,
++    // TF_DS_PREFILL_GATHER_OVERLAP: the chunk's MoE gather's stream and its events (prompt.gatherAside; given to the
++    // chunk as copies); no stream with the switch off
++    gside: ?cuda.Stream = null,
++    gside_fork: ?cuda.Event = null,
++    gside_join: ?cuda.Event = null,
+     graphs: ?round.Graphs = null,
+     pgraphs: ?draft.PassGraphs = null, // the drafter pass as CUDA graphs (with graphs)
+     dpool: ?draft.Pool = null,
+@@ -514,6 +521,7 @@ pub const Model = struct {
+         };
+         if (o.side) try m.rd.useSide(&m.eng);
+         if (o.prefetch) try m.rd.usePrefetch(&m.eng);
++        if (o.gather_overlap and prompt.overlapWorks(sp.world, m.two != null)) try m.useGatherSide();
+         if (o.drafts) {
+             m.dpool = try draft.Pool.init(&m.eng, &m.arena, m.streams);
+             m.dr = try draft.Drafter.init(&m.eng, &m.arena, sp);
+@@ -778,6 +786,39 @@ pub const Model = struct {
+         return buf[0..ns];
+     }
+ 
++    /// TF_DS_PREFILL_GATHER_OVERLAP (0183): the chunk's MoE gather on a stream of its own, so the next layer's Engram
++    /// block (its host read and its upload) runs while the gather is in flight. Off: the gather stays on the main
++    /// stream, where the post's first step waits for it.
++    fn useGatherSide(m: *Model) !void {
++        if (m.gside != null) return;
++        const d = m.eng.d;
++        var s = try cuda.Stream.init(d, true);
++        errdefer s.deinit();
++        var f = try cuda.Event.init(d, false);
++        errdefer f.deinit();
++        var j = try cuda.Event.init(d, false);
++        errdefer j.deinit();
++        m.gside = s;
++        m.gside_fork = f;
++        m.gside_join = j;
++        m.ch.gs = s;
++        m.ch.gs_fork = f;
++        m.ch.gs_join = j;
++    }
++
++    fn dropGatherSide(m: *Model) void {
++        m.ch.gs = null;
++        m.ch.gs_fork = null;
++        m.ch.gs_join = null;
++        m.ch.pending_side = false;
++        if (m.gside_join) |*j| j.deinit();
++        if (m.gside_fork) |*f| f.deinit();
++        if (m.gside) |*s| s.deinit();
++        m.gside = null;
++        m.gside_fork = null;
++        m.gside_join = null;
++    }
++
+     pub fn close(m: *Model) void {
+         m.joinAhead();
+         m.stream.synchronize() catch {};
+@@ -795,6 +836,7 @@ pub const Model = struct {
+             t.deinit();
+             m.gpa.destroy(t);
+         }
++        m.dropGatherSide();
+         m.rd.dropSide(&m.eng);
+         m.rd.dropPrefetch();
+         m.rd.dropCompress();
+@@ -1586,7 +1628,9 @@ pub const Model = struct {
+             try prompt.moe(e, ch, li);
+             if (pt) |t| try t.mark(m.stream, .moe);
+             prefill_prof.mark(m.stream, .moe);
+-            try prompt.gather(e, ch, ch.pm, ch.gm);
++            // TF_DS_PREFILL_GATHER_OVERLAP: on the chunk's side stream (the next layer's Engram block overlaps it). The
++            // phase mark below clocks the main stream's fork point then, not the gather: the chunk wall is the measure.
++            try prompt.gatherAside(e, ch);
+             if (pt) |t| try t.mark(m.stream, .gather_m);
+             prefill_prof.mark(m.stream, .gather_m);
+             prompt.endLayer(ch);
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 2506be3dc7262a0745680321471d6b7a9be33c72..9034a6f03362919ec70ecccee252480dbf826184 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -80,6 +80,12 @@
+ //!   TF_DS_HC_SIDE=1                             the mixes' side work on a stream of its own
+ //!   TF_DS_L2_PREFETCH=1                         the paced L2 prefetch of the next kernels' weights
+ //!   TF_DS_PDL=1                            the hand-written kernels launch with programmatic dependent launches (griddepcontrol.wait + launch_dependents at every kernel's entry, the attribute on every launch of these kernels); both ranks, read at load via ops/exact; launch-timing only, bits identical (not TF_RDMA_PDL / not TF_DS_TRITON_PDL; changes no frames, no bytes, so the pair may run mixed ranks bit-identically, though setting it alike on both is the convention); no fingerprint bit, no switches bit
++//!   TF_DS_PREFILL_GATHER_OVERLAP=1             the prompt chunk's MoE gather (comm.gather of pm) on a stream of its own,
++//!                                               forked behind the MoE and joined where the pending post reads it, so the
++//!                                               next layer's Engram block (its host read and upload) runs while the gather
++//!                                               is in flight; the same all-gather on the same ranks, so bits identical
++//!                                               (set alike on both ranks; no frame, no bytes, no fingerprint bit). A lone
++//!                                               rank or the four-node 2D split keeps the main stream. Off: nothing changes
+ //!   TF_DS_TOPK_FAST=1                          the indexer's top-k (tf_ds_topk_indices_kernel) runs as
+ //!                                               tf_ds_topk_indices_fast_kernel: a systematic sample of the row (every
+ //!                                               n/4096-th key) estimates the k-th largest, one pass compacts the keys at
+@@ -317,6 +323,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+         .graph_cap = if (getenv("TF_DS_GRAPH_CAP")) |v| std.fmt.parseInt(usize, v, 10) catch return error.BadGraphCap else 0,
+         .side = if (getenv("TF_DS_HC_SIDE")) |v| !std.mem.eql(u8, v, "0") else false,
+         .prefetch = if (getenv("TF_DS_L2_PREFETCH")) |v| !std.mem.eql(u8, v, "0") else false,
++        .gather_overlap = ops_mod.onValue(getenv(prompt.gather_side_env)), // 0183 (the 2D split and a lone rank keep the main stream: Model.useGatherSide)
+         .engram_aio = if (getenv("TF_DS_ENGRAM_AIO")) |v| !std.mem.eql(u8, v, "0") else false,
+         .pool = try pool_mod.resolve(o.context, getenv("TF_DS_POOL")), // may exceed the window: more kept prompts stay resident
+         .window = o.context, // (a follower takes TF_DS_WINDOW, else rank 0's: Model.open)
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 5485265b3e5fa8d4a0b75dea8ae05fc601ed5adb..122d71c6c8265558fc9f61855c2019f1d6ed1ddc 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -382,6 +382,12 @@ pub const Chunk = struct {
+     head_l: u64 = 0, // fp32 [1, this rank's vocabulary columns]: its logits
+     head_g: u64 = 0, // fp32 [world, 1, columns]: their gather (the prompt's logits, rank after rank)
+     pending: bool = false, // gm holds a MoE gather whose post is not in h yet
++    // TF_DS_PREFILL_GATHER_OVERLAP: the MoE gather's stream (Model.pg_side, a copy) and its events; `pending_side`:
++    // gm holds a gather still in flight there, so the post joins it before reading gm
++    pending_side: bool = false,
++    gs: ?cuda.Stream = null,
++    gs_fork: ?cuda.Event = null,
++    gs_join: ?cuda.Event = null,
+     // TF_DS_KV_SHARD (useShard): a prompt block's fetched rows (sf_rows of them: codes [sf_rows, head_dim / 2], scales
+     // [sf_rows, head_dim / 16]; the owner packs into them and sends, the other rank receives into them) and the block's
+     // picks renumbered to them (int64 [cap, index_topk + 16])
+@@ -423,6 +429,10 @@ pub const Chunk = struct {
+         ch.n = 0;
+         ch.start = 0;
+         ch.pending = false;
++        ch.pending_side = false;
++        ch.gs = null;
++        ch.gs_fork = null;
++        ch.gs_join = null;
+         ch.ids = try a.take(cap * 8);
+         ch.pos0 = try a.take(cap * 8);
+         ch.pos1 = try a.take(cap * 8);
+@@ -947,6 +957,7 @@ pub fn begin(e: *const Engine, ch: *Chunk, ids: []const i64, start: usize, host_
+     if (n > ch.cap or host_pos.len < n) return error.ChunkTooLong;
+     ch.n = n;
+     ch.start = start;
++    try joinAside(e, ch); // a gather a stopped chunk left in flight lands before gm is rewritten
+     ch.pending = false;
+     for (host_pos[0..n], 0..) |*p, i| p.* = @intCast(start + i);
+     try upload(e, ch.ids, ids.ptr, n * 8);
+@@ -980,6 +991,7 @@ pub fn attnMixes(e: *const Engine, ch: *Chunk, li: usize) !void {
+     const lay = e.w.layers[li];
+     const c = e.c;
+     if (ch.pending) {
++        try joinAside(e, ch);
+         const src = try tri_hc.hcPrePf(e.t, ch.h, lay.hc_attn[0], lay.hc_attn[1], lay.hc_attn[2], ch.pre, lay.attn_norm, c.eps, c.hc_eps, c.hc_iters, ch.x, ch.pre_a, ch.post, ch.comb, ch.part, .{ .gathered = ch.gm, .world = e.world, .h_out = ch.h_alt }, ch.n, c.hidden);
+         swapStreams(ch, src);
+         ch.pending = false;
+@@ -1460,6 +1472,43 @@ pub fn gather(e: *const Engine, ch: *const Chunk, src: u64, dst: u64) !void {
+     try e.comm.allGather(src, dst, ch.n * e.c.hidden, .f32, e.s);
+ }
+ 
++/// The switch for the chunk's MoE gather on a stream of its own (the next layer's Engram block's host work overlaps it).
++pub const gather_side_env = "TF_DS_PREFILL_GATHER_OVERLAP";
++
++/// TF_DS_PREFILL_GATHER_OVERLAP runs where there is something to exchange over one transport: two or more ranks (a
++/// single rank's all-gather copies its own rows) and not the four-node 2D split (its quarters post on the main stream).
++pub fn overlapWorks(world: usize, two: bool) bool {
++    return world >= 2 and !two;
++}
++
++/// The chunk's MoE gather on its side stream: forked behind the main stream's MoE, joined where the pending post first
++/// reads gm. The same all-gather of the same buffer on the same ranks, so the bytes are; only its stream changes.
++pub fn gatherAside(e: *const Engine, ch: *Chunk) !void {
++    const s = ch.gs orelse return gather(e, ch, ch.pm, ch.gm);
++    if (ch.gs_fork) |f| {
++        try f.record(e.s);
++        try s.wait(f);
++    }
++    try e.comm.allGather(ch.pm, ch.gm, ch.n * e.c.hidden, .f32, s);
++    if (ch.gs_join) |j| try j.record(s);
++    ch.pending_side = true;
++}
++
++/// The side gather's join, before anything reads gm (a no-op when none is in flight or the switch is off).
++pub fn joinAside(e: *const Engine, ch: *Chunk) !void {
++    if (!ch.pending_side) return;
++    ch.pending_side = false;
++    if (ch.gs_join) |j| try e.s.wait(j);
++}
++
++/// The layer's pending MoE post (_forward_k's hc_post over gm), after the side gather's join when one is in flight.
++fn pendingPost(e: *const Engine, ch: *Chunk) !void {
++    if (!ch.pending) return;
++    try joinAside(e, ch);
++    try tri_basic.hcPost(e.t, ch.gm, ch.h, ch.post, ch.comb, ch.h, e.world, ch.n, e.c.hidden);
++    ch.pending = false;
++}
++
+ /// Layer `li`'s FFN mixes: hc_pre_pf with the gathered attention partials posted into the streams first; x the MoE's
+ /// input rows, pre_f / post / comb the FFN's.
+ pub fn ffnMixes(e: *const Engine, ch: *Chunk, li: usize) !void {
+@@ -2283,10 +2332,10 @@ pub fn engramApply(e: *const Engine, ch: *Chunk, eh: *EngramHost, li: usize, seq
+     const ew = lay.engram_wkv orelse return;
+     const c = e.c;
+     const n = ch.n;
+-    if (ch.pending) {
+-        try tri_basic.hcPost(e.t, ch.gm, ch.h, ch.post, ch.comb, ch.h, e.world, n, c.hidden);
+-        ch.pending = false;
+-    }
++    // TF_DS_PREFILL_GATHER_OVERLAP: with the layer's gather still in flight on the side stream, the pending post waits
++    // until the rows are read and uploaded, so the gather overlaps them; with nothing in flight it stays the first step.
++    const late = ch.pending_side and ch.pending;
++    if (!late) try pendingPost(e, ch);
+     const li32: u16 = @intCast(li);
+     const l = std.mem.indexOfScalar(u16, c.engram_layers.slice(), li32) orelse return error.NotAnEngramLayer;
+     const t = eh.tables.layers.get(@intCast(li)) orelse return error.MissingEngramTable;
+@@ -2300,6 +2349,7 @@ pub fn engramApply(e: *const Engine, ch: *Chunk, eh: *EngramHost, li: usize, seq
+     if (prof) eh.p_rows += lap(e, eh, &tq);
+     try upload(e, ch.eb, rows.ptr, m * t.row_w * 2);
+     if (prof) eh.p_upload += lap(e, eh, &tq);
++    if (late) try pendingPost(e, ch);
+     try mm(e, ch, ew, ch.eb, ew.k, ch.ek, .fp32, ew.n);
+     if (prof) eh.p_mm += lap(e, eh, &tq);
+     // 2D (model.py esum): this node's columns of its rank's projection; the quarters give both ranks' whole ones
+@@ -2462,10 +2512,7 @@ pub fn replayCut(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, l
+ /// then h.to(fp32).mean(1).to(bf16) into tap j's rows.
+ pub fn tap(e: *const Engine, ch: *Chunk, j: usize) !void {
+     const c = e.c;
+-    if (ch.pending) {
+-        try tri_basic.hcPost(e.t, ch.gm, ch.h, ch.post, ch.comb, ch.h, e.world, ch.n, c.hidden);
+-        ch.pending = false;
+-    }
++    try pendingPost(e, ch);
+     try e.exact.hcMean4(e.s, ch.h, ch.taps + j * ch.cap * c.hidden * 2, c.hidden, ch.n, c.hidden);
+ }
+ 
+@@ -2480,10 +2527,7 @@ pub fn tapRows(e: *const Engine, ch: *const Chunk, j: usize) u64 {
+ pub fn head(e: *const Engine, ch: *Chunk) !void {
+     const c = e.c;
+     const n = ch.n;
+-    if (ch.pending) {
+-        try tri_basic.hcPost(e.t, ch.gm, ch.h, ch.post, ch.comb, ch.h, e.world, n, c.hidden);
+-        ch.pending = false;
+-    }
++    try pendingPost(e, ch);
+     const last_h = ch.h + (n - 1) * c.hc * c.hidden * 2;
+     const last_pre = ch.pre + (n - 1) * c.hc * 4;
+     try tri_basic.collapseNorm(e.t, last_h, last_pre, e.w.norm, ch.head_x, c.eps, 1, c.hidden);
+@@ -2510,6 +2554,15 @@ test "hd ** -0.5 as the served build passes it" {
+     try std.testing.expectEqual(@as(u32, 0x3d3504f3), @as(u32, @bitCast(scale(512))));
+ }
+ 
++test "TF_DS_PREFILL_GATHER_OVERLAP: two or more ranks, no 2D split, the series' parse" {
++    try std.testing.expectEqualStrings("TF_DS_PREFILL_GATHER_OVERLAP", gather_side_env);
++    try std.testing.expect(overlapWorks(2, false) and overlapWorks(4, false));
++    try std.testing.expect(!overlapWorks(1, false)); // a lone rank's all-gather copies its own rows
++    try std.testing.expect(!overlapWorks(2, true) and !overlapWorks(4, true)); // the 2D split's quarters post on the main stream
++    try std.testing.expect(ops.onValue("1") and ops.onValue("on"));
++    for ([_]?[]const u8{ null, "0", "off", "", "ON", "yes" }) |v| try std.testing.expect(!ops.onValue(v));
++}
++
+ /// error.NotPortedYet with its site on stderr (a request that reaches a path the port lacks names it in the log).
+ fn notPorted(src: std.builtin.SourceLocation) error{NotPortedYet} {
+     std.debug.print("{{\"not_ported\": \"{s}:{d}\"}}\n", .{ src.file, src.line });

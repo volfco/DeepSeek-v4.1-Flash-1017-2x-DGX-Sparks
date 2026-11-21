@@ -1,0 +1,100 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits 181ba7d569bb..2e3826392bc6)
+# dsv41: TF_DS_ENGRAM_SCALES=map-warm (off by default) madvises the scale mappings from a detached thread
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/engram_io.zig b/zig/src/families/dsv41/engram_io.zig
+index d421fe6cc19afc6da3c8214812c98485e2bd03c0..b8634c71b7acad1cb01c8e4955194b7f314534a7 100644
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -131,6 +131,34 @@ pub const Tables = struct {
+         return m[@intCast(base - lo)..][0..@intCast(rows * row)];
+     }
+ 
++    /// TF_DS_ENGRAM_SCALES=map-warm: a detached thread walks each scale mapping in ~64 MiB pieces with
++    /// madvise(MADV_WILLNEED), so the pages come in on the walk instead of on the first row read. Detached: model open
++    /// does not wait. Only madvise is issued, never a read, so a walk that outlives `close`'s munmap just gets ENOMEM;
++    /// the copy of the slice list is the thread's, so `close` freeing `maps` cannot leave it dangling. Non-Linux: no walk.
++    pub fn warmScales(t: *const Tables) void {
++        if (comptime builtin.os.tag != .linux) return;
++        if (t.maps.items.len == 0) return;
++        const maps = t.gpa.alloc([]align(std.heap.page_size_min) const u8, t.maps.items.len) catch return;
++        @memcpy(maps, t.maps.items);
++        const th = std.Thread.spawn(.{}, warmWalk, .{ t.gpa, maps }) catch {
++            t.gpa.free(maps);
++            return;
++        };
++        th.detach();
++    }
++
++    fn warmWalk(gpa: std.mem.Allocator, maps: []const []align(std.heap.page_size_min) const u8) void {
++        defer gpa.free(maps);
++        for (maps) |m| {
++            var at: usize = 0;
++            while (at < m.len) {
++                const n = @min(m.len - at, 64 << 20);
++                _ = std.os.linux.madvise(@constCast(m.ptr) + at, n, std.os.linux.MADV.WILLNEED);
++                at += n;
++            }
++        }
++    }
++
+     pub fn close(t: *Tables) void {
+         for (t.maps.items) |m| std.posix.munmap(m);
+         t.maps.deinit(t.gpa);
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index efc757aed52838cbb548da16bc01b60daea6dba1..d5fb510730503dc70444ffb3235b75a6d12c0f8e 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -502,11 +502,14 @@ pub const Model = struct {
+             // TF_DS_ENGRAM_TRIM=1 opens the tables for writing (prompt.trimTables); TF_DS_ENGRAM_SCALES=map maps their scales;
+             // TF_DS_ENGRAM_STRICT=1 refuses a dtype the FP8 decode would read wrong
+             const strict = prompt.strictEnabled(if (std.c.getenv("TF_DS_ENGRAM_STRICT")) |v| std.mem.span(v) else null);
++            const scales_env = if (std.c.getenv("TF_DS_ENGRAM_SCALES")) |v| std.mem.span(v) else null;
+             m.tables = try engram_io.Tables.openWith(gpa, io, edir, .{
+                 .trim = prompt.trimEnabled(if (std.c.getenv("TF_DS_ENGRAM_TRIM")) |v| std.mem.span(v) else null),
+-                .map_scales = prompt.scalesMapped(if (std.c.getenv("TF_DS_ENGRAM_SCALES")) |v| std.mem.span(v) else null),
++                .map_scales = prompt.scalesMapped(scales_env),
+                 .strict = strict,
+             });
++            // TF_DS_ENGRAM_SCALES=map-warm: madvise the scale mappings on a detached thread (Linux only); open does not wait
++            if (prompt.scalesWarm(scales_env)) engram_io.Tables.warmScales(&m.tables.?);
+             m.epool = try engram_io.Pool.init(gpa, io, 64);
+             const fast = prompt.fastEnabled(if (std.c.getenv("TF_DS_ENGRAM_FAST")) |v| std.mem.span(v) else null);
+             var hasher = engram.Hasher.init(c.*, map, mult);
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index f1a095a2cf210533f4f0eb4dc21d0cc0b22a85a5..0609d2fa8594315c78bf49c804ed8625d3d5de07 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1785,9 +1785,18 @@ pub fn dedupeIds(ids: []const i64, uniq: []i64, back: []u32, keys: []i64, vals:
+ 
+ /// TF_DS_ENGRAM_SCALES=map serves each row's E8M0 scales from a read-only mapping of the scale tensor (page-cache backed,
+ /// so it costs no resident memory the guard counts and gives the pages back under pressure) instead of a second random
+-/// 4 KiB read a row; unset or `io` reads them as before. The bytes are the same either way.
++/// 4 KiB read a row; unset or `io` reads them as before. The bytes are the same either way. `map-warm` is map plus a
++/// detached thread that madvise(MADV_WILLNEED)s the mapping in ~64 MiB pieces (Linux only; a no-op elsewhere); model open
++/// does not wait for it.
+ pub fn scalesMapped(v: ?[]const u8) bool {
+-    return std.mem.eql(u8, v orelse "io", "map");
++    const s = v orelse "io";
++    return std.mem.eql(u8, s, "map") or std.mem.eql(u8, s, "map-warm");
++}
++
++/// TF_DS_ENGRAM_SCALES=map-warm: map, plus the warm walk (see scalesMapped). Anything else (including unset and `map`)
++/// does not warm.
++pub fn scalesWarm(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse "", "map-warm");
+ }
+ 
+ /// TF_DS_ENGRAM_TRIM=1 turns the trim on (off by default: it changes the tables' files, not their bytes).
+@@ -2151,7 +2160,11 @@ test "TF_DS_ENGRAM_FAST: only 1 turns the host-side economies on" {
+ 
+ test "TF_DS_ENGRAM_SCALES: map, or everything else reads the scales" {
+     try std.testing.expect(scalesMapped("map"));
+-    for ([_]?[]const u8{ null, "", "io", "0", "1", "MAP", " map" }) |v| try std.testing.expect(!scalesMapped(v));
++    try std.testing.expect(scalesMapped("map-warm"));
++    for ([_]?[]const u8{ null, "", "io", "0", "1", "MAP", " map", "mapwarm", "map-Warm" }) |v| try std.testing.expect(!scalesMapped(v));
++    // map-warm is map plus the warm walk; plain map does not warm
++    try std.testing.expect(scalesWarm("map-warm"));
++    for ([_]?[]const u8{ null, "", "io", "map", "MAP-WARM", "map -warm" }) |v| try std.testing.expect(!scalesWarm(v));
+ }
+ 
+ test "TF_DS_ENGRAM_TRIM: only 1 turns it on" {

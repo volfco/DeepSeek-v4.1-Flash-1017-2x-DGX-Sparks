@@ -1,0 +1,293 @@
+From b2833bea1f2d5dc03fb898eeb86544050a74f418 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Sun, 15 Nov 2026 13:01:30 -0800
+Subject: [PATCH 5/6] dsv41: TF_DS_FUSED_COMPRESS2 (off by default) runs the
+ ratio-2 compressor chain in one kernel - scatterRows x2, the dead memset,
+ gatherRows x2 and compress2
+
+Switch: TF_DS_FUSED_COMPRESS2 ("1" or "on"; anything else or unset: off). Read once, at Round.init, the same way TF_DS_COMPRESS_SIDE is read (set alike on both ranks; no fingerprint bit, no switches bit: no frames). At the four ratio-2 KV-source layers the chain
+
+  scatterRows(ckv -> raw_kv[rslot]) + scatterRows(cgate -> raw_score[rslot]) + cuMemsetD8Async(ch.invalid)
+  + gatherRows(raw_kv -> kvg, idx gi, 2R rows) + gatherRows(raw_score -> sg) + compress2(kvg, sg -> lat2)
+
+(6 launches a layer, ~24 a round) becomes one tf_ds_compress2x_kernel launch (grid.x = R, one block a group, 256 threads), followed as before by the Triton RMSNorm into rd.lat (outside the fusion, unchanged).
+
+Why bit-identical. The kernel performs the same reads from the same bytes in the same order: (1) phase 1 copies this round's rows ckv[g]/cgate[g] to the ring at rslot[g] - the same bytes scatterRows copies (uint4 when aligned, scalar otherwise); (2) for each partner gi of the group, it reads either the ring row (a partner scattered in a PREVIOUS round - visible, the previous rounds' kernels completed) or, for a partner scattered in THIS round by ANOTHER block of this same launch, the round's own ckv/cgate row r' with rslot[r'] == gi - byte-identical to what the scatter copied, which is what the base path's gather would return. A drafted verify window holds a slot's consecutive rows (1 + held + tokens), so an even/odd pair of the same slot commonly sits in one launch and __syncthreads() does NOT order across blocks; the resolution runs on thread 0 at the top of the block into shared memory (block-uniform, R <= 48 int64 compares; the GI argument is compared against rslot, not pos, because both sides are slot*raw + (x mod raw) and must agree modulo the ring wrap exactly as the ring would). Partners of this round never touch the ring; partners not of this round only touch the ring; no block ever reads this-round ring bytes, so the launch is self-consistent with no grid sync. The compress2 arithmetic is compress2's verbatim, per channel: the pair softmax with the maximum, sum of exp(s - m) from 0 in order, fdiv_rn of expf, the products fmul_rn, and the pair's sum as reduce_kernel's thread_reduce_impl adds it (two used of four accumulators from 0, combined in order), rounded float2bfloat16_rn. The ch.invalid memset is dropped on this path only: the flag is write-only everywhere on it (gatherRows writes 1 on out-of-range; nothing reads it, tree-wide - the flag exists for prompt.zig's fill path, which this patch does not touch); the kernel still writes 1 to it if a partner is out of range (gatherRows parity, still unread), and zero-fills that partner's row instead of leaving the base path's stale kvg/sg bytes - deterministic, and unreachable in this family (gi comes from the same glue as rslot; a match resolves to ckv anyway).
+
+The cross-block race was found in review of the first draft of this patch (single __syncthreads(), partners read the ring directly): on every drafted verify round with an even/odd pair in one window - i.e. effectively all of them - an odd row's partner could be read from the ring before the even row's block wrote it, and odd p rows commit to the real compressed target (only even p writes the scratch), so the bytes would have differed from the base path. Fixed by the rslot resolution above; the review's rejection is worth more than the kernel is.
+
+Both launch paths share the choice: compressorChain (round.zig) selects fused vs unfused at ratio 2 by rd.fused_compress2, so TF_DS_COMPRESS_SIDE's forked chain gets the same treatment as the inline path. The RMSNorm after stays outside and on the same stream/Tri.
+
+Bits: identical (same reads, same order, same arithmetic; the only intentional difference is the dead flag's memset is gone on this path and the unreachable out-of-range partner yields zeros instead of stale bytes). Expected on the pair: exact.py IDENTICAL; the gain, if any, is launch overhead at the 4 ratio-2 layers (~20 launches a round off) - the eager phase profile (tf-dsv41-lanes --profile 2) decides whether that is worth anything; if the gathers and the experts own the round (16/31 ms of 34/56 ms eager), stop here and keep the switch off (but harmless).
+
+.cu compile: none on this host (no nvcc): the new kernel passed a syntax-only check with clang++ against a plain-C++ stub of cuda_runtime/cuda_bf16 (rc 0, no diagnostics); the image's nvcc on the Sparks is the first real compile. Host gates: `zig build test` (one reported spurious "failed command" on this host - the pre-existing flaky KV-shard binary; it and every .zig-cache/o test binary pass standalone, 408/408 in the family suite), and `zig build install native -Dfatbins=/home/colum/.cache/tf-dummy-fatbins` succeeds (the CUDA path type-checks; the .cu itself is not compiled here).
+
+Not run here: any pair, any smoke, exact.py.
+
+base: series-0119 (TF_REF fbbc971 + zig/patches 0001-0122) + 0123 + 0124 + 0125 + 0126
+---
+ zig/kernels/cuda/dsv41_torch.cu   | 105 ++++++++++++++++++++++++++++++
+ zig/src/families/dsv41/exact.zig  |  31 +++++++++
+ zig/src/families/dsv41/native.zig |   1 +
+ zig/src/families/dsv41/round.zig  |  40 ++++++++----
+ 4 files changed, 166 insertions(+), 11 deletions(-)
+
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index a336ef9..304439a 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -105,6 +105,111 @@ extern "C" __global__ void tf_ds_compress2_kernel(const float* kv, const float*
+     }
+ }
+ 
++// _compress at ratio 2 fused with its positional-store round trip (TF_DS_FUSED_COMPRESS2): the rows scattered to the
++// raw slots, the pair's rows back, and the pair's softmax-weighted sum to bf16 — scatterRows x2 + cuMemsetD8Async +
++// gatherRows x2 + compress2 in one launch (the RMSNorm after it stays outside). Grid.x = G (one group a block, 256
++// threads, no grid-stride).
++// The store is the ring itself (no kvg/sg roundtrip): phase 1 copies this round's rows ckv/cgate[g] to
++// ring_kv/ring_score[rslot[g]] (byte copies, like scatterRows), then __syncthreads() with phase 2. A partner scattered
++// in a PREVIOUS round reads the ring; a partner scattered THIS round by ANOTHER block of this launch (a drafted verify
++// window holds a slot's consecutive rows, an even/odd pair among them) is NOT ordered for this block by __syncthreads,
++// so thread 0 resolves each partner gi against rslot[0..G) at the top of the block: a match means that partner is this
++// round's own ckv/cgate row r' — the scatter copies those bytes verbatim, so reading them directly is byte-identical to
++// the ring bytes the base path's gather would return — and phase 2 reads them instead of the ring. Only partners not of
++// this round read the ring, and no block reads this-round ring bytes, so the sync carries the shared resolution handoff
++// (kept also as the honest fence). rslot values are unique within a round (max_rows 48 < raw_rows 64). gi is compared
++// against rslot, not pos: both sides are slot*raw + (x mod raw) and must agree modulo the ring wrap, exactly as the ring would.
++// Out-of-range partners (gi < 0 or gi >= src_rows; unreachable in this family — gi comes from the same glue as rslot, and
++// a match there resolves to ckv anyway) set the caller's dead u32 flag = 1 and zero that partner's row: deterministic,
++// and unlike the base path (which would leave stale kvg/sg bytes for that row) it cannot leak garbage into the output. The compress2 arithmetic below is compress2's verbatim, with kv/score addressed by gi
++// (or by the resolved row) in place of kv[(g*2)*C + c].
++extern "C" __global__ void __launch_bounds__(256) tf_ds_compress2x_kernel(const float* ckv, long long ckv_ld,
++                                                                          const float* cgate, long long cgate_ld,
++                                                                          const long long* rslot,
++                                                                          float* ring_kv,
++                                                                          float* ring_score,
++                                                                          const long long* gi, long long src_rows,
++                                                                          __nv_bfloat16* out, long long out_ld,
++                                                                          int G, int C,
++                                                                          unsigned* invalid, int pdl) {
++    pdl_enter(pdl);
++    const int g = blockIdx.x;
++    // phase 1: scatter this round's rows to the raw slots (byte copies, like scatterRows: uint4 when aligned, else scalar)
++    {
++        const long long dst = rslot[g] * (long long)C;
++        const float* s = ckv + (long long)g * ckv_ld;
++        float* d = ring_kv + dst;
++        if (((C & 3) == 0) && ((((uintptr_t)s | (uintptr_t)d) & 15) == 0)) {
++            const uint4* s4 = (const uint4*)s;
++            uint4* d4 = (uint4*)d;
++            for (int j = threadIdx.x; j < C / 4; j += blockDim.x) d4[j] = s4[j];
++        } else {
++            for (int j = threadIdx.x; j < C; j += blockDim.x) d[j] = s[j];
++        }
++        const float* sg = cgate + (long long)g * cgate_ld;
++        float* dg = ring_score + dst;
++        if (((C & 3) == 0) && ((((uintptr_t)sg | (uintptr_t)dg) & 15) == 0)) {
++            const uint4* s4 = (const uint4*)sg;
++            uint4* d4 = (uint4*)dg;
++            for (int j = threadIdx.x; j < C / 4; j += blockDim.x) d4[j] = s4[j];
++        } else {
++            for (int j = threadIdx.x; j < C; j += blockDim.x) dg[j] = sg[j];
++        }
++    }
++    // phase 2: resolve both partners against this round's rows (thread 0; block-uniform): partner_row[i] = the round
++    // row r' with rslot[r'] == gi[2g+i], or -1 for a row the ring already holds
++    __shared__ int partner_row[2];
++    if (threadIdx.x == 0) {
++        for (int i = 0; i < 2; i++) {
++            const long long want = gi[2 * g + i];
++            int found = -1;
++            for (int r = 0; r < G; r++) {
++                if (rslot[r] == want) { found = r; break; }
++            }
++            partner_row[i] = found;
++        }
++    }
++    __syncthreads();
++    const long long gi0 = gi[2 * g], gi1 = gi[2 * g + 1];
++    const bool ok0 = gi0 >= 0 && gi0 < src_rows;
++    const bool ok1 = gi1 >= 0 && gi1 < src_rows;
++    if (!(ok0 && ok1)) {
++        if (threadIdx.x == 0 && invalid) *invalid = 1u;
++    }
++    for (int c = threadIdx.x; c < C; c += blockDim.x) {
++        float kv[2], score[2];
++        for (int i = 0; i < 2; i++) {
++            const long long q = i == 0 ? gi0 : gi1;
++            const bool ok = i == 0 ? ok0 : ok1;
++            if (!ok) { kv[i] = 0.f; score[i] = 0.f; continue; }
++            const int pr = partner_row[i];
++            if (pr >= 0) {
++                kv[i] = ckv[(long long)pr * ckv_ld + c];
++                score[i] = cgate[(long long)pr * cgate_ld + c];
++            } else {
++                kv[i] = ring_kv[q * (long long)C + c];
++                score[i] = ring_score[q * (long long)C + c];
++            }
++        }
++        // tf_ds_compress2_kernel's arithmetic, verbatim, per channel
++        const float s0 = score[0], s1 = score[1];
++        float m = -3.402823466e+38f;   // numeric_limits<float>::lowest()
++        m = m < s0 ? s0 : m;
++        m = m < s1 ? s1 : m;
++        float sum = 0.f;
++        sum = __fadd_rn(sum, expf(__fsub_rn(s0, m)));
++        sum = __fadd_rn(sum, expf(__fsub_rn(s1, m)));
++        const float p0 = __fdiv_rn(expf(__fsub_rn(s0, m)), sum);
++        const float p1 = __fdiv_rn(expf(__fsub_rn(s1, m)), sum);
++        const float y0 = __fmul_rn(kv[0], p0);
++        const float y1 = __fmul_rn(kv[1], p1);
++        float t = __fadd_rn(__fadd_rn(0.f, y0), __fadd_rn(0.f, y1));
++        t = __fadd_rn(t, 0.f);
++        t = __fadd_rn(t, 0.f);
++        out[(long long)g * out_ld + c] = __float2bfloat16_rn(t);
++    }
++}
++
+ // ops.rope_(x[..., off : off + 2 * half], f) of n rows (bf16, row stride ldx), in place: (a + b i)(c + d i), d negated
+ // for the inverse (f.conj()), each part rounded to bf16. f = complex(cos, sin) at table row pos[r] (fp32 [*, half]).
+ // torch's complex<float> multiply is a*c - b*d, a*d + b*c, and its CUDA build contracts each into one fused
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index 545deee..e3979c0 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -30,6 +30,7 @@ pub const Exact = struct {
+     module: cuda.Module,
+     k_rms_norm: cuda.Function,
+     k_compress2: cuda.Function,
++    k_compress2x: cuda.Function,
+     k_rope: cuda.Function,
+     k_bf16_scale: cuda.Function,
+     k_hc_mean4: cuda.Function,
+@@ -45,6 +46,7 @@ pub const Exact = struct {
+             .pdl = pdl,
+             .k_rms_norm = try m.function("tf_ds_rms_norm_kernel"),
+             .k_compress2 = try m.function("tf_ds_compress2_kernel"),
++            .k_compress2x = try m.function("tf_ds_compress2x_kernel"),
+             .k_rope = try m.function("tf_ds_rope_kernel"),
+             .k_bf16_scale = try m.function("tf_ds_bf16_scale_kernel"),
+             .k_hc_mean4 = try m.function("tf_ds_hc_mean4_kernel"),
+@@ -93,6 +95,35 @@ pub const Exact = struct {
+         try cuda.launch.launch(e.k_compress2, .{ .grid = .{ .x = @min(4096, blocks(g * c, 256)) }, .block = .{ .x = 256 }, .pdl = e.pdl }, s, &a);
+     }
+ 
++    /// TF_DS_FUSED_COMPRESS2's fused ratio-2 chain (zig/kernels/cuda/dsv41_torch.cu, tf_ds_compress2x_kernel): the
++    /// scatter of the round's rows into the positional store's raw slots, the pair's rows back and compress2's pair
++    /// sum, in one launch (grid.x = g, block 256). LDs in ELEMENTS of the buffer's dtype (ckv/cgate/ring: fp32; out
++    /// (rd.lat2): bf16); the ring's rows are `c` floats; src_rows in rows. Partners scattered this round by another
++    /// block of the launch (a drafted verify window holds a slot's consecutive rows) are resolved against rslot by
++    /// the kernel and read from ckv/cgate directly — byte-identical to the ring bytes the base path's gather would
++    /// return; partners not of this round read the ring. The ch.invalid memset stays out of this path (the flag is
++    /// dead: no reader tree-wide; the kernel still writes 1 to it if a partner is out of range, gatherRows parity).
++    pub fn compress2x(e: *const Exact, s: cuda.Stream, ckv: u64, ckv_ld: usize, cgate: u64, cgate_ld: usize, rslot: u64, ring_kv: u64, ring_score: u64, gi: u64, src_rows: usize, out: u64, out_ld: usize, g: usize, c: usize, invalid: u64) !void {
++        if (g == 0) return;
++        var a: cuda.Args = .{};
++        a.add(ckv);
++        a.add(@as(c_longlong, @intCast(ckv_ld)));
++        a.add(cgate);
++        a.add(@as(c_longlong, @intCast(cgate_ld)));
++        a.add(rslot);
++        a.add(ring_kv);
++        a.add(ring_score);
++        a.add(gi);
++        a.add(@as(c_longlong, @intCast(src_rows)));
++        a.add(out);
++        a.add(@as(c_longlong, @intCast(out_ld)));
++        a.add(@as(c_int, @intCast(g)));
++        a.add(@as(c_int, @intCast(c)));
++        a.add(invalid);
++        a.add(@as(c_int, @intFromBool(e.pdl)));
++        try cuda.launch.launch(e.k_compress2x, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = 256 }, .pdl = e.pdl }, s, &a);
++    }
++
+     /// ops.rope_(x[..., off : off + 2 * half], complex(cos, sin)[pos]) of n rows of x bf16 (row stride ldx), in place;
+     /// `inverse` rotates back (f.conj()).
+     pub fn rope(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, off: usize, cos: u64, sin: u64, pos: u64, n: usize, half: usize, inverse: bool) !void {
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 711c504..bb7cfcb 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -42,6 +42,7 @@
+ //!   TF_DS_L2_PREFETCH=1                         the paced L2 prefetch of the next kernels' weights
+ //!   TF_DS_PDL=1                            the hand-written kernels launch with programmatic dependent launches (griddepcontrol.wait + launch_dependents at every kernel's entry, the attribute on every launch of these kernels); both ranks, read at load via ops/exact; launch-timing only, bits identical (not TF_RDMA_PDL / not TF_DS_TRITON_PDL; changes no frames, no bytes, so the pair may run mixed ranks bit-identically, though setting it alike on both is the convention); no fingerprint bit, no switches bit
+ //!   TF_DS_COMPRESS_SIDE=1                       the compressor chain (ratio 1/2) on a stream of its own (set alike on both ranks), forked behind the input linears and joined before the indexer select block; a reorder of independent launches, so the bytes are the same; off: nothing changes
++//!   TF_DS_FUSED_COMPRESS2=1                       the ratio-2 compressor chain in one kernel (the rows scattered to the raw slots, the pair's rows back and compress2's sum; the ch.invalid memset dropped — the flag is dead on this path); both ranks, at Round init; off: nothing changes (the chain is the 6 launches + the RMSNorm); bits identical
+ //!   TF_DS_ENGRAM_AIO=1                          a round's Engram reads by Linux AIO on O_DIRECT
+ //!   TF_DS_PREFILL_SLICE=<layers>                (rank 0; with TF_DS_PREFILL_INTERLEAVE_MS) a prompt chunk runs this many layers
+ //!                                               (1 .. 40) at a time and one decode round runs between slices, so the decoding
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 6d2c1f6..8892670 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -212,6 +212,7 @@ pub const Round = struct {
+     cs_join: ?cuda.Event = null,
+     cs_out: bool = false,
+     compress_side: bool = false, // TF_DS_COMPRESS_SIDE (read at Round.init; set alike on both ranks)
++    fused_compress2: bool = false, // TF_DS_FUSED_COMPRESS2 (read at Round.init; set alike on both ranks)
+     timer: ?*PhaseTimer = null, // eager rounds' GPU time by phase (a profile)
+     // a profile's GPU clocks a round (Model.useClock): at the forward's start, then before and after each stretch
+     // a profile's kernel launches by the phase they end in (eager rounds: in a graph only its capture launches)
+@@ -445,6 +446,11 @@ pub const Round = struct {
+             rd.compress_side = true;
+             try rd.useCompress(e);
+         };
++        rd.fused_compress2 = false;
++        if (getenv("TF_DS_FUSED_COMPRESS2")) |v| if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "on")) {
++            // one launch for the ratio-2 chain (no device resources of its own; read once, here, like the side switch)
++            rd.fused_compress2 = true;
++        };
+         rd.timer = null;
+         return rd;
+     }
+@@ -863,9 +869,12 @@ fn ropeOf(e: *const Engine, lay: weights.Layer) prompt.Rope {
+ 
+ /// The compressor's chain (a compressed layer): the RMSNorm alone at ratio 1; at ratio 2 the scatter of the rows
+ /// into the group's raw slots, the memset of ch.invalid, the double gather back, compress2's
+-/// weighted sum to bf16, the RMSNorm. One copy of the launches, run on `t`/`s`: the unforked path passes the main
+-/// stream, the forked (TF_DS_COMPRESS_SIDE) path the chain's own (every launch rides `s`: the kit's through the
+-/// stream-carrying Tri `t`, the ops and the memset through `s` directly, so the event ordering is total).
++/// weighted sum to bf16, the RMSNorm — or, at ratio 2 with TF_DS_FUSED_COMPRESS2=1 (set alike on both ranks), the
++/// scatter+gather+compress2 as one fused kernel launch (exact.compress2x; the memset stays out, its flag is dead).
++/// One copy of the launches, run on `t`/`s`: the unforked path passes the main stream, the forked
++/// (TF_DS_COMPRESS_SIDE) path the chain's own (every launch rides `s`: the kit's through the stream-carrying Tri
++/// `t`, the ops and the memset through `s` directly, so the event ordering is total). Both paths take the same
++/// fused-or-unfused choice (rd.fused_compress2), so the side-stream path gets it too.
+ fn compressorChain(e: *const Engine, rd: *const Round, ch: *const Chunk, t: tri.Tri, s: cuda.Stream, caches: *const Caches, li: usize, ratio: usize) !void {
+     const lay = e.w.layers[li];
+     const c = e.c;
+@@ -876,14 +885,23 @@ fn compressorChain(e: *const Engine, rd: *const Round, ch: *const Chunk, t: tri.
+         return;
+     }
+     if (ratio == 2) {
+-        // rk[rslot] = kv, rs[rslot] = score; the group's two rows back (rk[gi], rs[gi]); the pair's softmax-
+-        // weighted sum to bf16 (torch's ops: exact.compress2's bytes), then the RMSNorm (Triton's)
+-        try e.ops.scatterRows(s, rd.ckv, hd * 4, rd.g(.rslot), caches.raw_kv[li], hd * 4, hd * 4, R);
+-        try e.ops.scatterRows(s, rd.cgate, hd * 4, rd.g(.rslot), caches.raw_score[li], hd * 4, hd * 4, R);
+-        try e.d.check(e.d.api.cuMemsetD8Async(ch.invalid, 0, 4, s.handle), "cuMemsetD8Async");
+-        try e.ops.gatherRows(s, caches.raw_kv[li], caches.slots * raw_rows, rd.g(.gi), rd.kvg, hd * 4, 2 * R, ch.invalid);
+-        try e.ops.gatherRows(s, caches.raw_score[li], caches.slots * raw_rows, rd.g(.gi), rd.sg, hd * 4, 2 * R, ch.invalid);
+-        try e.exact.compress2(s, rd.kvg, rd.sg, rd.lat2, R, hd);
++        if (rd.fused_compress2) {
++            // TF_DS_FUSED_COMPRESS2: the scatter of the rows into the raw slots, the pair's rows back and compress2's
++            // weighted sum in one launch (LDs in elements of the buffer's dtype; the memset stays out — ch.invalid's
++            // flag is dead on this path: written by gatherRows, read nowhere, tree-wide; the kernel still writes 1 to
++            // it were a partner out of range, like gatherRows). LDs here: ckv/cgate rows hd floats, the ring's rows hd
++            // floats (src_rows rows), rd.lat2 rows hd bf16 elements.
++            try e.exact.compress2x(s, rd.ckv, hd, rd.cgate, hd, rd.g(.rslot), caches.raw_kv[li], caches.raw_score[li], rd.g(.gi), caches.slots * raw_rows, rd.lat2, hd, R, hd, ch.invalid);
++        } else {
++            // rk[rslot] = kv, rs[rslot] = score; the group's two rows back (rk[gi], rs[gi]); the pair's softmax-
++            // weighted sum to bf16 (torch's ops: exact.compress2's bytes), then the RMSNorm (Triton's)
++            try e.ops.scatterRows(s, rd.ckv, hd * 4, rd.g(.rslot), caches.raw_kv[li], hd * 4, hd * 4, R);
++            try e.ops.scatterRows(s, rd.cgate, hd * 4, rd.g(.rslot), caches.raw_score[li], hd * 4, hd * 4, R);
++            try e.d.check(e.d.api.cuMemsetD8Async(ch.invalid, 0, 4, s.handle), "cuMemsetD8Async");
++            try e.ops.gatherRows(s, caches.raw_kv[li], caches.slots * raw_rows, rd.g(.gi), rd.kvg, hd * 4, 2 * R, ch.invalid);
++            try e.ops.gatherRows(s, caches.raw_score[li], caches.slots * raw_rows, rd.g(.gi), rd.sg, hd * 4, 2 * R, ch.invalid);
++            try e.exact.compress2(s, rd.kvg, rd.sg, rd.lat2, R, hd);
++        }
+         try tri_basic.rmsnorm(t, rd.lat2, hd, lay.comp_norm, rd.lat, hd, c.eps, R, hd);
+         return;
+     }
+-- 
+2.56.0
+

@@ -1,0 +1,205 @@
+# port-patches.sh: bench-prep @ 44b2cbb76857 over decode-step-structure @ 181ba7d569bb (commits fdee78de9438..d221052477d5)
+# dsv41: W10-c core.RehashMap rehashes an AutoHashMapUnmanaged once its removals reach a quarter of capacity - applied to the spill tier's points and the Engram AIO's batches (the token cache's 0119 fix, for every auto-hashed map)
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/core/rehash_map.zig b/zig/src/core/rehash_map.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b2a3d6e9b75964fc4a581fbab5ea604b0af0c85
+--- /dev/null
++++ b/zig/src/core/rehash_map.zig
+@@ -0,0 +1,121 @@
++//! AutoHashMapUnmanaged that rehashes once its removals reach a quarter of capacity. std's map marks a removal with
++//! a tombstone and only `rehash()` drops it, so a long-lived map with steady insert/remove churn probes ever-longer
++//! tombstone chains - the insert, lookup and delete pattern 0119 fixed in the token cache (core/tokenizer/cache.zig).
++//! This is that fix for any AutoHashMapUnmanaged. rehash() moves entries, so a removal that rehashes invalidates
++//! pointers into the map (as does a grow); callers must not hold one across a removal.
++const std = @import("std");
++const Allocator = std.mem.Allocator;
++
++pub fn RehashMap(comptime K: type, comptime V: type) type {
++    return struct {
++        map: std.AutoHashMapUnmanaged(K, V) = .empty,
++        removed: usize = 0, // removals since the last rehash (a grow rehashes too, so this may overstate: rehashing early is safe)
++        rehashes: usize = 0, // rehashes so far (the test reads it)
++
++        const Self = @This();
++        const Map = std.AutoHashMapUnmanaged(K, V);
++        pub const KV = Map.KV;
++        pub const Size = Map.Size;
++        /// `.empty`, as std's maps (the `= .empty` default keeps this for completeness).
++        pub const empty: Self = .{};
++
++        pub fn deinit(self: *Self, gpa: Allocator) void {
++            self.map.deinit(gpa);
++            self.* = undefined;
++        }
++        pub fn count(self: Self) Size {
++            return self.map.count();
++        }
++        pub fn capacity(self: Self) Size {
++            return self.map.capacity();
++        }
++        pub fn valueIterator(self: Self) Map.ValueIterator {
++            return self.map.valueIterator();
++        }
++        pub fn get(self: Self, key: K) ?V {
++            return self.map.get(key);
++        }
++        pub fn getPtr(self: *Self, key: K) ?*V {
++            return self.map.getPtr(key);
++        }
++        pub fn getOrPut(self: *Self, gpa: Allocator, key: K) Allocator.Error!Map.GetOrPutResult {
++            return self.map.getOrPut(gpa, key);
++        }
++        pub fn put(self: *Self, gpa: Allocator, key: K, value: V) Allocator.Error!void {
++            return self.map.put(gpa, key, value);
++        }
++        pub fn putAssumeCapacity(self: *Self, key: K, value: V) void {
++            self.map.putAssumeCapacity(key, value);
++        }
++        pub fn ensureUnusedCapacity(self: *Self, gpa: Allocator, additional: Size) Allocator.Error!void {
++            return self.map.ensureUnusedCapacity(gpa, additional);
++        }
++        pub fn remove(self: *Self, key: K) bool {
++            if (!self.map.remove(key)) return false;
++            self.noteRemoval();
++            return true;
++        }
++
++        pub fn fetchRemove(self: *Self, key: K) ?KV {
++            const kv = self.map.fetchRemove(key) orelse return null;
++            self.noteRemoval();
++            return kv;
++        }
++
++        fn noteRemoval(self: *Self) void {
++            self.removed += 1;
++            const cap = self.map.capacity();
++            if (cap >= 4 and self.removed >= cap / 4) { // a quarter of the slots are stale: rehash, drop every tombstone
++                self.map.rehash(std.hash_map.AutoContext(K){});
++                self.removed = 0;
++                self.rehashes += 1;
++            }
++        }
++    };
++}
++
++test "churn: insert/remove cycles stay correct and removals stay under a quarter of capacity" {
++    const gpa = std.testing.allocator;
++    // the threshold is exact: a quarter of capacity removed rehashes, one fewer does not (tombstones themselves are not
++    // observable through std's API, so the counter and the threshold are what a test can hold)
++    {
++        var t: RehashMap(u64, u64) = .empty;
++        defer t.deinit(gpa);
++        try t.ensureUnusedCapacity(gpa, 64);
++        for (0..64) |i| t.putAssumeCapacity(@intCast(i), @intCast(i));
++        const quarter = t.capacity() / 4;
++        try std.testing.expect(quarter >= 2);
++        for (0..quarter - 1) |i| _ = t.remove(@intCast(i));
++        try std.testing.expectEqual(@as(usize, 0), t.rehashes); // not yet
++        _ = t.remove(@intCast(quarter - 1));
++        try std.testing.expectEqual(@as(usize, 1), t.rehashes); // a quarter of the slots are stale: dropped
++        try std.testing.expectEqual(@as(usize, 0), t.removed);
++        try std.testing.expectEqual(@as(usize, 64 - quarter), t.count());
++    }
++    var m: RehashMap(u64, u64) = .empty;
++    defer m.deinit(gpa);
++    // many rounds of fill, then delete half, then look the rest up: a wide high-water mark with steady churn,
++    // the pattern that leaves plain AutoHashMapUnmanaged probing tombstones
++    for (0..30) |round| {
++        for (0..128) |i| try m.put(gpa, @intCast(round * 1000 + i), @intCast(round * 1000 + i));
++        for (0..128) |i| {
++            if (i % 2 == 0) try std.testing.expect(m.remove(@intCast(round * 1000 + i)));
++        }
++        // the invariant: tombstones never reach a quarter of capacity (the rehash resets the count)
++        const cap = m.capacity();
++        try std.testing.expect(m.removed == 0 or m.removed < cap / 4);
++        for (0..128) |i| {
++            if (i % 2 == 1) try std.testing.expectEqual(@as(?u64, @intCast(round * 1000 + i)), m.get(@intCast(round * 1000 + i)));
++        }
++        for (0..128) |i| {
++            if (i % 2 == 0) try std.testing.expect(m.get(@intCast(round * 1000 + i)) == null);
++        }
++        for (0..128) |i| {
++            if (i % 2 == 1) _ = m.remove(@intCast(round * 1000 + i));
++        }
++    }
++    // 30 rounds x 128 removals = 3840 removals with never more than 128 live: rehashing kept tombstones (and so probe
++    // chains) bounded the whole time
++    try std.testing.expect(m.rehashes >= 4);
++    try std.testing.expectEqual(@as(usize, 0), m.count());
++}
+diff --git a/zig/src/core/root.zig b/zig/src/core/root.zig
+index 7b5ed03a4ebe49953b50e288e5b635ee1077833d..867df9264d4ca618e5d641e16b2ae4e0b459cacf 100644
+--- a/zig/src/core/root.zig
++++ b/zig/src/core/root.zig
+@@ -6,6 +6,7 @@ pub const direct_io = @import("direct_io.zig");
+ pub const Checkpoint = checkpoint.Checkpoint;
+ pub const draft_depth = @import("draft_depth.zig");
+ pub const CopyIndex = @import("copy_index.zig").CopyIndex;
++pub const RehashMap = @import("rehash_map.zig").RehashMap;
+ pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
+ pub const ids_json = @import("ids_json.zig");
+ pub const spill = @import("spill/root.zig"); // wojo's GLM 0088/0110 spill v2 store (off unless a caller opens one)
+@@ -16,6 +17,7 @@ test {
+     _ = direct_io;
+     _ = draft_depth;
+     _ = @import("copy_index.zig");
++    _ = @import("rehash_map.zig");
+     _ = ids_json;
+     _ = spill;
+ }
+diff --git a/zig/src/families/dsv41/engram_aio.zig b/zig/src/families/dsv41/engram_aio.zig
+index a67dd6eb90b76c331153390852c08bea1939c54d..60cc4cebe153df7b34a9e85d81add2b633162070 100644
+--- a/zig/src/families/dsv41/engram_aio.zig
++++ b/zig/src/families/dsv41/engram_aio.zig
+@@ -8,6 +8,7 @@
+ const std = @import("std");
+ const linux = std.os.linux;
+ const engram_io = @import("engram_io.zig");
++const core = @import("core");
+ 
+ pub const block = 4096;
+ /// A read's slot: a row's span is at most two blocks (rows are far smaller than a block).
+@@ -80,7 +81,9 @@ pub const Aio = struct {
+     slots: usize,
+     head: u64 = 0, // reads issued so far (slot = index % slots)
+     next_id: u64 = 1,
+-    batches: std.AutoHashMapUnmanaged(u64, Batch) = .empty,
++    // 0138/W10-c: a batch is inserted and removed per Engram read, and the table never shrinks from its high-water
++    // mark, so its tombstones rehash at a quarter of capacity (0119's fix, core/rehash_map.zig)
++    batches: core.RehashMap(u64, Batch) = .empty,
+     live: std.ArrayList([2]u64) = .empty, // (batch id, first read) in issue order
+     mutex: std.Io.Mutex = .init,
+     /// TF_DS_ENGRAM_ROWCACHE_MB's row cache (null: off), consulted at `start` and filled at `wait`.
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index c147b2d32809dbca3f80e132dc0fcdc54fc4c2ab..f60ef990108117c6a5d637b84ba9623ffdcd5727 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -648,6 +648,8 @@ pub const Lanes = struct {
+     vision: ?*@import("vision.zig").Vision = null, // rank 0's tower (a vision checkpoint served with its kit's vision/)
+     step: u64 = 0,
+     wire: Wire = .{},
++    // 0138/W10-c: std's map kept - Model.open refuses more than max_streams (16, model.zig:258) and a new stream needs a
++    // free slot of those, so the table is 32 slots at worst: 32 probes, not the unbounded chain 0138 is about
+     streams: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
+     // TF_DS_SPEC_SAMPLE: the last drafter pass's streams in its row order and its number (a lane's held drafts carry
+     // the pass they came from: a stale one is not speculated)
+diff --git a/zig/src/families/dsv41/spill_tier.zig b/zig/src/families/dsv41/spill_tier.zig
+index 6d324af11642498de2a2d35307d1175e9c9b9924..56b9906b71ccf246a8cf9b928ed665028951d348 100644
+--- a/zig/src/families/dsv41/spill_tier.zig
++++ b/zig/src/families/dsv41/spill_tier.zig
+@@ -955,9 +955,13 @@ pub fn Leader(comptime Dev: type) type {
+         pictures_refused: u64 = 0, // keeps and lookups with pictures turned away (their ids and media disagree, or image cache off)
+         max_restores: u32, // restores in flight at most (Settings.restores, the store's reads; <= rank_wire.max_restores)
+         flush_ms: u32,
++        // 0138/W10-c: std's map kept - `jobs` is capped at max_restores (16: clamped in create, rank_wire.max_restores),
++        // so its table is 32 slots at worst and a fully tombstoned probe there is 32 slots, not an unbounded chain
+         jobs: std.AutoHashMapUnmanaged(u64, *Job) = .empty,
+         next_job: u64 = 1,
+-        points: std.AutoHashMapUnmanaged(u64, PointRef) = .empty,
++        // 0138/W10-c: a keep inserts and a forget/drop removes, on a table that lives as long as the store: tombstones
++        // rehash at a quarter of capacity (0119's fix, core/rehash_map.zig)
++        points: core.RehashMap(u64, PointRef) = .empty,
+         noted: std.AutoHashMapUnmanaged(u64, Noted) = .empty, // kept states the followers write too (by Snap.id)
+         fwd: std.AutoHashMapUnmanaged(u64, [16]u8) = .empty, // lineage names: the cache's u64s to the store's
+         rev: std.AutoHashMapUnmanaged([16]u8, u64) = .empty,

@@ -1,0 +1,122 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits c6ea93d07ba5..ce4ea5475e2e)
+# dsv41: TF_DS_TAIL_BATCH=N (off by default, M7's first slice) computes a warm tail's new rows only on a full end state - and names the batching step's design
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index d460b9cee75b3cca9f0983c56547812d25f84561..51deb18c8b13c77624e2cebb3eedebf73a8a883f 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -599,8 +599,9 @@ pub const Snap = struct {
+     // TF_DS_EXACT_RESUME: an off-grid state's tail, the window rows of decoder input before `at` (the ring by position)
+     tail: ?cuda.DeviceBuffer = null,
+     // 0178 (TF_DS_PROMPT_ENDSTATE): a full end state's extras - the drafter stages' rows for the slot and head_g
+-    // (null: not an end state)
++    // (null: not an end state; is_end mirrors it for the policy, which a test can hold)
+     end_buf: ?cuda.DeviceBuffer = null,
++    is_end: bool = false,
+     tail_start: usize = 0, // the positions its tail holds, [tail_start, tail_end)
+     tail_end: usize = 0,
+ };
+@@ -1827,8 +1828,12 @@ fn chunkRows(start: usize, len: usize) usize {
+         if (std.mem.indexOfScalar(*Snap, self.snaps.items, @constCast(sn)) == null) return false;
+         if (self.kv) |k| if (k.planner.keptIndex(sn.id) == null) return false; // (TF_DS_KV_SHARD: its rows the planner holds)
+         if (sn.stale or sn.loading or sn.at == 0) return false;
+-        if (sn.at == len) return sn.end_buf != null; // (0178: an identical resent prompt's full end state: zero rows)
++        if (sn.at == len) return sn.is_end; // (0178: an identical resent prompt's full end state: zero rows)
+         if (sn.at > len) return false;
++        // 0180 (TF_DS_TAIL_BATCH): an end state continues a longer prompt too - its rings hold the window, so the
++        // pass computes the new rows only (today's states keep no complete rings and every warm pass replays the
++        // window). Sequential vs a cold pass: the rows' chunk shapes differ (W8's finding; 0121's class).
++        if (sn.is_end) return self.m.tail_batch != null;
+         // TF_DS_EXACT_RESUME: an off-grid state nearer the end than the window resumes on its tail's rows
+         if (sn.tail != null) return tailPre(sn, len, self.m.cfg.window) != null;
+         return sn.at % model.chunk_rows == 0 and sn.at <= len -| self.m.cfg.window;
+@@ -1969,6 +1974,7 @@ fn chunkRows(start: usize, len: usize) usize {
+         if (end_keep) {
+             sn.end_buf = try cuda.DeviceBuffer.alloc(self.m.ctx.d, self.m.endBytes());
+             try self.m.endCopy(l.slot, sn.end_buf.?.ptr, false);
++            sn.is_end = true;
+         }
+         // (0178: the end-state cap N - the oldest end state goes when N are live; snapDropFn frees its extras too)
+         if (end_keep) {
+@@ -3877,3 +3883,25 @@ test "spec gather layout: rank r's values at r * wide, fewer rows than the bound
+     try std.testing.expect(specValues(&p, 1, lost[0 .. 2 * wide], wide, 2) == null);
+     try std.testing.expect(specValues(&p, 0, lost[0 .. 2 * wide], wide, 2) != null);
+ }
++
++test "TF_DS_TAIL_BATCH: an end state continues a longer prompt and resumes an identical one" {
++    const c = model.chunk_rows;
++    var m: Model = undefined;
++    m.pool_cap = 16 * c;
++    m.cfg.window = 128;
++    m.tail_batch = 2;
++    const gpa = std.testing.allocator;
++    var ln: Lanes = .{ .gpa = gpa, .m = &m, .peer = null };
++    defer ln.snaps.deinit(gpa);
++    var end: Snap = .{ .id = 3, .at = 8 * c, .base = 0, .end = 8 * c, .buf = undefined, .is_end = true };
++    var plain: Snap = .{ .id = 4, .at = 8 * c, .base = 16 * c, .end = 24 * c, .buf = undefined };
++    try ln.snaps.append(gpa, &end);
++    try ln.snaps.append(gpa, &plain);
++    try std.testing.expect(ln.usable(&end, 8 * c)); // the identical resend (0178): zero rows
++    try std.testing.expect(ln.usable(&end, 9 * c)); // and the continuation (0180): the new rows only
++    try std.testing.expect(!ln.usable(&end, 7 * c)); // never a shorter prompt
++    try std.testing.expect(ln.usable(&plain, 9 * c)); // a state without complete rings replays as before
++    m.tail_batch = null;
++    try std.testing.expect(ln.usable(&end, 8 * c)); // the identical one needs no switch (0178's own)
++    try std.testing.expect(!ln.usable(&end, 9 * c)); // the continuation does
++}
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 0e6ecac3b1cbaa52768837c0cf30598d44f1558d..078d74cec4a72c1969a84a34e9fb9ebd8e671cf4 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -194,6 +194,7 @@ pub const Model = struct {
+     hot_k: ?u8 = null, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot:<n>): the prefetch's hot experts a layer (null: off)
+     hot_age: u32 = 0, // rounds since the hot plan was rebuilt (32: the first round rebuilds)
+     endstate: ?u8 = null, // 0178 (TF_DS_PROMPT_ENDSTATE=N): end states kept for an identical resend (null: off)
++    tail_batch: ?u8 = null, // 0180 (TF_DS_TAIL_BATCH=N): end states continue a longer prompt (the new rows only)
+     draw_rows: usize = 0, // rows the round's tokens are drawn on the device (setDraw; 0: the greedy argmax)
+     accept_tab: u64 = 0, // TF_DS_DEVICE_ACCEPT: the device tab [row0 ..][wrows ..] of the round's windows (setAccept)
+     accept_rows: usize = 0, // windows the round's chain keeps are computed on the device (setAccept; 0: off)
+@@ -251,6 +252,7 @@ pub const Model = struct {
+         m.triage = try parseTriage(envOf("TF_DS_DRAFT_TRIAGE")); // rank-local: the mask rides the verify frame
+         m.hot_k = try parseHot(envOf("TF_DS_EXPERT_HOT_CACHE")); // rank-local: prefetch is invisible to the bits
+         m.endstate = api.prompt_cache.endState(envOf("TF_DS_PROMPT_ENDSTATE")); // both ranks alike (the frames ride it)
++        m.tail_batch = try parseTailBatch(envOf("TF_DS_TAIL_BATCH")); // the policy is rank-local (each rank's own rows)
+         m.tails = &.{};
+         m.tail_buf = null;
+         errdefer if (m.tail_buf) |*b| b.free();
+@@ -1901,6 +1903,17 @@ fn parseHot(v: ?[]const u8) !?u8 {
+     return error.BadExpertHot;
+ }
+ 
++/// 0180 (TF_DS_TAIL_BATCH): `1`..`8` - a prompt pass resuming a full end state computes the new rows only (the
++/// rings hold the window; today's states keep no complete rings, so every warm pass replays the window), and N
++/// names the batch width the next step takes (several streams' tails in one pass - the design is the patch's
++/// commit body). Unset, `0` or `off`: the engine as it was. A malformed value refuses the start.
++fn parseTailBatch(v: ?[]const u8) !?u8 {
++    const s = std.mem.trim(u8, v orelse return null, " \t\r\n");
++    if (s.len == 0 or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "off")) return null;
++    const n = std.fmt.parseInt(u8, s, 10) catch return error.BadTailBatch;
++    return if (n >= 1 and n <= 8) n else error.BadTailBatch;
++}
++
+ test "a boolean switch parses 1 and on, and nothing else" {
+     try std.testing.expect(envOnOff("1"));
+     try std.testing.expect(envOnOff("on"));
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 03921f2c73a6d6007d983741b3a4013eadc1e57d..84a2795107871bdfc5e149a5d00890da4551fec0 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -55,6 +55,13 @@
+ //!                                               identical resent prompt, which resumes with zero rows (a retry, a
+ //!                                               regenerate, n > 1); at most N (1..8) at once. Identical; not
+ //!                                               spilled (process-local); unset: the engine as it was
++//!   TF_DS_TAIL_BATCH=N                           0180 (M7's first slice): a pass resuming a full end state computes
++//!                                               the new rows only - the rings hold the window, so the 128-row replay
++//!                                               goes (today's states keep no complete rings and every warm pass
++//!                                               replays it). N names the batch width the next step takes (several
++//!                                               streams' tails in one pass; the design is the patch's commit body).
++//!                                               Sequential vs a cold pass (the rows' chunk shapes differ, W8);
++//!                                               unset: the engine as it was
+ //!   TF_DS_ROUND_ROWS, TF_DS_STREAMS             a round's rows at most (16; the four-node lane's 48) and the pool's
+ //!                                               streams (4; its 16): --parallel at most the streams
+ //!   TF_DS_PROMPT_WINDOW_ROWS=<rows>             a prompt chunk under these rows (64 .. 128; 64 unset) takes the MoE decode window

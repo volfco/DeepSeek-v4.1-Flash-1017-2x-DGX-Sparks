@@ -1,0 +1,629 @@
+From f055d04f18749a2156c1dfff997e86c6629419fb Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 10:54:08 -0800
+Subject: [PATCH] server: TF_DS_ENERGY (off by default) puts a request's NVML
+ energy in the done line, joules_total on rank 0's /metrics and a per-frame
+ counter line on rank 1
+
+The pair's energy use is unmeasured per request: `scripts/bench_overnight.py`'s Sampler polls power every 3 s (max only, no
+integral, no attribution), and a reply's `tensorfold` block carries no energy field. NVML answers
+`nvmlDeviceGetTotalEnergyConsumption` on both GB10s with rc 0 - a cumulative millijoule counter - so a request's energy is
+an exact counter delta at its start and finish, with no sampling thread and no integration bias.
+
+TF_DS_ENERGY (`1` or `on`; unset, `0`, `off` or anything else leave it off, as the series' switches do) reads that counter
+on the request's own window. With it on, rank 0's `done` line ends with `energy_j=`, `idle_j=`, `round_from=` and
+`round_to=`: the request's own delta, the counter's rise over an equal idle window before it (scaled from the gap between
+the last finished request and this one's start; "-" when no such gap is at least as long as the request, so a gross
+figure cannot attribute another request's draw), and the rank pair's wire frame ordinals. With the switch off nothing is
+appended, so the line is byte for byte the base one and no driver call is made.
+
+Rank 1 runs `tf-dsv41-lanes` (a follower: no HTTP server, no /metrics, no lane core and no `done` line), so its GPU's
+figure cannot ride rank 0's line without the deferred rank-1-to-rank-0 exchange. The follower instead logs a new line
+category of its own while the switch is on, one per frame it receives: `energy step=N mj=M`, the counter read before frame
+N runs. Rank 1 checks every frame's step against its own counter (`error.OutOfStep`), so both ranks count the same
+ordinals; `tools/energy.py` joins a request's `round_from`/`round_to` to those lines and takes the delta between the frame
+at `round_from` and the frame after `round_to`, exactly. No existing parser matches the new line (`tools/zig/reuse_served.py`
+reads `done` only); it is ~25 lines a second at one stream, and only while the switch is on.
+
+`tensorfold:joules_total` (joules, a counter) joins `generation_tokens_total` on rank 0's /metrics, summing finished
+requests' own windows; it is absent with the switch off, so the base body is unchanged. NVML's
+`nvmlDeviceGetTotalEnergyConsumption` and `nvmlDeviceGetPowerUsage` are optional lookups of their own: a driver without
+them still opens (the all-or-nothing symbol table of the CUDA runtime's libraries is the trap), and the figures degrade to
+"-" rather than failing. The energy reader lives in `zig/src/core/energy.zig` (engine_api's `energy`), not a new CUDA
+module: `zig/src/cuda/` has no NVML module in this tree, and the server, the engine seam and the follower all reach
+engine_api. Replies and their bits are unchanged; the reply's `tensorfold` block is phase 2.
+
+Tests: the switch parse ("1"/"on" on; unset, "0", "off", "" and anything else off), the off path (no counter read at all),
+the window's arithmetic and both labels (gross delta, the equal idle window scaled from the gap, "-" when the gap is
+shorter than the request), the absent driver and symbol path (the reader opens with no counter and every field is "-"),
+and the suffix's exact text after the existing fields. `zig build test` and `zig/tests/server/zig_test.sh` pass. Not run on
+a pair: the ordinals' alignment is the first live gate (docs/energy-per-request.md).
+---
+ zig/src/core/energy.zig          | 271 +++++++++++++++++++++++++++++++
+ zig/src/core/engine_api.zig      |   8 +
+ zig/src/core/lane_host.zig       |   4 +-
+ zig/src/core/lanes/backend.zig   |   9 +
+ zig/src/families/dsv41/lanes.zig |  10 ++
+ zig/src/native/cuda.zig          |   6 +
+ zig/src/server/chat.zig          |  23 ++-
+ zig/src/server/metrics.zig       |  19 +++
+ zig/src/server/server.zig        |   7 +-
+ 9 files changed, 351 insertions(+), 6 deletions(-)
+ create mode 100644 zig/src/core/energy.zig
+
+diff --git a/zig/src/core/energy.zig b/zig/src/core/energy.zig
+new file mode 100644
+index 0000000..20a6179
+--- /dev/null
++++ b/zig/src/core/energy.zig
+@@ -0,0 +1,271 @@
++//! TF_DS_ENERGY (off by default): a request's energy from NVML's cumulative counter (millijoules since the driver
++//! started). Off: no driver call, no line. On: the request's own window and the idle window before it, per rank.
++const std = @import("std");
++const builtin = @import("builtin");
++
++/// TF_DS_ENERGY: `1` or `on` turns it on; unset, `0`, `off` or anything else leave it off.
++pub fn enabled(v: ?[]const u8) bool {
++    const value = v orelse return false;
++    return std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "on");
++}
++
++/// A device's cumulative energy counter: the driver's, or a test's. A driver without the read has no counter, and
++/// every figure is "-" (the switch degrades, nothing fails).
++pub const Counter = struct {
++    ctx: ?*anyopaque = null,
++    read: ?*const fn (ctx: ?*anyopaque) ?u64 = null,
++
++    pub fn millijoules(c: Counter) ?u64 {
++        const f = c.read orelse return null;
++        return f(c.ctx);
++    }
++};
++
++const EnergyFn = *const fn (device: *anyopaque, energy: *u64) callconv(.c) c_int;
++const PowerFn = *const fn (device: *anyopaque, power: *c_uint) callconv(.c) c_int;
++
++/// NVML's entry points. `nvmlInit_v2` and `nvmlDeviceGetHandleByIndex_v2` are required for this reader; the energy
++/// and power reads are optional lookups of their own, so a driver without them still opens (the all-or-nothing table
++/// of `zig/src/cuda/`'s libraries is the trap: one missing symbol must not refuse the whole reader).
++pub const Nvml = struct {
++    lib: std.DynLib,
++    api: Api,
++    device: *anyopaque,
++
++    const Api = struct {
++        init: *const fn () callconv(.c) c_int,
++        handle: *const fn (index: c_uint, device: *?*anyopaque) callconv(.c) c_int,
++        total_energy: ?EnergyFn = null,
++        power: ?PowerFn = null,
++    };
++
++    pub fn open(index: c_uint) error{ LibraryUnavailable, MissingSymbol, NvmlFailed }!Nvml {
++        var lib = std.DynLib.open(if (builtin.os.tag == .macos) "libnvidia-ml.dylib" else "libnvidia-ml.so.1") catch return error.LibraryUnavailable;
++        errdefer lib.close();
++        var api: Api = undefined;
++        api.init = lib.lookup(@TypeOf(api.init), "nvmlInit_v2") orelse return error.MissingSymbol;
++        api.handle = lib.lookup(@TypeOf(api.handle), "nvmlDeviceGetHandleByIndex_v2") orelse return error.MissingSymbol;
++        api.total_energy = lib.lookup(EnergyFn, "nvmlDeviceGetTotalEnergyConsumption");
++        api.power = lib.lookup(PowerFn, "nvmlDeviceGetPowerUsage");
++        if (api.init() != 0) return error.NvmlFailed;
++        var device: ?*anyopaque = null;
++        if (api.handle(index, &device) != 0 or device == null) return error.NvmlFailed;
++        return .{ .lib = lib, .api = api, .device = device.? };
++    }
++
++    /// The device's cumulative millijoules, or null when the driver has no such read.
++    pub fn millijoules(n: Nvml) ?u64 {
++        const f = n.api.total_energy orelse return null;
++        var v: u64 = 0;
++        if (f(n.device, &v) != 0) return null;
++        return v;
++    }
++
++    /// The device's draw in milliwatts, or null: the cross-check's read, optional like the counter.
++    pub fn milliwatts(n: Nvml) ?u32 {
++        const f = n.api.power orelse return null;
++        var v: c_uint = 0;
++        if (f(n.device, &v) != 0) return null;
++        return @intCast(v);
++    }
++};
++
++/// A request's start: the counter then, and the sample the last finished request left (the idle gap's start).
++pub const Window = struct {
++    start_mj: ?u64 = null,
++    start_ns: i96 = 0,
++    prev_mj: ?u64 = null,
++    prev_ns: i96 = 0,
++};
++
++/// A finished request's figures: the counter's rise over its own window, and over an equal idle window before it.
++pub const Readings = struct {
++    gross_mj: ?u64 = null,
++    idle_mj: ?u64 = null,
++};
++
++/// The switch and the driver, one per process: off means no driver call at all, and no allocation.
++pub const Reader = struct {
++    on: bool = false,
++    nvml: ?Nvml = null,
++    /// A test's counter read, in place of the driver's.
++    test_read: ?*const fn (ctx: ?*anyopaque) ?u64 = null,
++    test_ctx: ?*anyopaque = null,
++    prev_mj: ?u64 = null,
++    prev_ns: i96 = 0,
++    mutex: std.Io.Mutex = .init,
++
++    /// Opens the driver when the switch is on; a driver or symbol that is missing leaves every figure "-" (no error).
++    pub fn open(on: bool) Reader {
++        if (!on) return .{};
++        const index = deviceIndex();
++        const n = Nvml.open(index) catch |e| {
++            noteLine("energy: no NVML ({s}) for device {d}; the figures print -", .{ @errorName(e), index });
++            return .{ .on = true };
++        };
++        if (n.millijoules() == null) noteLine("energy: this driver has no nvmlDeviceGetTotalEnergyConsumption; the figures print -", .{});
++        return .{ .on = true, .nvml = n };
++    }
++
++    fn millijoules(r: *const Reader) ?u64 {
++        if (r.test_read) |f| return f(r.test_ctx);
++        const n = r.nvml orelse return null;
++        return n.millijoules();
++    }
++
++    /// The request's start: one counter read (none when the switch is off), and the idle gap's last sample.
++    pub fn begin(r: *Reader, io: std.Io, now: i96) Window {
++        if (!r.on) return .{};
++        const mj = r.millijoules();
++        r.mutex.lockUncancelable(io);
++        defer r.mutex.unlock(io);
++        return .{ .start_mj = mj, .start_ns = now, .prev_mj = r.prev_mj, .prev_ns = r.prev_ns };
++    }
++
++    /// The request's finish: its own window's delta, and the idle baseline over an equal window (the gap before it).
++    pub fn finish(r: *Reader, io: std.Io, w: Window, now: i96) Readings {
++        if (!r.on) return .{};
++        const end = r.millijoules();
++        r.mutex.lockUncancelable(io);
++        defer r.mutex.unlock(io);
++        r.prev_mj = end;
++        r.prev_ns = now;
++        const gross: ?u64 = if (w.start_mj) |s| if (end) |e| e -| s else null else null;
++        return .{ .gross_mj = gross, .idle_mj = idle(w, now) };
++    }
++
++    /// A follower's own line (rank 1 has no server and no done line): the frame ordinal and the counter before that
++    /// frame runs, so the rank-0 done line's ordinals bracket a request exactly. `-` when the driver has no counter.
++    pub fn note(r: *const Reader, step: u64) void {
++        if (!r.on) return;
++        var buf: [24]u8 = undefined;
++        const text = if (r.millijoules()) |mj| std.fmt.bufPrint(&buf, "{d}", .{mj}) catch "-" else "-";
++        noteLine("energy step={d} mj={s}", .{ step, text });
++    }
++};
++
++/// The idle window's counter delta scaled to the request's own length: the rise over the gap between the last
++/// finished request and this one's start. Null when there is no such gap, or it is shorter than the request (then a
++/// request ran in it, so it was not idle). A previous sample stands in for a sampling thread: no integration.
++fn idle(w: Window, now: i96) ?u64 {
++    const s = w.start_mj orelse return null;
++    const p = w.prev_mj orelse return null;
++    const gap = w.start_ns - w.prev_ns;
++    const window = now - w.start_ns;
++    if (gap <= 0 or gap < window or s < p) return null;
++    return (s - p) * @as(u64, @intCast(window)) / @as(u64, @intCast(gap));
++}
++
++/// The done line's added fields (switch on only): the request's own energy, the idle baseline, and the wire ordinals
++/// the rank-1 follower's line is joined by. They come after every existing field, so the old line's parsers still
++/// match (`tools/zig/reuse_served.py`).
++pub fn suffix(buf: []u8, r: Readings, from: ?u64, to: ?u64) []const u8 {
++    var g: [24]u8 = undefined;
++    var i: [24]u8 = undefined;
++    var f: [24]u8 = undefined;
++    var t: [24]u8 = undefined;
++    return std.fmt.bufPrint(buf, " energy_j={s} idle_j={s} round_from={s} round_to={s}", .{ joules(&g, r.gross_mj), joules(&i, r.idle_mj), count(&f, from), count(&t, to) }) catch
++        " energy_j=- idle_j=- round_from=- round_to=-";
++}
++
++/// Millijoules as joules with three decimals ("-": no counter).
++fn joules(buf: []u8, mj: ?u64) []const u8 {
++    const v = mj orelse return "-";
++    return std.fmt.bufPrint(buf, "{d}.{d:0>3}", .{ v / 1000, v % 1000 }) catch "-";
++}
++
++fn count(buf: []u8, v: ?u64) []const u8 {
++    return std.fmt.bufPrint(buf, "{d}", .{v orelse return "-"}) catch "-";
++}
++
++/// The device this process's GPU is: TF_CUDA_DEVICE's ordinal, else 0 (each rank of the pair has one GPU).
++fn deviceIndex() c_uint {
++    const v = std.mem.span(std.c.getenv("TF_CUDA_DEVICE") orelse return 0);
++    return std.fmt.parseInt(c_uint, std.mem.trim(u8, v, " "), 10) catch 0;
++}
++
++/// A line on the engine's log; tests stay quiet (the build runner fails a test that writes to stderr).
++fn noteLine(comptime fmt: []const u8, args: anytype) void {
++    if (builtin.is_test) return;
++    std.log.info(fmt, args);
++}
++
++test "TF_DS_ENERGY: 1 and on turn it on, everything else leaves it off" {
++    try std.testing.expect(enabled("1"));
++    try std.testing.expect(enabled("on"));
++    try std.testing.expect(!enabled(null));
++    try std.testing.expect(!enabled("0"));
++    try std.testing.expect(!enabled("off"));
++    try std.testing.expect(!enabled(""));
++    try std.testing.expect(!enabled("yes"));
++}
++
++const Fake = struct { mj: u64 = 0, calls: u64 = 0 };
++
++fn fakeRead(ctx: ?*anyopaque) ?u64 {
++    const f: *Fake = @ptrCast(@alignCast(ctx.?));
++    f.calls += 1;
++    return f.mj;
++}
++
++test "the off path reads no counter and allocates nothing" {
++    var f: Fake = .{ .mj = 5000 };
++    var r: Reader = .{ .test_read = fakeRead, .test_ctx = &f };
++    try std.testing.expect(!r.on);
++    const w = r.begin(std.testing.io, 1_000);
++    const got = r.finish(std.testing.io, w, 2_000);
++    try std.testing.expectEqual(@as(u64, 0), f.calls); // no driver call at all
++    try std.testing.expectEqual(@as(?u64, null), got.gross_mj);
++    try std.testing.expectEqual(@as(?u64, null), got.idle_mj);
++}
++
++test "a request's delta and the equal idle window before it, labelled apart" {
++    var f: Fake = .{ .mj = 1_000_000 };
++    var r: Reader = .{ .on = true, .test_read = fakeRead, .test_ctx = &f };
++    const s: i96 = std.time.ns_per_s;
++    // a first request: its own window only (no finished request to measure an idle gap from)
++    const w0 = r.begin(std.testing.io, 100 * s);
++    f.mj = 1_000_200;
++    const first = r.finish(std.testing.io, w0, 102 * s);
++    try std.testing.expectEqual(@as(?u64, 200), first.gross_mj);
++    try std.testing.expectEqual(@as(?u64, null), first.idle_mj);
++    // the next one, after a 5 s idle gap that rose 50 mJ: the equal 2 s window is 20 mJ
++    f.mj = 1_000_250;
++    const w1 = r.begin(std.testing.io, 107 * s);
++    f.mj = 1_000_400;
++    const second = r.finish(std.testing.io, w1, 109 * s);
++    try std.testing.expectEqual(@as(?u64, 150), second.gross_mj);
++    try std.testing.expectEqual(@as(?u64, 20), second.idle_mj);
++    var buf: [96]u8 = undefined;
++    try std.testing.expectEqualStrings(" energy_j=0.150 idle_j=0.020 round_from=41 round_to=97", suffix(&buf, second, 41, 97));
++    try std.testing.expectEqualStrings(" energy_j=0.200 idle_j=- round_from=- round_to=-", suffix(&buf, first, null, null));
++}
++
++test "a gap shorter than the request is no idle window" {
++    var f: Fake = .{ .mj = 0 };
++    var r: Reader = .{ .on = true, .test_read = fakeRead, .test_ctx = &f };
++    const s: i96 = std.time.ns_per_s;
++    _ = r.begin(std.testing.io, 0);
++    f.mj = 100;
++    _ = r.finish(std.testing.io, .{ .start_mj = 0, .start_ns = 0 }, 10 * s); // prev at 10 s
++    f.mj = 200;
++    const w = r.begin(std.testing.io, 12 * s); // a 2 s gap
++    f.mj = 400;
++    const got = r.finish(std.testing.io, w, 22 * s); // a 10 s request: the gap does not cover it
++    try std.testing.expectEqual(@as(?u64, 200), got.gross_mj);
++    try std.testing.expectEqual(@as(?u64, null), got.idle_mj);
++}
++
++test "a driver without the energy read degrades to - and still opens" {
++    // this host has no libnvidia-ml at all: the switch is on, the counter is absent, nothing fails
++    const r = Reader.open(true);
++    try std.testing.expect(r.on);
++    try std.testing.expectEqual(@as(?u64, null), r.millijoules());
++    var buf: [96]u8 = undefined;
++    try std.testing.expectEqualStrings(" energy_j=- idle_j=- round_from=- round_to=-", suffix(&buf, .{}, null, null));
++    try std.testing.expectEqual(@as(?u64, null), (Counter{}).millijoules());
++    // an absent optional symbol is a null entry, never an error: the Api's other fields still open
++    const api: Nvml.Api = .{ .init = undefined, .handle = undefined };
++    try std.testing.expectEqual(@as(?EnergyFn, null), api.total_energy);
++    try std.testing.expectEqual(@as(?PowerFn, null), api.power);
++}
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index aa4ec2e..ce92d33 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -115,6 +115,10 @@ pub const Stats = struct {
+     prefill_seconds: ?f64 = null,
+     /// The drafter's own counters as a JSON object, or empty.
+     telemetry_json: []const u8 = "",
++    /// The wire's frame ordinals this reply's rounds ran in (TF_DS_ENERGY: the rank-1 follower logs its counter per
++    /// frame, so these bracket its delta exactly); null when the backend has no rank pair.
++    round_from: ?u64 = null,
++    round_to: ?u64 = null,
+ };
+ 
+ pub const Event = union(enum) {
+@@ -537,6 +541,9 @@ pub const prompt_imprint = @import("prompt_imprint.zig");
+ /// The idle keepalive's ticker and target contract.
+ pub const keepalive = @import("keepalive.zig");
+ 
++/// TF_DS_ENERGY: a request's energy from NVML's cumulative counter (energy.zig).
++pub const energy = @import("energy.zig");
++
+ test {
+     _ = @import("lane_host.zig");
+     _ = @import("lane_host_reuse_test.zig");
+@@ -545,4 +552,5 @@ test {
+     _ = @import("prompt_cache_media_test.zig");
+     _ = @import("prompt_imprint.zig");
+     _ = @import("keepalive.zig");
++    _ = @import("energy.zig");
+ }
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index e242a14..e848132 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -226,6 +226,7 @@ pub const LaneHost = struct {
+         proposer: lanes.SuffixLookup = undefined,
+         delivered: usize = 0,
+         started: bool = false,
++        ordinal0: ?u64 = null, // the wire's frame ordinal at admission (TF_DS_ENERGY's join)
+         prefill_sent: bool = false, // a lone driver's prefilled event went out
+         began: i96 = 0,
+         prefilled: ?i96 = null,
+@@ -503,7 +504,7 @@ pub const LaneHost = struct {
+         h.gpa.free(job.shared);
+         h.gpa.free(job.lineage);
+         const s = &job.stream;
+-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
++        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null, .round_from = job.ordinal0, .round_to = h.core.backend.ordinal() } else .{};
+         emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
+         if (job.started) {
+             s.deinit(h.gpa);
+@@ -694,6 +695,7 @@ pub const LaneHost = struct {
+             return h.drop(job, "out of memory");
+         };
+         job.started = true;
++        job.ordinal0 = h.core.backend.ordinal();
+         const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
+         job.began = began;
+         if (h.loneFits(job)) return h.runLone(job, began);
+diff --git a/zig/src/core/lanes/backend.zig b/zig/src/core/lanes/backend.zig
+index b7ef5b3..1474d02 100644
+--- a/zig/src/core/lanes/backend.zig
++++ b/zig/src/core/lanes/backend.zig
+@@ -73,6 +73,9 @@ pub const Backend = struct {
+         alternatives: ?*const fn (ptr: *anyopaque, s: *Stream, out: []Alternative) anyerror!usize = null,
+         /// The stream left the rounds: free its caches and held drafts.
+         release: *const fn (ptr: *anyopaque, s: *Stream) void,
++        /// The rank pair's wire frame ordinal: the frame rank 0 last sent (dsv41's Lanes; the follower checks every
++        /// one, so both sides count the same ordinals). Null: no pair (TF_DS_ENERGY's join has no rank-1 line).
++        ordinal: ?*const fn (ptr: *anyopaque) u64 = null,
+     };
+ 
+     pub fn prefill(b: Backend, s: *Stream) !void {
+@@ -100,6 +103,12 @@ pub const Backend = struct {
+         b.vtable.release(b.ptr, s);
+     }
+ 
++    /// The pair's wire frame ordinal, or null without one.
++    pub fn ordinal(b: Backend) ?u64 {
++        const f = b.vtable.ordinal orelse return null;
++        return f(b.ptr);
++    }
++
+     /// A driver of its own starts a stream: the prompt pass and its first token, committed; a cancel or failure releases it.
+     pub fn opening(b: Backend, gpa: std.mem.Allocator, s: *Stream) !u32 {
+         errdefer b.release(s);
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 423d12d..0b0f367 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -581,9 +581,16 @@ pub const Lanes = struct {
+             .draft = draftFn,
+             .probabilities = probabilitiesFn,
+             .release = releaseFn,
++            .ordinal = ordinalFn,
+         } };
+     }
+ 
++    /// The wire's frame ordinal: the frame rank 0 last sent. Rank 1 checks each frame's step (`error.OutOfStep`), so
++    /// both sides count the same ordinals, and a request's window joins the follower's per-frame counter exactly.
++    fn ordinalFn(ptr: *anyopaque) u64 {
++        return of(ptr).step;
++    }
++
+     /// The facts the round loop reads: windows of the pending row and up to the drafter's block, several streams'
+     /// windows in one forward of at most 16 rows (four streams), the drafter's chances, the served lane's round ms.
+     pub fn facts(self: *const Lanes) lanes.Model {
+@@ -2024,6 +2031,8 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+     const pair_fx: ?fingerprint.Exchange = fx orelse if (spill) |sd| sd.wf.fx else if (kvf) |k| k.exchange() else null;
+     const pf: ?*PairFollower = if (pair_fx) |x| try PairFollower.create(gpa, @intCast(m.rank), x, spill, kvf) else null;
+     defer if (pf) |p| gpa.destroy(p);
++    // TF_DS_ENERGY: this rank's GPU counter, one line per frame (the rank-0 done line's round ordinals join them)
++    var energy: ?api.energy.Reader = if (api.energy.enabled(getenv("TF_DS_ENERGY"))) api.energy.Reader.open(true) else null;
+     while (true) {
+         // with spill writes or restores pending, they progress while rank 0 sends nothing (2 ms polls)
+         if (spill) |sd| while (sd.busy() and !try peer.readable(2 * std.time.ns_per_ms)) sd.service(std.time.ns_per_ms);
+@@ -2047,6 +2056,7 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+             else => return error.BadFrame,
+         };
+         if (try r.int(u64) != step) return error.OutOfStep;
++        if (energy) |*e| e.note(step); // the counter before this frame runs: rank 0's ordinals bracket a request
+         step += 1;
+         if (spill) |sd| sd.service(std.time.ns_per_ms); // (rank 0 pumps between its primitives alike)
+         // a chunk's read-ahead of the next is done before anything but that chunk (a prompt's ids may change)
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index bf5cb11..b7f2160 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -321,6 +321,12 @@ const Host = struct {
+                     x.inner.vtable.release(x.inner.ptr, s);
+                 }
+             }.f,
++            .ordinal = if (v.ordinal != null) struct {
++                fn f(p: *anyopaque) u64 {
++                    const x = bind(p);
++                    return x.inner.vtable.ordinal.?(x.inner.ptr);
++                }
++            }.f else null,
+         };
+         return .{ .ptr = h, .vtable = &h.vtable };
+     }
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index 1d9f0f8..644c181 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -154,6 +154,8 @@ pub const Prepared = struct {
+     drafts: bool,
+     stops: fields_mod.Stops,
+     preparing: bool,
++    /// TF_DS_ENERGY: the GPU's counter at the request's arrival (empty with the switch off).
++    energy: api.energy.Window = .{},
+ };
+ 
+ /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
+@@ -161,6 +163,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+     const a = cx.a;
+     const io = srv.io;
+     const received = nowNs(io);
++    const energy = srv.energy.begin(io, received);
+     const f = input.fields;
+     const stops_opt = try fields_mod.stopOptions(cx, f);
+     var limit: i64 = @max(1, if (input.max_tokens) |m| (if (m != 0) m else srv.config.default_max_tokens) else srv.config.default_max_tokens);
+@@ -222,7 +225,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+             request.think_end = srv.think_close_end;
+         }
+     }
+-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing };
++    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing, .energy = energy };
+ }
+ 
+ /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
+@@ -261,8 +264,8 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
+     };
+     release(srv, preparing); // a background request waits only while a foreground one prepares
+     preparing = false;
+-    var gen: Generation = .{ .last_out_ns = submitted, .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = input.token_ids };
+-    defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
++    var gen: Generation = .{ .last_out_ns = submitted, .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = input.token_ids, .energy = prepared.energy };
++    defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, gen.energy_mj);
+     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
+     const result: Failure!Reply = blk: {
+         if (sink != null and input.tools.len > 0) gen.calls = tool_stream.Streamer.init(a, input.tools) catch |e| break :blk e;
+@@ -368,6 +371,9 @@ const Generation = struct {
+     last_ns: ?i96 = null,
+     reason: ?[]const u8 = null, // the server ended the reply (a stop string, the length) before the engine said so
+     engine_done: bool = false,
++    /// TF_DS_ENERGY: the GPU's counter at the request's arrival, and its own window's delta at the finish.
++    energy: api.energy.Window = .{},
++    energy_mj: ?u64 = null,
+     consumed: usize = 0,
+     chunk_index: usize = 0,
+ 
+@@ -726,7 +732,16 @@ const Generation = struct {
+         var b_accept: [24]u8 = undefined;
+         var b_tpr: [24]u8 = undefined;
+         const accept = if (avg.accept_pct) |pct| std.fmt.bufPrint(&b_accept, "{d:.1}%", .{pct}) catch "-" else "-";
+-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} prefill_s={s} ttft_s={s} decode_s={s} s_per_token={s} tok_per_s={s} accept={s} tokens_per_round={s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, fmtNum(&b_prefill, "{d:.1}", s.prefill_seconds), fmtNum(&b_ttft, "{d:.1}", avg.ttft_s), fmtNum(&b_decode, "{d:.1}", avg.decode_s), fmtNum(&b_tpot, "{d:.4}", avg.s_per_token), fmtNum(&b_tok_s, "{d:.1}", avg.tok_per_s), accept, fmtNum(&b_tpr, "{d:.1}", avg.tokens_per_round) });
++        // TF_DS_ENERGY: the request's own window and the ordinals rank 1's per-frame line joins by. Empty with the
++        // switch off, so the line is byte for byte the base one.
++        var energy_buf: [128]u8 = undefined;
++        var energy_fields: []const u8 = "";
++        if (g.srv.energy.on) {
++            const readings = g.srv.energy.finish(g.srv.io, g.energy, finished_ns);
++            g.energy_mj = readings.gross_mj;
++            energy_fields = api.energy.suffix(&energy_buf, readings, s.round_from, s.round_to);
++        }
++        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} prefill_s={s} ttft_s={s} decode_s={s} s_per_token={s} tok_per_s={s} accept={s} tokens_per_round={s}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, fmtNum(&b_prefill, "{d:.1}", s.prefill_seconds), fmtNum(&b_ttft, "{d:.1}", avg.ttft_s), fmtNum(&b_decode, "{d:.1}", avg.decode_s), fmtNum(&b_tpot, "{d:.4}", avg.s_per_token), fmtNum(&b_tok_s, "{d:.1}", avg.tok_per_s), accept, fmtNum(&b_tpr, "{d:.1}", avg.tokens_per_round), energy_fields });
+         return reply;
+     }
+ };
+diff --git a/zig/src/server/metrics.zig b/zig/src/server/metrics.zig
+index a5e2eac..65beda2 100644
+--- a/zig/src/server/metrics.zig
++++ b/zig/src/server/metrics.zig
+@@ -41,6 +41,10 @@ pub const Metrics = struct {
+     drafted: u64 = 0,
+     accepted: u64 = 0,
+     rounds: u64 = 0,
++    /// Energy of finished requests' own windows, in millijoules (TF_DS_ENERGY; /metrics publishes it as joules_total).
++    energy_mj: u64 = 0,
++    /// Whether TF_DS_ENERGY is on: joules_total is then in the body (off: the base body, byte for byte).
++    energy_on: bool = false,
+     disconnects: u64 = 0,
+     latency: Histogram = .{},
+     ttft: Histogram = .{},
+@@ -92,6 +96,13 @@ pub const Metrics = struct {
+         m.requests.append(m.gpa, .{ .key = owned, .status = status, .count = 1 }) catch m.gpa.free(owned);
+     }
+ 
++    /// A finished request's own window's energy (TF_DS_ENERGY), in millijoules.
++    pub fn noteEnergy(m: *Metrics, io: std.Io, mj: u64) void {
++        m.mutex.lockUncancelable(io);
++        defer m.mutex.unlock(io);
++        m.energy_mj += mj;
++    }
++
+     pub fn disconnected(m: *Metrics, io: std.Io) void {
+         m.mutex.lockUncancelable(io);
+         defer m.mutex.unlock(io);
+@@ -128,6 +139,7 @@ pub const Metrics = struct {
+         const keeps = engine.info().prompt_cache; // an engine that keeps no prompt states has no cached count to give
+         if (keeps) try gauge(w, "prompt_tokens_cached_total", "counter", "Prompt tokens of finished requests restored from kept prompt states (counted in prompt_tokens_total too); the rest were computed.", snap.cached);
+         try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);
++        if (snap.energy_on) try gaugeFloat(w, "joules_total", "counter", "Energy this rank's GPU used over finished requests' own windows, in joules (TF_DS_ENERGY; rank 1 logs its own, per frame).", @as(f64, @floatFromInt(snap.energy_mj)) / 1000.0);
+         const live = streams[0..@min(status.streams, streams.len)];
+         try family(w, "kv_cache_usage_ratio", "gauge", "Tokens in a stream cache divided by that stream's context window.");
+         try pools(w, "kv_cache_usage_ratio", "pool", live, window);
+@@ -245,6 +257,13 @@ fn gauge(w: *std.Io.Writer, name: []const u8, kind: []const u8, help: []const u8
+     try w.print("{s}{s} {d}\n", .{ prefix, name, value });
+ }
+ 
++/// A fractional counter (a Prometheus counter is a float; TF_DS_ENERGY's joules_total).
++fn gaugeFloat(w: *std.Io.Writer, name: []const u8, kind: []const u8, help: []const u8, value: f64) !void {
++    var buf: [40]u8 = undefined;
++    try family(w, name, kind, help);
++    try w.print("{s}{s} {s}\n", .{ prefix, name, num(&buf, value) });
++}
++
+ fn pools(w: *std.Io.Writer, name: []const u8, label: []const u8, lengths: []const u32, window: u32) !void {
+     if (lengths.len == 0) return w.print("{s}{s}{{{s}=\"0\"}} 0\n", .{ prefix, name, label });
+     for (lengths, 0..) |n, i| {
+diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
+index f16704d..b1b0926 100644
+--- a/zig/src/server/server.zig
++++ b/zig/src/server/server.zig
+@@ -93,12 +93,16 @@ pub const Server = struct {
+     preparing: std.atomic.Value(i64) = .init(0),
+     /// Concurrent prompt preparations held under the memory floor (prepare_gate).
+     gate: prepare_gate.Gate = .{},
++    /// TF_DS_ENERGY (off by default): the GPU's cumulative counter around each request (energy.zig).
++    energy: api.energy.Reader = .{},
+     arena: std.heap.ArenaAllocator,
+ 
+     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
+     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
+         const srv = try gpa.create(Server);
+         srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .gate = .init(config.prepare_floor_gib), .arena = .init(gpa) };
++        srv.energy = api.energy.Reader.open(api.energy.enabled(if (std.c.getenv("TF_DS_ENERGY")) |v| std.mem.span(v) else null));
++        srv.metrics.energy_on = srv.energy.on;
+         if (config.keep_warm_s > 0) if (engine.keepaliveTarget()) |target| {
+             srv.keepalive = api.keepalive.Keepalive.start(gpa, io, target, @as(i64, config.keep_warm_s) * std.time.ns_per_s) catch |e| blk: {
+                 log.line("idle keepalive off: {s}", .{@errorName(e)});
+@@ -261,10 +265,11 @@ pub const Server = struct {
+     }
+ 
+     /// Counts one finished request for /metrics.
+-    pub fn noteRequest(srv: *Server, prompt_len: usize, cached: usize, generated: usize, drafted: u64, accepted: u64, rounds: u64, received: i96, first: ?i96, last: ?i96, prefill: ?f64) void {
++    pub fn noteRequest(srv: *Server, prompt_len: usize, cached: usize, generated: usize, drafted: u64, accepted: u64, rounds: u64, received: i96, first: ?i96, last: ?i96, prefill: ?f64, energy_mj: ?u64) void {
+         const now = clock.nowNs(srv.io);
+         const tpot = srv.metrics.tpotValue(first, last, generated);
+         srv.metrics.note(srv.io, prompt_len, cached, generated, drafted, accepted, rounds, @max(0, clock.seconds(now - received)), if (first) |f| clock.seconds(f - received) else null, if (first) |f| @max(0, clock.seconds(now - f)) else null, prefill, tpot);
++        if (energy_mj) |mj| srv.metrics.noteEnergy(srv.io, mj);
+     }
+ 
+     /// Accepts connections until ``stop`` is set, each on its own thread.
+-- 
+2.56.0
+

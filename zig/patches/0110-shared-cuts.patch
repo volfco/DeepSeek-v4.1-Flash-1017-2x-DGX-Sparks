@@ -1,0 +1,340 @@
+From 0000000000000000000000000000000000000110 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:26:59 +0000
+Subject: [PATCH] server: TF_DS_SHARED_CUTS=1 plans shared cuts at the system, system+tools and
+ first-user block boundaries
+
+The shared cuts' discovery probed the render only up to the first user
+message's content, so fan-out requests that share a system prompt but
+carry different tool lists diverge inside the tools block and match no
+kept state, and requests that share a document in the first user message
+never plan a cut past it; every follower re-prefilled its whole prompt.
+
+With TF_DS_SHARED_CUTS=1 (off by default, only "1" on) discovery measures
+three block boundaries and emits one -2048/-512/exact ladder per
+boundary: the system block alone (the probe rendered with the tools
+omitted), the system and tools together (today's probe, the first user
+message's content probed away), and the first user message's own content
+(a probe keeping that message, none when it is the request's last). The
+cuts come out ascending and strictly increasing: a boundary that does not
+exceed the cuts already planned is dropped, so equal boundaries collapse
+and the deepest one keeps today's ladder.
+
+What stays: with the switch unset or off, sharedCuts emits exactly
+today's three cuts from the same system_len, so request contents, kept
+states and reply bits are byte-identical to base; the cache side
+(Store.marks, min_gap filtering, chunk flooring) is untouched and only
+consumes the longer shared_prefixes list, and the chunk plan still cuts
+at system_len-1.
+
+Tests: zig/tests/server/zig_test.sh (185 server tests on the chain, 4 new
+shared_cuts_test ones covering the system-only cut for different tool
+lists, the first-user-document cut, the first-user-last dedupe, and the
+off ladder's exact three cuts with the switch parse) and zig build test
+pass. Not run on a pair.
+---
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index 4e23d8fc..1d9f0f88 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -191,9 +191,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+     }
+     const system_len: usize = if (input.prompt != null) 0 else prompt_mod.systemPrefixLen(srv, cx, input.messages, input.tools, rendered.ids, thinking, effort);
+     var shared: std.ArrayList(u32) = .empty;
+-    if (system_len > 0) for ([_]i64{ @as(i64, @intCast(system_len)) - 2048, @as(i64, @intCast(system_len)) - 512, @intCast(system_len) }) |cut| {
+-        if (cut >= 512) try shared.append(a, @intCast(cut));
+-    };
++    if (input.prompt == null) try prompt_mod.sharedCuts(srv, cx, input.messages, input.tools, rendered.ids, system_len, thinking, effort, prompt_mod.sharedCutsEnabled(if (std.c.getenv("TF_DS_SHARED_CUTS")) |v| std.mem.span(v) else null), &shared);
+     const sampling = try srv.resolveSampling(cx, f, input.temperature, rendered.ids);
+     const draft_field = f.get("draft");
+     const drafts = srv.config.use_drafts and !(draft_field != null and draft_field.? == .bool and !draft_field.?.bool);
+diff --git a/zig/src/server/prompt.zig b/zig/src/server/prompt.zig
+index f7418444..7e1a8a2e 100644
+--- a/zig/src/server/prompt.zig
++++ b/zig/src/server/prompt.zig
+@@ -145,11 +145,7 @@ test "an image span's key depends on the image and the position, never on the vo
+ 
+ /// A reusable system prefix, found with a probe in place of the first user message; zero below 512 tokens.
+ pub fn systemPrefixLen(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, prompt_ids: []const u32, thinking: bool, effort: ?[]const u8) usize {
+-    if (messages != .array) return 0;
+-    const first_user = for (messages.array, 0..) |m, i| {
+-        const role = m.get("role") orelse continue;
+-        if (role == .string and std.mem.eql(u8, role.string, "user")) break i;
+-    } else return 0;
++    const first_user = firstUser(messages) orelse return 0;
+     const probe = cx.a.alloc(Value, first_user + 1) catch return 0;
+     @memcpy(probe[0..first_user], messages.array[0..first_user]);
+     const user = json.newObject(cx.a) catch return 0;
+@@ -158,7 +154,52 @@ pub fn systemPrefixLen(srv: *Server, cx: *Cx, messages: Value, tools: []const Va
+     probe[first_user] = .{ .object = user };
+     var scratch: Cx = .{ .a = cx.a };
+     const other = renderIds(srv, &scratch, .{ .array = probe }, tools, thinking, effort, true) catch return 0;
++    return commonLen(prompt_ids, other);
++}
++
++/// The first user message's index in ``messages``, null when there is none.
++fn firstUser(messages: Value) ?usize {
++    if (messages != .array) return null;
++    return for (messages.array, 0..) |m, i| {
++        const role = m.get("role") orelse continue;
++        if (role == .string and std.mem.eql(u8, role.string, "user")) break i;
++    } else null;
++}
++
++/// A probe's render and the request's prompt's shared prefix; zero below 512 tokens.
++fn commonLen(prompt_ids: []const u32, other: []const u32) usize {
+     var shared: usize = 0;
+     while (shared < @min(prompt_ids.len, other.len) and prompt_ids[shared] == other[shared]) shared += 1;
+     return if (shared >= 512) shared else 0;
+ }
++
++/// The shared cuts' ladder at ``len`` (-2048, -512, the boundary itself), each step at least 512 tokens and past the
++/// cuts already planned, so the list stays strictly increasing.
++fn addLadder(a: std.mem.Allocator, out: *std.ArrayList(u32), len: usize) !void {
++    for ([_]i64{ @as(i64, @intCast(len)) - 2048, @as(i64, @intCast(len)) - 512, @intCast(len) }) |cut| {
++        if (cut < 512) continue;
++        const at: u32 = @intCast(cut);
++        if (out.items.len == 0 or at > out.items[out.items.len - 1]) try out.append(a, at);
++    }
++}
++
++/// The request's shared cuts: with ``on`` (TF_DS_SHARED_CUTS=1) one ladder per block boundary instead of today's one --
++/// the system block alone (the probe rendered with the tools omitted), the system and tools together (``system_len``,
++/// the first user message probed away), and the first user message's own content (kept in the probe; none when it is
++/// the request's last message, its probe rendering the whole request). A boundary that does not exceed the cuts already
++/// planned is dropped.
++pub fn sharedCuts(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, prompt_ids: []const u32, system_len: usize, thinking: bool, effort: ?[]const u8, on: bool, out: *std.ArrayList(u32)) !void {
++    if (!on) return addLadder(cx.a, out, system_len);
++    try addLadder(cx.a, out, systemPrefixLen(srv, cx, messages, &.{}, prompt_ids, thinking, effort));
++    try addLadder(cx.a, out, system_len);
++    const first_user = firstUser(messages) orelse return;
++    if (first_user + 1 >= messages.array.len) return;
++    var scratch: Cx = .{ .a = cx.a };
++    const other = renderIds(srv, &scratch, .{ .array = messages.array[0 .. first_user + 1] }, tools, thinking, effort, true) catch return;
++    try addLadder(cx.a, out, commonLen(prompt_ids, other));
++}
++
++/// TF_DS_SHARED_CUTS=1 turns the shared cuts' multi-boundary discovery on (off by default; only "1" on).
++pub fn sharedCutsEnabled(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse "0", "1");
++}
+diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
+index 7ff15729..f973afa6 100644
+--- a/zig/src/server/root.zig
++++ b/zig/src/server/root.zig
+@@ -43,6 +43,7 @@ test {
+     _ = @import("responses_include_test.zig");
+     _ = @import("late_system_test.zig");
+     _ = @import("status_totals_test.zig");
++    _ = @import("shared_cuts_test.zig");
+     _ = @import("effort_values_test.zig");
+     _ = @import("compact_test.zig");
+     _ = @import("decisions.zig");
+diff --git a/zig/src/server/shared_cuts_test.zig b/zig/src/server/shared_cuts_test.zig
+new file mode 100644
+index 00000000..0f03679d
+--- /dev/null
++++ b/zig/src/server/shared_cuts_test.zig
+@@ -0,0 +1,202 @@
++//! The shared cuts' block boundaries (TF_DS_SHARED_CUTS): a system-only cut for fan-out with different tool lists, a
++//! cut through the first user message's content, and the off switch's exact three cuts (the harness is
++//! late_system_test.zig's; this renderer draws the tools block after the first message like the template's system block).
++const std = @import("std");
++const api = @import("engine_api");
++const server = @import("root.zig");
++const errors = server.errors;
++const json = server.json;
++const model_text = @import("model_text.zig");
++const prompt_mod = @import("prompt.zig");
++const harness = @import("late_system_test.zig");
++const Value = json.Value;
++
++/// DropLate with the tools block: each message is ``[role]content\n`` (one id a byte) and the offered tools follow the
++/// first message, so a probe without tools stops at the system block's end and one with them walks the tool lines too.
++const ToolBlocks = struct {
++    pub fn text(t: *@This()) model_text.Text {
++        return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
++    }
++
++    fn encode(_: *anyopaque, a: std.mem.Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
++        const ids = try a.alloc(u32, input.len);
++        for (input, ids) |byte, *id| id.* = byte;
++        return ids;
++    }
++
++    fn decode(_: *anyopaque, a: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
++        const decoded = try a.alloc(u8, ids.len);
++        for (ids, decoded) |id, *byte| byte.* = @intCast(id);
++        return decoded;
++    }
++
++    fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
++        return null;
++    }
++
++    fn tokenString(_: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error![]u8 {
++        return std.fmt.allocPrint(a, "{d}", .{id});
++    }
++
++    fn vocabSize(_: *anyopaque) u32 {
++        return 256;
++    }
++
++    fn eosIds(_: *anyopaque) []const u32 {
++        return &.{};
++    }
++
++    fn render(_: *anyopaque, a: std.mem.Allocator, messages: Value, options: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
++        var out: std.ArrayList(u8) = .empty;
++        if (messages != .array) return out.items;
++        for (messages.array, 0..) |m, i| {
++            try out.print(a, "[{s}]{s}\n", .{ textOf(m, "role"), textOf(m, "content") });
++            if (i == 0) if (options.tools) |tools| for (tools.array) |t| try out.print(a, "tool {s}\n", .{textOf(t, "name")});
++        }
++        return out.items;
++    }
++
++    fn templateSource(_: *anyopaque) []const u8 {
++        return "";
++    }
++};
++
++fn textOf(v: Value, key: []const u8) []const u8 {
++    const x = v.get(key) orelse return "";
++    return if (x == .string) x.string else "";
++}
++
++fn msg(a: std.mem.Allocator, role: []const u8, content: []const u8) !Value {
++    const o = try json.newObject(a);
++    try o.put(a, "role", .{ .string = role });
++    try o.put(a, "content", .{ .string = content });
++    return .{ .object = o };
++}
++
++fn tool(a: std.mem.Allocator, name: []const u8) !Value {
++    const o = try json.newObject(a);
++    try o.put(a, "name", .{ .string = name });
++    return .{ .object = o };
++}
++
++fn filled(a: std.mem.Allocator, byte: u8, n: usize) ![]const u8 {
++    const s = try a.alloc(u8, n);
++    @memset(s, byte);
++    return s;
++}
++
++/// chat.prepare's discovery order: the prompt's ids, the system+tools boundary, then the cuts.
++fn cutsOf(srv: *server.Server, cx: *errors.Cx, messages: Value, tools: []const Value, on: bool) ![]u32 {
++    const prompt_ids = try prompt_mod.renderIds(srv, cx, messages, tools, false, null, true);
++    const system_len = prompt_mod.systemPrefixLen(srv, cx, messages, tools, prompt_ids, false, null);
++    var out: std.ArrayList(u32) = .empty;
++    try prompt_mod.sharedCuts(srv, cx, messages, tools, prompt_ids, system_len, false, null, on, &out);
++    return out.toOwnedSlice(cx.a);
++}
++
++fn start(text: *ToolBlocks, backend: *harness.Capture) !*server.Server {
++    return server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
++        .served_name = "m",
++        .model_ids = &.{"m"},
++        .enable_thinking = false,
++        .use_drafts = false,
++    }, null);
++}
++
++const S_LEN = 2600; // the system text's length; its block renders 2,609 bytes with the header and newline
++const DOC_LEN = 700; // a shared document in the first user message
++
++test "TF_DS_SHARED_CUTS=1: fan-out with different tool lists shares the system-only cut" {
++    var text: ToolBlocks = .{};
++    var backend: harness.Capture = .{};
++    const srv = try start(&text, &backend);
++    defer srv.deinit();
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    var cx: errors.Cx = .{ .a = arena.allocator() };
++    const s = try filled(cx.a, 's', S_LEN);
++
++    var m1 = [_]Value{ try msg(cx.a, "system", s), try msg(cx.a, "user", "hello") };
++    var m2 = [_]Value{ try msg(cx.a, "system", s), try msg(cx.a, "user", "hello") };
++    const t1 = [_]Value{ try tool(cx.a, "alpha") };
++    const t2 = [_]Value{ try tool(cx.a, "beta"), try tool(cx.a, "gamma") };
++
++    // off: each request's own ladder reaches only into its own tool block; nothing is shared
++    const off1 = try cutsOf(srv, &cx, .{ .array = &m1 }, &t1, false);
++    const off2 = try cutsOf(srv, &cx, .{ .array = &m2 }, &t2, false);
++    try std.testing.expectEqualSlices(u32, &.{ 578, 2114, 2626 }, off1);
++    try std.testing.expectEqualSlices(u32, &.{ 588, 2124, 2636 }, off2);
++
++    // on: both carry the system-only boundary (the block rendered without tools) and its ladder
++    const on1 = try cutsOf(srv, &cx, .{ .array = &m1 }, &t1, true);
++    const on2 = try cutsOf(srv, &cx, .{ .array = &m2 }, &t2, true);
++    try std.testing.expectEqualSlices(u32, &.{ 561, 2097, 2609, 2626 }, on1);
++    try std.testing.expectEqualSlices(u32, &.{ 561, 2097, 2609, 2636 }, on2);
++    try std.testing.expectEqual(@as(u32, @intCast("[system]".len + s.len + 1)), 2609); // "[system]" + S + "\n", the block's end
++}
++
++test "TF_DS_SHARED_CUTS=1: a shared first user document yields its own cut" {
++    var text: ToolBlocks = .{};
++    var backend: harness.Capture = .{};
++    const srv = try start(&text, &backend);
++    defer srv.deinit();
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    var cx: errors.Cx = .{ .a = arena.allocator() };
++    const s = try filled(cx.a, 's', S_LEN);
++    const doc = try filled(cx.a, 'd', DOC_LEN);
++
++    var m1 = [_]Value{ try msg(cx.a, "system", s), try msg(cx.a, "user", doc), try msg(cx.a, "user", "task one") };
++    var m2 = [_]Value{ try msg(cx.a, "system", s), try msg(cx.a, "user", doc), try msg(cx.a, "user", "task two") };
++
++    // off: today's boundary stops before the document
++    const off = try cutsOf(srv, &cx, .{ .array = &m1 }, &.{}, false);
++    try std.testing.expectEqualSlices(u32, &.{ 567, 2103, 2615 }, off);
++
++    // on: a cut past the document, shared by both requests whatever follows it
++    const on1 = try cutsOf(srv, &cx, .{ .array = &m1 }, &.{}, true);
++    const on2 = try cutsOf(srv, &cx, .{ .array = &m2 }, &.{}, true);
++    try std.testing.expectEqualSlices(u32, &.{ 567, 2103, 2615, 2804, 3316 }, on1);
++    try std.testing.expectEqualSlices(u32, on1, on2);
++    try std.testing.expectEqual(@as(u32, @intCast(2615 + doc.len + 1)), 3316); // through "[user]" + the document + "\n"
++}
++
++test "TF_DS_SHARED_CUTS=1: the first user message last brings no cut past today's" {
++    var text: ToolBlocks = .{};
++    var backend: harness.Capture = .{};
++    const srv = try start(&text, &backend);
++    defer srv.deinit();
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    var cx: errors.Cx = .{ .a = arena.allocator() };
++    const s = try filled(cx.a, 's', S_LEN);
++
++    var m = [_]Value{ try msg(cx.a, "system", s), try msg(cx.a, "user", "hello") };
++    const on = try cutsOf(srv, &cx, .{ .array = &m }, &.{}, true);
++    const off = try cutsOf(srv, &cx, .{ .array = &m }, &.{}, false);
++    try std.testing.expectEqualSlices(u32, off, on); // (a) equals (b) and is planned once; (c) would probe the whole request
++}
++
++test "TF_DS_SHARED_CUTS: off appends today's three cuts, only \"1\" turns the boundaries on" {
++    var text: ToolBlocks = .{};
++    var backend: harness.Capture = .{};
++    const srv = try start(&text, &backend);
++    defer srv.deinit();
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    var cx: errors.Cx = .{ .a = arena.allocator() };
++
++    for ([_]struct { len: usize, want: []const u32 }{
++        .{ .len = 3000, .want = &.{ 952, 2488, 3000 } },
++        .{ .len = 2560, .want = &.{ 512, 2048, 2560 } },
++        .{ .len = 600, .want = &.{600} },
++        .{ .len = 511, .want = &.{} },
++    }) |case| {
++        var out: std.ArrayList(u32) = .empty;
++        try prompt_mod.sharedCuts(srv, &cx, .{ .array = &.{} }, &.{}, &.{}, case.len, false, null, false, &out);
++        try std.testing.expectEqualSlices(u32, case.want, out.items);
++    }
++
++    try std.testing.expect(prompt_mod.sharedCutsEnabled("1"));
++    for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!prompt_mod.sharedCutsEnabled(v));
++}

@@ -1,0 +1,151 @@
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index c97d5c4..8a46d70 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -47,6 +47,13 @@ pub const pdl_env = "TF_DS_PDL";
+ /// fallback); read at load on every rank, bits identical either way (the same k keys, the same order).
+ pub const topk_fast_env = "TF_DS_TOPK_FAST";
+ 
++/// TF_DS_CHECK_INVALID (off by default): read the ratio-2 compressor's out-of-range-partner flag back once a chain and
++/// log an error when it is set, and check on the host that a round's rows name distinct raw ring slots (the fused
++/// scatter's in-kernel assumption). The flag is written by the unfused gatherRows path and by 0127's and 0197's
++/// compressors; the fused chains do not clear it, so a set flag also latches. Diagnostic only: no kernel changes, and an
++/// unset switch costs nothing (no read, no sync). Read at load on every rank.
++pub const check_invalid_env = "TF_DS_CHECK_INVALID";
++
+ /// The series' switches' parse ("1" or "on"; unset, "0", "off", "" or anything else: off).
+ pub fn onValue(v: ?[]const u8) bool {
+     const s = v orelse return false;
+@@ -126,6 +133,7 @@ pub const Ops = struct {
+     idx_fused_fn: ?cuda.Function = null, // looked up only when the switch is on
+     compress2_norm: bool = false, // TF_DS_FUSED_COMPRESS2_NORM, read at load; off by default
+     rope_store: bool = false, // TF_DS_FUSED_ROPE_STORE, read at load; off by default
++    check_invalid: bool = false, // TF_DS_CHECK_INVALID, read at load; off by default (a diagnostic)
+     dead_rows: cuda.Function, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' picks emptied
+     hot_track: cuda.Function, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picks counted per layer for the prefetch
+     keyed_noise: ?cuda.Function = null, // TF_DS_T26_KEYED_DRAFT or TF_DS_SPEC_SAMPLE, looked up only when on
+@@ -152,6 +160,7 @@ pub const Ops = struct {
+             return err;
+         };
+         const idx_fused_on = try idx_fused.fromText(envSpan(idx_fused.env_name));
++        const check_invalid = onValue(envSpan(check_invalid_env));
+         const compress2_norm_on = try compress2_norm.fromText(envSpan(compress2_norm.env_name));
+         const rope_store_on = try rope_store.fromText(envSpan(rope_store.env_name));
+         const pdl = onValue(envSpan(pdl_env));
+@@ -190,6 +199,7 @@ pub const Ops = struct {
+             .idx_fused_fn = if (idx_fused_on) try fm.function("tf_ds_idx_fused_kernel") else null,
+             .compress2_norm = compress2_norm_on,
+             .rope_store = rope_store_on,
++            .check_invalid = check_invalid,
+             .dead_rows = try fm.function("tf_ds_dead_rows_kernel"),
+             .hot_track = try fm.function("tf_ds_hot_track_kernel"),
+             .keyed_noise = if (envOn(keyed_env) or spec) try fm.function("tf_ds_keyed_noise_kernel") else null,
+@@ -758,6 +768,13 @@ test "TF_DS_FUSED_ROPE_STORE parses: unset/0/empty off, 1 on, else refused" {
+     try std.testing.expectError(error.BadRopeStore, rope_store.fromText("2"));
+ }
+ 
++test "TF_DS_CHECK_INVALID parses like the series' switches: 1 or on, anything else off" {
++    try std.testing.expectEqualStrings("TF_DS_CHECK_INVALID", check_invalid_env);
++    for ([_]?[]const u8{ null, "", "0", "off", "2" }) |v| try std.testing.expect(!onValue(v));
++    try std.testing.expect(onValue("1"));
++    try std.testing.expect(onValue("on"));
++}
++
+ fn useSixSlotPrune(m: expert_prune.Mode, rows: usize, topk: usize, slots: usize) bool {
+     return topk == 6 and slots == 7 and rows > 0 and rows <= 64 and m.cap == null and m.apply and
+         m.rule.topp == 0.85 and m.rule.min_k == 3 and m.rule.renorm == .kept;
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 6c97710..8e96d62 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -881,6 +881,14 @@ pub const Round = struct {
+     }
+ };
+ 
++/// The first pair of a round's rows naming the same raw ring slot (TF_DS_CHECK_INVALID's host check), or null.
++pub fn firstSharedSlot(slots: []const i64) ?struct { a: usize, b: usize } {
++    for (0..slots.len) |i| for (i + 1..slots.len) |j| {
++        if (slots[i] == slots[j]) return .{ .a = i, .b = j };
++    };
++    return null;
++}
++
+ /// rounds.py _ix's tensors for these rows (each row's slot and extent), made on the host and uploaded in one copy.
+ fn setGlue(e: *const Engine, rd: *Round, rows: Rows) !void {
+     const R = rows.ids.len;
+@@ -918,6 +926,16 @@ fn setGlue(e: *const Engine, rd: *Round, rows: Rows) !void {
+         hg[gi0 + 2 * i] = slot * raw + @mod(groups * 2, raw);
+         hg[gi0 + 2 * i + 1] = slot * raw + @mod(groups * 2 + 1, raw);
+     }
++    // TF_DS_CHECK_INVALID: the fused scatter writes rslot[r] and its partner search takes the first matching row, so a
++    // round's rows must name distinct raw ring slots (max_rows 48 < raw_rows 64 makes that hold for one stream's
++    // consecutive rows, and the slots separate streams; nothing checked it). Host-side, no kernel change.
++    if (e.ops.check_invalid) {
++        const slots = hg[@as(usize, @backingInt(Glue.rslot)) * max_rows ..][0..R];
++        if (firstSharedSlot(slots)) |c| std.log.err(
++            "dsv41: TF_DS_CHECK_INVALID: rows {d} and {d} share raw ring slot {d}: the compressor's fused scatter assumes a round's rows are distinct",
++            .{ c.a, c.b, slots[c.a] },
++        );
++    }
+     try prompt.upload(e, rd.glue, &hg, hg.len * 8);
+     // RoundDecoder.set: [ids, pos, slots, base, end] in one [5, R] copy
+     var in: [5 * max_rows]i64 = @splat(0);
+@@ -1005,6 +1023,21 @@ fn ropeOf(e: *const Engine, lay: weights.Layer) prompt.Rope {
+     return if (lay.ratio != 0) e.compressed else e.plain;
+ }
+ 
++/// TF_DS_CHECK_INVALID: the compressor's out-of-range-partner flag, read back after a ratio-2 chain (the switch's own
++/// synchronizing read: diagnostic only) and logged once. A set flag means a group's partner row was outside the ring,
++/// where every compressor path substitutes a zero row - the output is wrong and nothing else says so.
++var invalid_warned: bool = false;
++
++fn checkInvalid(e: *const Engine, ch: *const Chunk, li: usize) !void {
++    if (!e.ops.check_invalid or invalid_warned) return;
++    var flag: u32 = 0;
++    try e.d.check(e.d.api.cuMemcpyDtoH_v2(&flag, ch.invalid, 4), "cuMemcpyDtoH");
++    if (flag != 0) {
++        invalid_warned = true;
++        std.log.err("dsv41: TF_DS_CHECK_INVALID: layer {d}: a ratio-2 compressor partner row was out of range (a zero row was used: the layer's output is wrong)", .{li});
++    }
++}
++
+ /// The compressor's chain (a compressed layer): the RMSNorm alone at ratio 1; at ratio 2 the scatter of the rows
+ /// into the group's raw slots, the memset of ch.invalid, the double gather back, compress2's
+ /// weighted sum to bf16, the RMSNorm — or, at ratio 2 with TF_DS_FUSED_COMPRESS2=1 (set alike on both ranks), the
+@@ -1026,6 +1059,7 @@ fn compressorChain(e: *const Engine, rd: *const Round, ch: *const Chunk, t: tri.
+         if (compress2_norm.decodeOk(e.ops.compress2_norm, R, hd)) {
+             // Same stream and ring writes as compress2x. Stage the bf16 pair sum on chip for the kit norm.
+             try e.exact.compress2xNorm(s, rd.ckv, hd, rd.cgate, hd, rd.g(.rslot), caches.raw_kv[li], caches.raw_score[li], rd.g(.gi), caches.slots * raw_rows, lay.comp_norm, rd.lat, hd, R, hd, c.eps, ch.invalid);
++            try checkInvalid(e, ch, li);
+             return;
+         }
+         if (rd.fused_compress2) {
+@@ -1046,6 +1080,7 @@ fn compressorChain(e: *const Engine, rd: *const Round, ch: *const Chunk, t: tri.
+             try e.exact.compress2(s, rd.kvg, rd.sg, rd.lat2, R, hd);
+         }
+         try tri_basic.rmsnorm(t, rd.lat2, hd, lay.comp_norm, rd.lat, hd, c.eps, R, hd);
++        try checkInvalid(e, ch, li);
+         return;
+     }
+     return notPorted(@src());
+@@ -2184,6 +2219,20 @@ fn stamp(eh: *const prompt.EngramHost) u64 {
+     return @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds);
+ }
+ 
++test "TF_DS_CHECK_INVALID: a round's raw ring slots are distinct, a repeat is reported" {
++    // one stream's consecutive rows (raw_rows = 64, max_rows = 48): distinct
++    var slots: [48]i64 = undefined;
++    for (&slots, 0..) |*s, i| s.* = @intCast(i);
++    try std.testing.expect(firstSharedSlot(&slots) == null);
++    // a forced row repeating an earlier position's slot is the aliasing case the fused scatter cannot express
++    slots[17] = slots[3];
++    const got = firstSharedSlot(&slots) orelse return error.ExpectedSharedSlot;
++    try std.testing.expectEqual(@as(usize, 3), got.a);
++    try std.testing.expectEqual(@as(usize, 17), got.b);
++    try std.testing.expect(firstSharedSlot(&.{}) == null);
++    try std.testing.expect(firstSharedSlot(&.{7}) == null);
++}
++
+ test "context buckets as graph.py makes them" {
+     try std.testing.expectEqual(@as(usize, 1024), bucketFor(1, 1 << 20));
+     try std.testing.expectEqual(@as(usize, 4096), bucketFor(2230, 1 << 20));

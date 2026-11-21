@@ -1,0 +1,850 @@
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -461,6 +461,7 @@
+     /// TF_DS_PROMPT_ENDSTATE=N (0178, M4): a pass's own end at `at == len` is kept (the full state: the replay built
+     /// every ring), so an identical resent prompt resumes with zero rows to compute.
+     endstate: bool = false,
++    end_limit: u8 = 0,
+ 
+     /// The native rule (Lanes.usable): 0 < at < len, on the grid, at most len - window, its lookahead inside the prompt.
+     /// With `endstate` an exact `at == len` is offered too - the family's usable then confirms it is a full end state.
+@@ -490,6 +491,7 @@
+     tokens: []u32, // the state's tokens and `lookahead` more
+     at: u32,
+     saved: Saved,
++    full_end: bool = false,
+     bytes: u64,
+     born: u32, // the length of the prompt that kept it: a later turn's is longer
+     used: u64, // the store's clock at its last keep or resume
+@@ -676,6 +678,9 @@
+     /// (both only where set: a family without them keeps the old behaviour). The miss cause when not.
+     fn liveWhy(s: *const Store, e: *const Entry, len: usize) ?MissCause {
+         if (s.family.vtable.usable) |f| if (!f(s.family.ptr, e.saved, @intCast(@min(len, std.math.maxInt(u32))))) return .stale;
++        // End-state rings are valid at off-grid positions as well. The family checks
++        // resident identity, staleness and whether a longer continuation is enabled.
++        if (e.full_end and s.family.vtable.usable != null) return null;
+         if (s.rules.grid == 0 and s.rules.window == 0) return null;
+         // TF_DS_EXACT_RESUME: a pass's own end is off the grid, and the family's usable above is its only resume gate
+         // (Rules.exact): the native grid rule would pass it over on every store built with a grid.
+@@ -706,8 +711,9 @@
+             if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
+             // TF_DS_EXACT_RESUME: a state at a pass's end is nearer than the window and resumes on its tail (the family's
+             // usable decides); without it the tail rule passes it over
+-            const tail_ok = s.rules.exact or @as(usize, e.at) + s.rules.tail <= prompt.len;
+-            if (e.at >= prompt.len or !tail_ok or !s.usable(e.at, starts)) {
++            const full_end = e.full_end and s.rules.endstate and s.family.vtable.usable != null;
++            const tail_ok = full_end or s.rules.exact or @as(usize, e.at) + s.rules.tail <= prompt.len;
++            if ((e.at == prompt.len and !full_end) or !tail_ok or !s.usable(e.at, starts)) {
+                 worse(why, .tail_window); // matched, but the tail/window and usable rules pass it over
+                 continue;
+             }
+@@ -1130,7 +1136,12 @@
+         if (at == 0 or n > prompt.len) return false;
+         s.clock += 1;
+         const shared = if (s.shared_plan) info.shared else std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
+-        for (s.entries.items) |e| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n])) {
++        const full_end = s.rules.endstate and at == prompt.len;
++        for (s.entries.items, 0..) |e, i| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n])) {
++            if (full_end and !e.full_end) {
++                s.remove(i);
++                break;
++            }
+             e.used = s.clock; // the same state again: no copy
+             if (shared and !e.shared) { // now a shared prefix: the family's copy marked, and on disk
+                 if (s.family.vtable.share) |f| f(s.family.ptr, e.saved);
+@@ -1195,7 +1206,7 @@
+             return s.fail(at, error.OutOfMemory);
+         };
+         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
+-        e.* = .{ .tokens = tokens, .at = at, .saved = saved, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last, .shared = shared, .group = info.group, .images = info.images, .lineage = lin };
++        e.* = .{ .tokens = tokens, .at = at, .saved = saved, .full_end = full_end, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last, .shared = shared, .group = info.group, .images = info.images, .lineage = lin };
+         if (shared) if (s.family.vtable.share) |f| f(s.family.ptr, saved); // kept shared: the family's copy marked
+         s.entries.append(s.gpa, e) catch {
+             s.free(e);
+@@ -1203,6 +1214,21 @@
+         };
+         s.held += charged;
+         s.counts.kept += 1;
++        if (full_end and s.rules.end_limit > 0) {
++            var count: usize = 0;
++            var oldest: ?usize = null;
++            for (s.entries.items, 0..) |entry, i| {
++                if (!entry.full_end) continue;
++                count += 1;
++                if (oldest == null) oldest = i;
++            }
++            if (count > s.rules.end_limit) {
++                s.remove(oldest.?);
++                s.counts.evicted += 1;
++            }
++        }
++        // Durable grid checkpoints omit the extra logits and ring state.
++        if (full_end) return true;
+         if (s.tier) |t| { // write at keep: the tier stages the state's bytes between rounds
+             e.point = t.vtable.keep(t.ptr, &.{ .saved = saved, .key = tokens, .at = at, .bytes = charged, .group = info.group, .shared = shared, .images = info.images, .media = info.media, .raw = info.raw, .parent = info.parent, .fork = info.fork, .lineage = lin });
+             if (e.point != null) s.stats.writes_enqueued += 1;
+@@ -1455,7 +1481,7 @@
+ test "0178 (TF_DS_PROMPT_ENDSTATE): eligible offers at == len only with the flag" {
+     const r: Rules = .{ .window = 128 };
+     try std.testing.expect(!r.eligible(100, 100));
+-    try std.testing.expect(r.eligible(50, 100));
++    try std.testing.expect(!r.eligible(50, 100));
+     const e: Rules = .{ .window = 128, .endstate = true };
+     try std.testing.expect(e.eligible(100, 100)); // the identical resend's full end state
+     try std.testing.expect(!e.eligible(101, 100));
+diff --git a/zig/src/core/prompt_cache_test.zig b/zig/src/core/prompt_cache_test.zig
+--- a/zig/src/core/prompt_cache_test.zig
++++ b/zig/src/core/prompt_cache_test.zig
+@@ -938,3 +938,20 @@
+     try std.testing.expect(s2.keep(&t1, 8, null, &.{}));
+     try std.testing.expect(s2.find(&t2, &.{}) == null);
+ }
++
++test "full ends displace through the cache, match identical IDs and release memory at capacity" {
++    const gpa = std.testing.allocator;
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .grid = 4, .window = 2, .tail = 2, .endstate = true, .end_limit = 1 }, 1 << 20);
++    defer s.deinit();
++    const a = [_]u32{ 1, 2, 3, 4, 5 };
++    const b = [_]u32{ 6, 7, 8, 9 };
++    f.at = a.len;
++    try std.testing.expect(s.keep(&a, a.len, null, &.{}));
++    try std.testing.expectEqual(@as(u32, a.len), s.find(&a,&.{}).?.at);
++    f.at = b.len;
++    try std.testing.expect(s.keep(&b, b.len, null, &.{}));
++    try std.testing.expect(s.find(&a,&.{}) == null);
++    try std.testing.expectEqual(@as(u32, b.len), s.find(&b,&.{}).?.at);
++    try std.testing.expectEqual(@as(usize,1), f.live);
++}
+diff --git a/zig/src/families/dsv41/engram_io.zig b/zig/src/families/dsv41/engram_io.zig
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -68,8 +68,18 @@
+ /// The parsed TF_DS_ENGRAM_CPUS (empty = unset); model open sets it once, before any Engram thread starts.
+ var engram_cpus: CpuSet = .{};
+ 
+-pub fn setCpus(text: ?[]const u8, cpu_count: usize) !void {
+-    engram_cpus = if (text) |t| try parseCpus(t, cpu_count) else .{};
++pub fn setCpus(text: ?[]const u8) !void {
++    const spec = text orelse {
++        engram_cpus = .{};
++        return;
++    };
++    const requested = try parseCpus(spec, max_cpus);
++    var allowed: std.os.linux.cpu_set_t = @splat(0);
++    if (std.os.linux.errno(std.os.linux.sched_getaffinity(0, @sizeOf(@TypeOf(allowed)), &allowed)) != .SUCCESS) return error.InvalidCpus;
++    for (requested.set, allowed) |want, have| {
++        if (want & ~have != 0) return error.InvalidCpus;
++    }
++    engram_cpus = requested;
+ }
+ 
+ /// The calling thread on the Engram CPUs, when TF_DS_ENGRAM_CPUS is set; no syscall otherwise and off Linux.
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1382,7 +1382,7 @@
+             }
+             try m.snapCopy(slot, sn.buf.ptr, false);
+             // 0178 (TF_DS_PROMPT_ENDSTATE): the extras and head_g back - the pass then runs no rows
+-            if (sn.end_buf) |b| try m.endCopy(slot, b.ptr, true);
++            if (sn.end_buf) |b| try m.restoreEnd(slot, b.ptr, sn.at);
+             // TF_DS_EXACT_RESUME: the tail comes back with the state, and the pass resumes where the state stands
+             if (sn.tail) |tb| {
+                 try m.tailCopy(slot, tb.ptr, false);
+@@ -1433,9 +1433,25 @@
+         if (m.triage) |t| for (windows, wins[0..windows.len]) |w, *win| {
+             win.live = if (w.parents != null or w.tokens.len > 0) 0 else @intCast(triageLive(self.streams.getPtr(w.stream).?.confs[0..w.held], t));
+         };
++        // every row greedy: the device's argmax (R tokens back); every sampled row one the kernel reproduces and
++        // TF_DS_T27_DEVICE_DRAW on: the device's draw (R tokens back); else the logits for the host's draws. Read before
++        // the forward: TF_DS_GREEDY_ARGMAX decides the head's exchange from it.
++        var rules: sampling.RoundRules = .{};
++        for (windows) |w| if (w.stream.sampling) |sm| rules.add(sm.temperature, sm.top_k);
++        // a score stream's rows need every logit on the host
++        for (windows) |w| {
++            if (w.stream.score != null) rules.logits = true;
++        }
++        // TF_DS_SPEC_SAMPLE: a sampled round reads its logits on the host (the drafted rows' p), whatever the draw switch
++        const spec = m.ops.spec and m.dr != null and m.dr.?.sq != 0;
++        const path = if (spec and rules.sampled) .host_draw else rules.path(m.ops.draw_rows != null);
++        // TF_DS_GREEDY_ARGMAX (0186): a greedy round consumes nothing but the pick, so its head exchanges the ranks'
++        // (value, index) a row instead of the vocabulary halves; the round decides, so the stretch's graph carries it
++        m.rd.map = m.argmax_map and sampling.argmaxMapWorks(m.eng.world, m.two != null, path);
++        defer m.rd.map = false;
+         const t0 = m.now();
+         if (try self.begin(.verify)) {
+-            try self.wire.int(gpa, u32, @intCast(windows.len));
++            try self.wire.int(gpa, u32, @as(u32, @intCast(windows.len)) | (@as(u32, @intFromBool(m.rd.map)) << 31));
+             for (wins[0..windows.len]) |w| try writeWin(&self.wire, gpa, w, self.kv != null);
+             try self.flush();
+         }
+@@ -1453,22 +1469,6 @@
+         }
+         // 0160 (TF_DS_ABSORB_AFTER_PICK): forward, then the pick, then the taps' absorb left running under the host's
+         // accept and the pass frame's send; off: the served order (forward, absorb, pick)
+-        // every row greedy: the device's argmax (R tokens back); every sampled row one the kernel reproduces and
+-        // TF_DS_T27_DEVICE_DRAW on: the device's draw (R tokens back); else the logits for the host's draws. Read before
+-        // the forward: TF_DS_GREEDY_ARGMAX decides the head's exchange from it.
+-        var rules: sampling.RoundRules = .{};
+-        for (windows) |w| if (w.stream.sampling) |sm| rules.add(sm.temperature, sm.top_k);
+-        // a score stream's rows need every logit on the host
+-        for (windows) |w| {
+-            if (w.stream.score != null) rules.logits = true;
+-        }
+-        // TF_DS_SPEC_SAMPLE: a sampled round reads its logits on the host (the drafted rows' p), whatever the draw switch
+-        const spec = m.ops.spec and m.dr != null and m.dr.?.sq != 0;
+-        const path = if (spec and rules.sampled) .host_draw else rules.path(m.ops.draw_rows != null);
+-        // TF_DS_GREEDY_ARGMAX (0186): a greedy round consumes nothing but the pick, so its head exchanges the ranks'
+-        // (value, index) a row instead of the vocabulary halves; the round decides, so the stretch's graph carries it
+-        m.rd.map = m.argmax_map and sampling.argmaxMapWorks(m.eng.world, m.two != null, path);
+-        defer m.rd.map = false;
+         try m.verify(rows);
+         if (!m.absorb_after_pick) try m.absorbRows(rows, self.built.absorb[0..windows.len]);
+         const t2 = m.now();
+@@ -1839,7 +1839,9 @@
+         // 0180 (TF_DS_TAIL_BATCH): an end state continues a longer prompt too - its rings hold the window, so the
+         // pass computes the new rows only (today's states keep no complete rings and every warm pass replays the
+         // window). Sequential vs a cold pass: the rows' chunk shapes differ (W8's finding; 0121's class).
+-        if (sn.is_end) return self.m.tail_batch != null;
++        // A resumed prompt chunk starts with a complete positional group in ratio-2 KV layers.
++        // Identical odd ends return above without running a chunk; appended turns use an earlier hit.
++        if (sn.is_end) return self.m.tail_batch != null and sn.at % 2 == 0;
+         // TF_DS_EXACT_RESUME: an off-grid state nearer the end than the window resumes on its tail's rows
+         if (sn.tail != null) return tailPre(sn, len, self.m.cfg.window) != null;
+         return sn.at % model.chunk_rows == 0 and sn.at <= len -| self.m.cfg.window;
+@@ -1940,7 +1942,7 @@
+         _ = at;
+         const m = of(ptr).m;
+         // TF_DS_EXACT_RESUME: a state kept at the pass's end carries its tail (the prompt cache budgets it so)
+-        return m.snapBytes() + (if (m.exact_resume) m.tailBytes() else 0);
++        return m.snapBytes() + @max(if (m.exact_resume) m.tailBytes() else 0, if (m.endstate != null) m.endBytes() else 0);
+     }
+ 
+     /// TF_DS_EXACT_RESUME: whether a keep at `at` is a chunk end this pass may take (null: refused), and whether it
+@@ -1982,24 +1984,6 @@
+             try self.m.endCopy(l.slot, sn.end_buf.?.ptr, false);
+             sn.is_end = true;
+         }
+-        // (0178: the end-state cap N - the oldest end state goes when N are live; snapDropFn frees its extras too)
+-        if (end_keep) {
+-            var live: usize = 0;
+-            for (self.snaps.items) |o| live += @intFromBool(o.end_buf != null);
+-            const cap_n: usize = self.m.endstate orelse 0;
+-            while (cap_n > 0 and live >= cap_n) {
+-                var old: ?*Snap = null;
+-                for (self.snaps.items) |o| {
+-                    if (o.end_buf != null) {
+-                        old = o;
+-                        break;
+-                    }
+-                }
+-                const o = old orelse break;
+-                snapDropFn(@ptrCast(self), @ptrCast(o));
+-                live -= 1;
+-            }
+-        }
+         try self.snaps.append(self.gpa, sn);
+         self.next_snap += 1;
+         if (try self.begin(.snap_save)) {
+@@ -2216,7 +2200,7 @@
+ /// costs (carryBytes over the model's kv sources).
+ pub fn kvConfig(m: *const Model) parts.Config {
+     var buf: [16]shard.Source = undefined;
+-    return .{ .cap = m.pool_cap, .parts = @intCast(m.world), .carry_bytes = carryBytes(m.kvSources(&buf)) };
++    return .{ .cap = m.pool_cap, .allow_off_grid_keep = m.endstate != null or m.exact_resume, .parts = @intCast(m.world), .carry_bytes = carryBytes(m.kvSources(&buf)) };
+ }
+ 
+ /// The bytes a carried token costs, rounded up: every source's compressed codes and scales at its ratio (the owner's
+@@ -2317,11 +2301,22 @@
+     return followWith(gpa, m, null);
+ }
+ 
++/// The follower records the payload at save time. Spill-restored buffers contain only the base state.
++const FollowSnapshot = struct {
++    buf: cuda.DeviceBuffer,
++    tail: ?[2]usize = null,
++    end_offset: ?usize = null,
++
++    fn layout(base: usize, tail_bytes: usize, end_bytes: usize, full_end: bool) struct { bytes: usize, end: ?usize } {
++        return if (full_end) .{ .bytes = base + end_bytes, .end = base } else .{ .bytes = base + tail_bytes, .end = null };
++    }
++};
++
+ /// A follower's kept states as its spill side sees them (spill_tier.FollowerFamily).
+ const FollowKept = struct {
+     gpa: std.mem.Allocator,
+     m: *Model,
+-    kept: *std.AutoHashMapUnmanaged(u64, cuda.DeviceBuffer),
++    kept: *std.AutoHashMapUnmanaged(u64, FollowSnapshot),
+     loading: std.AutoHashMapUnmanaged(u64, cuda.DeviceBuffer) = .empty, // restores' destinations, not yet installed
+     seqs: *[max_streams]std.ArrayList(i32),
+ 
+@@ -2345,7 +2340,7 @@
+     fn install(p: *anyopaque, id: u64) anyerror!void {
+         const f = of(p);
+         const kv = f.loading.fetchRemove(id) orelse return error.UnknownSnapshot;
+-        f.kept.put(f.gpa, id, kv.value) catch |e| {
++        f.kept.put(f.gpa, id, .{ .buf = kv.value }) catch |e| {
+             var b = kv.value;
+             b.free();
+             return e;
+@@ -2359,7 +2354,7 @@
+     }
+ 
+     fn buf(p: *anyopaque, id: u64) ?u64 {
+-        return if (of(p).kept.get(id)) |b| b.ptr else null;
++        return if (of(p).kept.get(id)) |sn| sn.buf.ptr else null;
+     }
+ 
+     fn ids(p: *anyopaque, slot: u32) []const i32 {
+@@ -2552,16 +2547,12 @@
+     var slot: usize = 0;
+     var img_rows: std.ArrayList(u8) = .empty; // a prompt's image rows as their pieces come
+     defer img_rows.deinit(gpa);
+-    var kept: std.AutoHashMapUnmanaged(u64, cuda.DeviceBuffer) = .empty; // rank 0's kept states, this rank's part
++    var kept: std.AutoHashMapUnmanaged(u64, FollowSnapshot) = .empty;
+     defer {
+         var ki = kept.valueIterator();
+-        while (ki.next()) |b| b.free();
++        while (ki.next()) |sn| sn.buf.free();
+         kept.deinit(gpa);
+     }
+-    // TF_DS_EXACT_RESUME: each kept state's tail positions [start, end) as this rank's own pass stashed them (rank 0
+-    // restores its own from the Snap; the frames carry neither, and both ranks' passes stash alike). Empty when off.
+-    var kept_tail: std.AutoHashMapUnmanaged(u64, [2]usize) = .empty;
+-    defer kept_tail.deinit(gpa);
+     var fk: FollowKept = .{ .gpa = gpa, .m = m, .kept = &kept, .seqs = &seqs };
+     defer fk.deinit();
+     if (spill) |sd| sd.attach(fk.family());
+@@ -2680,7 +2671,11 @@
+                 if (m.fillSlice(seqs[slot].items[0 .. args.start + args.n], args, f.lo, f.hi)) |_| {} else |err| try roundRefused(err);
+             },
+             .verify => {
+-                const nw = try r.int(u32);
++                const header = try r.int(u32);
++                m.rd.map = header >> 31 != 0;
++                if (m.rd.map and !m.argmax_map) return error.BadFrame;
++                defer m.rd.map = false;
++                const nw = header & 0x7fffffff;
+                 if (nw == 0 or nw > max_streams) return error.BadFrame;
+                 var wins: [max_streams]Win = undefined;
+                 for (0..nw) |k| {
+@@ -2773,25 +2768,32 @@
+                 const end_keep = try r.int(u8) != 0; // (0178: this rank keeps its own extras with the state)
+                 if (s >= max_streams) return error.BadSlot;
+                 // TF_DS_EXACT_RESUME: a state's tail (the window rows of decoder input before its end) rides after it
+-                var b = try cuda.DeviceBuffer.alloc(m.ctx.d, m.snapBytes() + (if (m.exact_resume) m.tailBytes() else 0) + (if (end_keep) m.endBytes() else 0));
+-                m.snapCopy(s, b.ptr, true) catch |err| {
+-                    b.free();
++                const base_bytes = m.snapBytes();
++                const tail_bytes = if (m.exact_resume and !end_keep) m.tailBytes() else 0;
++                const payload = FollowSnapshot.layout(base_bytes, tail_bytes, if (end_keep) m.endBytes() else 0, end_keep);
++                try kept.ensureUnusedCapacity(gpa, 1);
++                var sn: FollowSnapshot = .{ .buf = try cuda.DeviceBuffer.alloc(m.ctx.d, payload.bytes), .end_offset = payload.end };
++                m.snapCopy(s, sn.buf.ptr, true) catch |err| {
++                    sn.buf.free();
+                     refused(err);
+                     continue;
+                 };
+-                if (m.exact_resume) {
+-                    m.tailCopy(s, b.ptr + m.snapBytes(), true) catch |err| refused(err);
+-                    try kept_tail.put(gpa, id, .{ m.tails[s].start, m.tails[s].end });
++                if (tail_bytes != 0) {
++                    m.tailCopy(s, sn.buf.ptr + base_bytes, true) catch |err| {
++                        sn.buf.free();
++                        refused(err);
++                        continue;
++                    };
++                    sn.tail = .{ m.tails[s].start, m.tails[s].end };
+                 }
+-                if (end_keep) {
+-                    // (0178: this rank's drafter rows and head_g into the entry's extras)
+-                    m.endCopy(s, b.ptr + b.len - m.endBytes(), false) catch |err| {
+-                        b.free();
++                if (sn.end_offset) |offset| {
++                    m.endCopy(s, sn.buf.ptr + offset, false) catch |err| {
++                        sn.buf.free();
+                         refused(err);
+                         continue;
+                     };
+                 }
+-                try kept.put(gpa, id, b);
++                kept.putAssumeCapacity(id, sn);
+             },
+             .snap_restore => {
+                 const id = try r.int(u64);
+@@ -2800,35 +2802,26 @@
+                 const from: usize = @intCast(try r.int(u64));
+                 const to: usize = @intCast(try r.int(u64));
+                 const at: usize = @intCast(try r.int(u64));
+-                const b = kept.get(id) orelse return error.UnknownSnapshot; // rank 0 restores only states both ranks keep
++                const sn = kept.get(id) orelse return error.UnknownSnapshot; // rank 0 restores only states both ranks keep
+                 if (from != to) {
+                     if (spill) |sd| sd.bump(to, to + at);
+                     m.copyExtent(from, to, at) catch |err| refused(err);
+                 }
+-                m.snapCopy(s, b.ptr, false) catch |err| refused(err);
+-                // TF_DS_EXACT_RESUME: the tail back into the slot's ring, and the pass resumes where the state stands
+-                if (m.exact_resume) {
+-                    m.tailCopy(s, b.ptr + m.snapBytes(), false) catch |err| refused(err);
+-                    // its positions as at the keep (tailCopy clears them): without them tailPre finds the resume's
+-                    // prepend uncovered here while rank 0 runs it, and the ranks' collectives part
+-                    if (kept_tail.get(id)) |se| {
+-                        m.tails[s].start = se[0];
+-                        m.tails[s].end = se[1];
+-                    }
++                m.snapCopy(s, sn.buf.ptr, false) catch |err| refused(err);
++                if (sn.tail) |positions| {
++                    m.tailCopy(s, sn.buf.ptr + m.snapBytes(), false) catch |err| refused(err);
++                    m.tails[s].start = positions[0];
++                    m.tails[s].end = positions[1];
+                     m.tails[s].resume_at = at;
+                 }
+-                // 0178 (TF_DS_PROMPT_ENDSTATE): the extras (the drafter stages' rows and head_g) when the state has
+-                // them - the entry's size says so
+-                const extra = b.len - m.snapBytes() - (if (m.exact_resume) m.tailBytes() else 0);
+-                if (extra > 0) m.endCopy(s, b.ptr + b.len - extra, true) catch |err| refused(err);
++                if (sn.end_offset) |offset| m.restoreEnd(s, sn.buf.ptr + offset, at) catch |err| refused(err);
+             },
+             .snap_drop => {
+                 const id = try r.int(u64);
+                 if (spill) |sd| sd.dropSnap(id); // its write guarded, its small-state capture done, before the free
+-                _ = kept_tail.remove(id);
+                 if (kept.fetchRemove(id)) |kv| {
+-                    var b = kv.value;
+-                    b.free();
++                    var sn = kv.value;
++                    sn.buf.free();
+                 }
+             },
+             // TF_DS_SPEC_SAMPLE: the round's gather rank 0 issues next (Lanes.speculateRound), the same launches here; a
+@@ -3907,7 +3900,33 @@
+     try std.testing.expect(ln.usable(&end, 9 * c)); // and the continuation (0180): the new rows only
+     try std.testing.expect(!ln.usable(&end, 7 * c)); // never a shorter prompt
+     try std.testing.expect(ln.usable(&plain, 9 * c)); // a state without complete rings replays as before
++    end.at = 8 * c + 1;
++    try std.testing.expect(ln.usable(&end, end.at));
++    try std.testing.expect(!ln.usable(&end, end.at + 257));
++    end.at += 1;
++    try std.testing.expect(ln.usable(&end, end.at + 257));
++    end.at = 8 * c;
+     m.tail_batch = null;
+     try std.testing.expect(ln.usable(&end, 8 * c)); // the identical one needs no switch (0178's own)
+     try std.testing.expect(!ln.usable(&end, 9 * c)); // the continuation does
+ }
++
++
++test "identical prompt follower snapshots restore their own end bytes and no spill or grid padding" {
++    const t = std.testing;
++    const ordinary = FollowSnapshot.layout(16, 0, 8, false);
++    const exact_tail = FollowSnapshot.layout(16, 5, 8, false);
++    const end = FollowSnapshot.layout(16, 5, 8, true);
++    try t.expectEqual(@as(usize, 16), ordinary.bytes);
++    try t.expectEqual(@as(?usize, null), ordinary.end);
++    try t.expectEqual(@as(usize, 21), exact_tail.bytes);
++    try t.expectEqual(@as(?usize, null), exact_tail.end);
++    try t.expectEqual(@as(usize, 24), end.bytes);
++    var image: [32]u8 = @splat(0xec);
++    const expected = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3, 11, 22, 33, 44 };
++    image[end.end.?..][0..8].* = expected;
++    try t.expectEqualSlices(u8, &expected, image[end.bytes - expected.len ..][0..8]);
++    try t.expectEqual(@as(u8, 0xec), image[end.bytes]);
++    const from_spill: FollowSnapshot = .{ .buf = undefined };
++    try t.expect(from_spill.tail == null and from_spill.end_offset == null);
++}
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -188,6 +188,11 @@
+             return error.BadArgument;
+         }
+     }
++    // Match native.open's settings when the follower takes the standalone entry point.
++    o.bf16_partials = std.mem.eql(u8, spillEnv("TF_DS_BF16_PARTIALS") orelse "", "1");
++    o.greedy_argmax = std.mem.eql(u8, spillEnv("TF_DS_GREEDY_ARGMAX") orelse "", "1");
++    o.head_last_chunk = std.mem.eql(u8, spillEnv("TF_DS_HEAD_LAST_CHUNK") orelse "", "1");
++    o.snap_trim = std.mem.eql(u8, spillEnv("TF_DS_SNAP_TRIM") orelse "", "1");
+     const spill = try dsv41.spill_tier.Settings.follower(spillFlag, spillEnv);
+     // the spill tier's refusals from the arguments and environment alone, before the weights load
+     if (spill != null) {
+@@ -322,7 +327,7 @@
+     if (spill != null) {
+         const L = dsv41.lanes.Lanes;
+         snap_vt = .{ .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .usable = L.usableFn, .share = L.snapShareFn };
+-        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")), .keep_protect = pcache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null), .exact = pcache.exactResume(if (std.c.getenv("TF_DS_EXACT_RESUME")) |v| std.mem.span(v) else null), .endstate = pcache.endState(if (std.c.getenv("TF_DS_PROMPT_ENDSTATE")) |v| std.mem.span(v) else null) != null }, @intFromFloat(cache_gib * (1 << 30)));
++        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")), .keep_protect = pcache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null), .exact = pcache.exactResume(if (std.c.getenv("TF_DS_EXACT_RESUME")) |v| std.mem.span(v) else null), .endstate = m.endstate != null, .end_limit = m.endstate orelse 0 }, @intFromFloat(cache_gib * (1 << 30)));
+         var seed: [4]u8 = undefined;
+         io.random(&seed);
+         store_v.setTier(ln.spill.?.tier(), std.mem.readInt(u32, &seed, .little));
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -275,6 +275,13 @@
+         const m = try gpa.create(Model);
+         errdefer gpa.destroy(m);
+         m.* = undefined;
++        m.gside = null;
++        m.gside_fork = null;
++        m.gside_join = null;
++        m.clk_ph = @splat(0);
++        m.clk_cnt = @splat(0);
++        m.clk_rounds = 0;
++        m.accept_rows = 0;
+         m.gpa = gpa;
+         m.exact_resume = api.prompt_cache.exactResume(envOf("TF_DS_EXACT_RESUME")); // every rank alike
+         m.absorb_after_pick = envOnOff(envOf("TF_DS_ABSORB_AFTER_PICK")); // rank-local: an uneven pair stays bit-identical
+@@ -574,9 +581,8 @@
+         if (o.engram_dir) |edir| {
+             // TF_DS_ENGRAM_CPUS: the Engram host threads' CPUs, parsed once here; unset leaves every thread's affinity alone
+             const cpus_env = if (std.c.getenv("TF_DS_ENGRAM_CPUS")) |v| std.mem.span(v) else null;
+-            const ncpu = std.Thread.getCpuCount() catch 1;
+-            engram_io.setCpus(cpus_env, ncpu) catch {
+-                std.log.err("dsv41: TF_DS_ENGRAM_CPUS={s}: expected a-b ranges and/or comma lists of CPUs below {d}", .{ cpus_env.?, ncpu });
++            engram_io.setCpus(cpus_env) catch {
++                std.log.err("dsv41: TF_DS_ENGRAM_CPUS={s}: expected a-b ranges and/or comma lists of CPUs in the process affinity mask", .{cpus_env.?});
+                 return error.InvalidEngramCpus;
+             };
+             const map_text = try std.Io.Dir.cwd().readFileAlloc(io, o.token_map orelse return error.NoTokenMap, a, .limited(1 << 26));
+@@ -999,7 +1005,8 @@
+     /// The layers whose window rings a Snap carries: all of them, or with TF_DS_SNAP_TRIM only the encoder's (the
+     /// decoder's last half is rebuilt by the replay, so its rings are dead weight in every kept state).
+     pub fn snap_rings(m: *const Model) usize {
+-        return if (m.snap_trim) m.eng.c.layers / 2 else m.rings.len;
++        // A full prompt-end hit replays zero rows and must carry its decoder rings too.
++        return if (m.snap_trim and m.endstate == null) m.eng.c.layers / 2 else m.rings.len;
+     }
+ 
+     /// Slot `slot`'s own state into `buf` (save: true) or back from it, in the stream's order (no wait): with the
+@@ -1835,19 +1842,22 @@
+     /// 0178: the slot's end state (the drafter stages' rows and head_g) between `ptr` (an end_buf) and the live state:
+     /// `to_device` restores, else it saves. Both halves are device bytes.
+     pub fn endCopy(m: *Model, slot: usize, ptr: u64, to_device: bool) !void {
+-        const d = m.ctx.d;
+-        const stage: usize = if (m.dpool) |*p| p.planeBytes() / p.slots else 0;
+-        if (m.dpool) |*p| {
+-            for (0..p.stages) |j| {
+-                const src = if (to_device) ptr + j * stage else p.view(j, slot);
+-                const dst = if (to_device) p.view(j, slot) else ptr + j * stage;
+-                try d.check(d.api.cuMemcpyDtoD_v2(dst, src, stage), "cuMemcpyDtoD");
++        // Prompt head logits and DSpark absorbs are enqueued on this nonblocking model stream.
++        // Put save and restore on the same stream as their producers and consumers.
++        const stage_bytes = if (m.dpool) |*pool| pool.planeBytes() / pool.slots else 0;
++        var cursor = ptr;
++        if (m.dpool) |*pool| {
++            for (0..pool.stages) |j| {
++                try m.copyState(pool.view(j, slot), cursor, stage_bytes, !to_device);
++                cursor += stage_bytes;
+             }
+         }
+-        const off = (if (m.dpool) |*p| p.stages else 0) * stage;
+-        const src = if (to_device) ptr + off else m.ch.head_g;
+-        const dst = if (to_device) m.ch.head_g else ptr + off;
+-        try d.check(d.api.cuMemcpyDtoD_v2(dst, src, m.vocab * 4), "cuMemcpyDtoD");
++        try m.copyState(m.ch.head_g, cursor, m.vocab * 4, !to_device);
++    }
++
++    pub fn restoreEnd(m: *Model, slot: usize, ptr: u64, at: usize) !void {
++        try m.endCopy(slot, ptr, true);
++        if (m.dpool) |*pool| pool.absorbed[slot] = at;
+     }
+ 
+     /// 0177 (TF_DS_DRAFT_TRIAGE): the round's dead-row mask, u8 a row (1: the probe says its predecessor will reject
+@@ -1874,9 +1884,8 @@
+ 
+     /// The round's token kernel over R rows into amax: the draw under setDraw rules, else the argmax.
+     fn launchPick(m: *Model, R: usize) !void {
+-        if (m.rd.map_done) { // TF_DS_GREEDY_ARGMAX: the head exchanged the pairs; the reduce is the pick
+-            m.rd.map_done = false;
+-            return m.ops.argmaxReduce(m.stream, m.rd.amap, m.eng.world, m.rd.amap_n, R, m.amax);
++        if (m.rd.map) { // TF_DS_GREEDY_ARGMAX: the head exchanged the pairs; the reduce is the pick
++            return m.ops.argmaxReduce(m.stream, m.rd.amap, m.eng.world, m.eng.w.head.n, R, m.amax);
+         }
+         if (m.draw_rows == 0) return m.ops.argmaxRows(m.stream, m.rd.logits, m.vocab, m.vocab, R, m.amax);
+         if (R != m.draw_rows) return error.BadRound;
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -446,7 +446,7 @@
+     }
+     // TF_DS_EXACT_RESUME: the store's tail rule stands aside for every state then (Rules.exact), so the family's
+     // usable is the resume gate even without the spill tier (a grid state too near the end is passed over)
+-    if (st.m.exact_resume) snaps.usable = L.usableFn;
++    if (st.m.exact_resume or st.m.endstate != null) snaps.usable = L.usableFn;
+     const kv_parts: ?lanes.kv_parts.Source = if (st.m.kvs != null) .{ .ctx = &st.lanes, .read = L.kvPartsFn } else null;
+     const engram: ?api.EngramSource = if (st.m.eh != null and st.m.eh.?.metrics) .{ .ctx = &st.lanes, .read = L.engramStatsFn } else null;
+     const pair: ?Pair = if (pair_mode == .exit) .{ .watch = pairWatch, .abort = pairAbort } else null;
+diff --git a/zig/src/families/dsv41/parts.zig b/zig/src/families/dsv41/parts.zig
+--- a/zig/src/families/dsv41/parts.zig
++++ b/zig/src/families/dsv41/parts.zig
+@@ -266,6 +266,7 @@
+ };
+ 
+ pub const Config = struct {
++    allow_off_grid_keep: bool = false,
+     cap: usize, // pool positions over every part (Model.pool_cap)
+     parts: u8 = 1, // 1: unsharded (TF_DS_KV_SHARD off); else one a rank
+     carry: bool = true, // carries and moves across parts (GLM TF_GLM_KV_SHARD_CARRY)
+@@ -1545,7 +1546,7 @@
+             .keep => |k| {
+                 const l = self.lives.items[self.liveIndex(k.stream) orelse return error.UnknownStream];
+                 if (self.keptIndex(k.kept) != null) return error.KeptExists;
+-                if (k.at == 0 or k.at % chunk_rows != 0 or k.at > l.size or k.base != l.base or k.part != l.part or k.end != l.base + l.size) return error.BadOp;
++                if (k.at == 0 or (!self.cfg.allow_off_grid_keep and k.at % chunk_rows != 0) or k.at > l.size or k.base != l.base or k.part != l.part or k.end != l.base + l.size) return error.BadOp;
+                 try self.newGen(k.gen);
+                 try self.kept.append(gpa, .{ .id = k.kept, .part = k.part, .base = k.base, .at = k.at, .end = k.end, .gen = k.gen });
+             },
+@@ -2295,7 +2296,10 @@
+         const cy = carryOf(&p);
+         t.check("10 rescue: the carry names the hit's rows, all of them, part 0 to part 1", cy != null and cy.?.rows == 8 * C and cy.?.src == 24 * C and cy.?.src_part == 0 and cy.?.dst_part == 1);
+         t.check("10 rescue: the extent first, then the carry (the follower holds the ADMIT before the rows travel)", index(&p, .admit) != null and index(&p, .carry) != null and index(&p, .admit).? < index(&p, .carry).? and count(&p, .carry) == 1 and count(&p, .copy) == 0);
+-        t.check("10 counters: nothing counted at planning", f.pl.counters.hits == 0 and f.pl.counters.rescued == 0);
++        // The counted_at_plan mutant writes through a const observer. Read the actual counters
++        // here so an optimized test cannot fold the intended read-only plan into this check.
++        const observed: *const volatile Counters = &f.pl.counters;
++        t.check("10 counters: nothing counted at planning", observed.hits == 0 and observed.rescued == 0);
+         try f.apply(&p);
+         const c = f.pl.counters;
+         t.check("10 rescue: counted once at apply as rescued, no refusal, no no_part", c.hits == 1 and c.rescued == 1 and c.pressure == 0 and c.others == 0 and c.no_part == 0 and c.tokens == 8 * C and c.bytes == 8 * C * 720);
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -2424,23 +2424,27 @@
+     const def = @max(aio.slots / 4, 1);
+     const per = if (aio.batch) |b| @min(def, b) else def; // TF_DS_ENGRAM_AIO_BATCH: an upper bound on a batch's rows
+     var batch: [64]u64 = undefined;
+-    var nb: usize = 0;
++    var first: usize = 0;
++    var pending: usize = 0;
++    errdefer for (0..pending) |i| aio.wait(batch[(first + i) % batch.len]) catch {};
+     var at: usize = 0;
+-    errdefer for (batch[0..nb]) |id| aio.wait(id) catch {};
+     while (at < ids.len) : (at += per) {
++        if (pending == batch.len) {
++            const oldest = batch[first];
++            first = (first + 1) % batch.len;
++            pending -= 1;
++            try aio.wait(oldest);
++        }
+         const n = @min(per, ids.len - at);
+-        if (nb == batch.len) return error.TooManyRows;
+-        batch[nb] = try aio.start(t, ids[at..][0..n], out_w[at * t.row_w ..][0 .. n * t.row_w], out_s[at * t.row_s ..][0 .. n * t.row_s]);
+-        nb += 1;
+-    }
+-    for (batch[0..nb], 0..) |id, i| {
+-        aio.wait(id) catch |err| {
+-            for (batch[i + 1 .. nb]) |rest| aio.wait(rest) catch {};
+-            nb = 0;
+-            return err;
+-        };
+-    }
+-    nb = 0;
++        batch[(first + pending) % batch.len] = try aio.start(t, ids[at..][0..n], out_w[at * t.row_w ..][0 .. n * t.row_w], out_s[at * t.row_s ..][0 .. n * t.row_s]);
++        pending += 1;
++    }
++    while (pending != 0) {
++        const oldest = batch[first];
++        first = (first + 1) % batch.len;
++        pending -= 1;
++        try aio.wait(oldest);
++    }
+ }
+ 
+ /// The rows of one block of the indexer's scores for a chunk of `n` rows over `n_comp_end` compressed keys: as many as
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -55,17 +55,15 @@
+     return @min(b, @max(cap, bucket_min));
+ }
+ 
+-/// TF_DS_IDX_BUCKET_FINER: the round's bucket, rounded up to a multiple of `gran` instead of to the next power of two,
+-/// so the indexer's work sizes to the context (70K positions are 69 blocks of 1024, not 131072 keys).
++/// Optional deep-context buckets. Preserve the captured small shapes for both compression ratios.
+ pub const bucket_finer_env = "TF_DS_IDX_BUCKET_FINER";
+-/// Finer buckets' granularity: bucket_min (1024 keys), which keeps the bucket a whole number of the indexer's 64-key
+-/// tiles and of the candidate pool's blocks (indexKeys, candFast, blockMax) at every ratio.
+-pub const bucket_gran = bucket_min;
++pub const bucket_gran = 32768;
+ 
+ /// TF_DS_IDX_BUCKET_FINER's bucket: `n` rounded up to a multiple of `gran` (at least bucket_min), never past bucketFor's
+ /// own bucket - every buffer is sized for that one, and the finer bucket is always at or under it.
+ pub fn bucketFiner(n: usize, cap: usize, gran: usize) usize {
+-    const b = std.mem.alignForward(usize, @max(n, bucket_min), gran);
++    if (n <= 65536) return bucketFor(n, cap);
++    const b = std.mem.alignForward(usize, n, gran);
+     return @min(b, bucketFor(n, cap));
+ }
+ 
+@@ -291,9 +289,7 @@
+     // the logits (the caller sets it before the forward); `map_done` says the head wrote the pairs, so the pick is the
+     // reduce over them; amap holds them, [R, world, 2] u32 in rank order.
+     map: bool = false,
+-    map_done: bool = false,
+     amap: u64,
+-    amap_n: usize = 0, // a rank's columns of the head (the reduce's index offset)
+     taps: u64, // bf16 [R, taps * D]
+     // wo_a's suh concatenated a layer (wo_a_rot: torch.cat of the slices' suh, cached on the layer)
+     wo_suh: []u64,
+@@ -388,7 +384,9 @@
+         rd.cur_ratio = 0;
+         rd.clk = 0;
+         rd.bucket = 0;
++        rd.dead = 0;
+         rd.finer = ops_mod.onValue(if (std.c.getenv(bucket_finer_env)) |v| std.mem.span(v) else null);
++        rd.hot = null; // set by Model.open only when TF_DS_EXPERT_HOT_CACHE is on (rd starts undefined)
+         rd.has_cand = false;
+         rd.kk = 0;
+         rd.sglue = 0;
+@@ -545,8 +543,6 @@
+         rd.logits = try a.take(R * e.world * hh * 4);
+         rd.amap = try a.take(R * e.world * 8); // (TF_DS_GREEDY_ARGMAX: pairs, tiny; allocated either way)
+         rd.map = false;
+-        rd.map_done = false;
+-        rd.amap_n = 0;
+         rd.taps = try a.take(R * @max(c.dspark_taps.slice().len, 1) * d * 2);
+         // wo_a_rot's suh: the slices' suh one after another (torch.cat's bytes)
+         rd.wo_suh = try gpa.alloc(u64, w.layers.len);
+@@ -1538,18 +1534,22 @@
+ /// from the host copy (`ranges`: 3 * E, expert e's at [e], [E + e], [2E + e]) into `out`; returns how many.
+ pub fn hotPick(counts: []const u32, ranges: []const [2]u64, k: usize, out: [][2]u64) usize {
+     const e_count = counts.len;
+-    if (e_count == 0 or k == 0 or out.len < 3 * k) return 0;
+-    var taken: [8]bool = @splat(false);
++    if (ranges.len / 3 < e_count) return 0;
++    const limit = @min(k, out.len / 3, e_count);
++    var previous: ?usize = null;
+     var n: usize = 0;
+-    while (n < k) : (n += 1) {
++    while (n < limit) : (n += 1) {
+         var best: ?usize = null;
+         for (0..e_count) |i| {
+-            if (taken[i]) continue;
++            // Walk the stable ranking in descending count and ascending expert ID.
++            if (previous) |last| {
++                if (counts[i] > counts[last] or (counts[i] == counts[last] and i <= last)) continue;
++            }
+             if (best == null or counts[i] > counts[best.?]) best = i; // (ties to the lower id)
+         }
+         const i = best orelse break;
+         if (counts[i] == 0) break;
+-        taken[i] = true;
++        previous = i;
+         out[n * 3 + 0] = ranges[i];
+         out[n * 3 + 1] = ranges[e_count + i];
+         out[n * 3 + 2] = ranges[2 * e_count + i];
+@@ -1941,8 +1941,6 @@
+         // roundArgmax's reduce turns them into the pick (the same answer the whole logits would have given).
+         try e.ops.argmaxPair(e.s, rd.hl, hn, hn, R, rd.amap + e.comm.rank * R * 8);
+         try e.comm.allGatherInPlace(rd.amap, R * 8, e.s);
+-        rd.map_done = true;
+-        rd.amap_n = hn;
+         try rd.mark(e, .head);
+         return;
+     }
+@@ -2159,13 +2157,13 @@
+     try std.testing.expectEqual(@as(usize, 1024), bucketFiner(1, 1 << 20, bucket_gran));
+     try std.testing.expectEqual(@as(usize, 1024), bucketFiner(1024, 1 << 20, bucket_gran));
+     try std.testing.expectEqual(@as(usize, 2048), bucketFiner(1025, 1 << 20, bucket_gran));
+-    try std.testing.expectEqual(@as(usize, 3072), bucketFiner(2230, 1 << 20, bucket_gran));
+-    try std.testing.expectEqual(@as(usize, 70656), bucketFiner(70000, 1 << 20, bucket_gran)); // against 131072
++    try std.testing.expectEqual(@as(usize, 4096), bucketFiner(2230, 1 << 20, bucket_gran));
++    try std.testing.expectEqual(@as(usize, 98304), bucketFiner(70000, 1 << 20, bucket_gran)); // against 131072
+     try std.testing.expectEqual(@as(usize, 4096), bucketFiner(4096, 1 << 20, bucket_gran));
+     try std.testing.expectEqual(@as(usize, 1024), bucketFiner(2230, 672, bucket_gran)); // the cap (floored at bucket_min) is the ceiling
+     for ([_]usize{ 1, 1023, 1024, 4097, 65537, 70000, 1 << 18 }) |n| {
+         const f = bucketFiner(n, 1 << 20, bucket_gran);
+-        try std.testing.expect(f % bucket_gran == 0 and f >= @min(n, 1 << 20) and f <= bucketFor(n, 1 << 20));
++        try std.testing.expect((n <= 65536 or f % bucket_gran == 0) and f >= @min(n, 1 << 20) and f <= bucketFor(n, 1 << 20));
+     }
+     try std.testing.expectEqual(@as(usize, 4096), bucketFor(5000, 4096));
+ }
+@@ -2212,6 +2210,20 @@
+     return error.NotPortedYet;
+ }
+ 
++test "hotPick accepts every routed expert ID and a bounded output" {
++    var counts: [385]u32 = @splat(0);
++    counts[384] = 9;
++    counts[128] = 9;
++    counts[8] = 3;
++    var ranges: [3 * counts.len][2]u64 = undefined;
++    for (&ranges, 0..) |*row, i| row.* = .{ i, 1 };
++    var out: [6][2]u64 = undefined;
++    try std.testing.expectEqual(@as(usize, 2), hotPick(&counts, &ranges, 5, &out));
++    try std.testing.expectEqual([2]u64{ 128, 1 }, out[0]);
++    try std.testing.expectEqual([2]u64{ 384, 1 }, out[3]);
++    try std.testing.expectEqual([2]u64{ 2 * counts.len + 384, 1 }, out[5]);
++}
++
+ test "TF_DS_EXPERT_HOT_CACHE: hotPick takes the top counts' ranges, ties to the lower id" {
+     // two experts of three, each with gate/up/down ranges (3 * E in id order)
+     const ranges = [_][2]u64{ .{ 10, 1 }, .{ 20, 2 }, .{ 30, 3 }, .{ 11, 1 }, .{ 21, 2 }, .{ 31, 3 }, .{ 12, 1 }, .{ 22, 2 }, .{ 32, 3 } };
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -115,7 +115,7 @@
+     const base: u64 = @intFromFloat(0.5 * gib);
+     if (gib_opt) |g| return @intFromFloat(g * gib);
+     const v = getenv("TF_DS_PROMPT_CACHE_AUTO") orelse return base;
+-    if (!std.mem.eql(u8, std.mem.span(v), "1") and !std.mem.eql(u8, std.mem.span(v), "on")) return base;
++    if (!std.mem.eql(u8, v, "1") and !std.mem.eql(u8, v, "on")) return base;
+     const text = procText(a, io, "/proc/meminfo") orelse return base;
+     const info = budget.meminfo(text) orelse return base;
+     return cache_fit.autoBudget(info.total, info.total -| info.available, base);
+@@ -480,7 +480,7 @@
+         if (want > 0) {
+             h.snap_vt = .{ .bytes = sn.bytes, .save = sn.save, .restore = sn.restore, .drop = sn.drop };
+             if (@hasField(@TypeOf(sn), "share")) h.snap_vt.share = sn.share;
+-            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")), .exact = api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")), .endstate = api.prompt_cache.endState(getenv("TF_DS_PROMPT_ENDSTATE")) != null }, want);
++            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")), .exact = api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")), .endstate = api.prompt_cache.endState(getenv("TF_DS_PROMPT_ENDSTATE")) != null, .end_limit = api.prompt_cache.endState(getenv("TF_DS_PROMPT_ENDSTATE")) orelse 0 }, want);
+             // TF_DS_EXACT_RESUME: the store passes its tail rule to the family's usable, wired without a tier too
+             if (h.cache.?.rules.exact) if (@hasField(@TypeOf(sn), "usable")) {
+                 h.snap_vt.usable = sn.usable;
+diff --git a/zig/src/server/http_body.zig b/zig/src/server/http_body.zig
+--- a/zig/src/server/http_body.zig
++++ b/zig/src/server/http_body.zig
+@@ -6,7 +6,8 @@
+ const Allocator = std.mem.Allocator;
+ 
+ pub fn limit() usize {
+-    return limitOf(std.c.getenv("TF_DS_BODY_LIMIT_MB"));
++    const p = std.c.getenv("TF_DS_BODY_LIMIT_MB") orelse return limitOf(null);
++    return limitOf(std.mem.span(p));
+ }
+ 
+ /// The body limit: ``TF_DS_BODY_LIMIT_MB`` (a positive MiB count; unset, non-numeric or 0: the served 32) - 64 MiB
+@@ -14,7 +15,7 @@
+ pub fn limitOf(mb: ?[:0]const u8) usize {
+     const base = 32 * 1024 * 1024;
+     const v = mb orelse return base;
+-    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return base;
++    const n = std.fmt.parseInt(usize, v, 10) catch return base;
+     return if (n >= 1) n *| (1024 * 1024) else base;
+ }
+ 
+diff --git a/zig/src/server/reply_text.zig b/zig/src/server/reply_text.zig
+--- a/zig/src/server/reply_text.zig
++++ b/zig/src/server/reply_text.zig
+@@ -47,7 +47,7 @@
+     at: ?usize = null,
+ 
+     pub fn find(f: *FirstFind, text: []const u8, tag: []const u8) ?usize {
+-        if (tag.len == 0) return find(text, tag);
++        if (tag.len == 0) return findTag(text, 0, tag);
+         if (f.base) |b| {
+             if (b != text.ptr or text.len < f.scanned) f.* = .{};
+         }
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -370,6 +370,8 @@
+     long long* o = out + (long long)blockIdx.x * k;
+     for (int i = threadIdx.x; i < k; i += blockDim.x) o[i] = cols[i] < v ? cols[i] : -1;
+ }
++
++__device__ unsigned tf_ds_block_argmax_v(const float* row, int n, float* out_v);
+ 
+ // TF_DS_GREEDY_ARGMAX: a round whose rows are all greedy consumes only the pick, so each rank's (value, index) a row
+ // travels instead of its vocabulary half. The argmax is tf_ds_block_argmax_v's (NaN skipped, ties to the lower column);

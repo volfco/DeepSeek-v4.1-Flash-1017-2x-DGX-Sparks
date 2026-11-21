@@ -1,0 +1,374 @@
+From 0000000000000000000000000000000000000115 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:28:27 +0000
+Subject: [PATCH] prompt cache: TF_DS_SHARED_PLAN=1 flags a kept shared state from the marks plan
+
+keepWith's shared flag comes from a 64-entry note ring keyed at lookup, which misses its own states:
+a shared cut dropped by min_gap keeps its chunk end via the history mark with no note, the note keys
+floorGrid(w) while dsv41 keeps at the chunk end (markEnds) so with no tier nothing matches, and
+interleaving lookups rotate keys out (the deepest-shared-state case of the shared-plan review).
+
+With TF_DS_SHARED_PLAN=1 (on only when exactly "1") lookup returns, per shared_prefixes cut, the
+position its state is kept at -- floorStart(starts, w) for planned families, the chunk end at or
+before the cut (w / Rules.chunk * Rules.chunk) when Rules.chunk > 0 (dsv41's markEnds), else the
+note ring's floorGrid(w) -- as Plan/Lookup.shared. The kept hook (lane_host's Job.shared) matches
+its keep position against that set and passes KeepInfo.shared, which keepWith trusts instead of
+hashing the ring. The set is keyed on the cuts, not on surviving marks, so a cut dropped by min_gap
+still flags the state kept at its chunk end.
+
+Unset (or any value but "1"): byte-identical to base -- keepWith hashes the note ring exactly as
+before (the note loop is untouched on both paths), lookup derives no flags (no allocation, &.{}),
+the hook's bit is ignored, and Rules.chunk (set from loaded.grid at the dsv41 store's setup, tier or
+not) is read only by the unused sharedKeeps. Rank 1's lanes_main is deliberately unplumbed (its
+lookups carry no shared_prefixes, so its flag set is empty either way); no pair agreement is needed,
+the flag is per-rank cache-eviction order and per-rank disk metadata.
+
+Tests: zig build test and zig/tests/server/zig_test.sh pass; the patch's own tests:
+prompt_cache_test.zig's "1"-only parse, the min_gap chunk-end keep flagged with the ring silent,
+the on/off ring-equivalence case, the interleaved-lookups ring-rotation case, and
+lane_host_reuse_test.zig's end-to-end kept-hook flag test. Not run on a pair.
+---
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index b69dfc4d..2a524baa 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -228,6 +228,7 @@ pub const LaneHost = struct {
+         prefilled: ?i96 = null,
+         entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
+         marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)
++        shared: []const u32 = &.{}, // the keeps that stand at a shared cut (gpa-owned; TF_DS_SHARED_PLAN's flags)
+         kept0: u64 = 0, // the store's kept count when the job looked it up
+         tried_disk: bool = false, // it waited for a restore once: a later lookup takes what memory has
+         deferred_since: ?i96 = null, // its restore was first refused for capacity then (asked again until defer_ns)
+@@ -248,7 +249,7 @@ pub const LaneHost = struct {
+             if (!cacheable(r)) return;
+             const pics = r.images.len > 0; // (the tier records each picture's identity and the prompt's model ids)
+             // an image span keyed by its digest (Request.cacheKey)
+-            _ = store.keepWith(r.cacheKey(), at, s, r.chunks, .{ .group = job.join.group, .images = pics, .media = if (pics) tierMedia(r) else &.{}, .raw = if (pics) r.prompt else &.{}, .parent = job.parent, .fork = job.fork, .lineage = job.lineage });
++            _ = store.keepWith(r.cacheKey(), at, s, r.chunks, .{ .group = job.join.group, .images = pics, .media = if (pics) tierMedia(r) else &.{}, .raw = if (pics) r.prompt else &.{}, .parent = job.parent, .fork = job.fork, .lineage = job.lineage, .shared = std.mem.indexOfScalar(u32, job.shared, at) != null });
+         }
+ 
+         /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
+@@ -486,6 +487,7 @@ pub const LaneHost = struct {
+     fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
+         job.reported();
+         h.gpa.free(job.marks);
++        h.gpa.free(job.shared);
+         h.gpa.free(job.lineage);
+         const s = &job.stream;
+         const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
+@@ -637,6 +639,7 @@ pub const LaneHost = struct {
+             job.entry = l.entry;
+             job.kept0 = store.counts.kept;
+             job.marks = l.marks;
++            job.shared = l.shared;
+             reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept } };
+             if (store.groups) job.join = store.join(r.cacheKey(), l.entry, r.images.len == 0 and r.drafts);
+             if (l.entry) |e| {
+@@ -903,6 +906,8 @@ pub const LaneHost = struct {
+         job.entry = null; // nothing was restored: the store keeps the entry for the next lookup
+         h.gpa.free(job.marks);
+         job.marks = &.{};
++        h.gpa.free(job.shared);
++        job.shared = &.{};
+         job.stream.deinit(h.gpa);
+         job.proposer.deinit();
+         job.started = false;
+diff --git a/zig/src/core/lane_host_reuse_test.zig b/zig/src/core/lane_host_reuse_test.zig
+index afb30847..08c92ef4 100644
+--- a/zig/src/core/lane_host_reuse_test.zig
++++ b/zig/src/core/lane_host_reuse_test.zig
+@@ -440,3 +440,79 @@ test "a turn resuming its kept state cuts in when the tokens it computes fit cut
+     for (seen[first + 1 .. second]) |s| try std.testing.expectEqual(t2.items.len, s[0]);
+     for (seen[second..]) |s| try std.testing.expect(s[0] != t2.items.len);
+ }
++
++test "TF_DS_SHARED_PLAN: the kept hook flags a shared cut's state from the marks plan, and leaves an unshared keep without it" {
++    const gpa = std.testing.allocator;
++    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
++    defer cfg.deinit(gpa);
++    var target: lanes.fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var clock: lanes.fake.FixedClock = .{};
++    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
++    defer core.deinit();
++    const Snaps = struct {
++        fn bytes(_: *anyopaque, at: u32) u64 {
++            return 64 + 4 * @as(u64, at);
++        }
++        fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
++            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
++            return f.save(@ptrCast(@alignCast(owner.?)), at);
++        }
++        fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
++            return error.BackendRestores; // lane-core backends restore inside their own prompt pass
++        }
++        fn drop(ptr: *anyopaque, saved: pc.Saved) void {
++            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
++            f.drop(saved);
++        }
++    };
++    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0, .chunk = 8 }, 1 << 20);
++    defer store.deinit();
++    store.shared_plan = true;
++    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
++    host.cache = &store;
++    try host.start();
++    defer host.stop();
++    const Box = struct {
++        mutex: std.Io.Mutex = .init,
++        done: ?Reason = null,
++        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
++            const b: *@This() = @ptrCast(@alignCast(ctx));
++            b.mutex.lockUncancelable(std.testing.io);
++            defer b.mutex.unlock(std.testing.io);
++            switch (e.*) {
++                .finished => |f| b.done = f.reason,
++                else => {},
++            }
++        }
++        fn wait(b: *@This()) Reason {
++            while (true) {
++                b.mutex.lockUncancelable(std.testing.io);
++                const d = b.done;
++                b.mutex.unlock(std.testing.io);
++                if (d) |r| return r;
++                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
++            }
++        }
++    };
++    const e = host.engine();
++    // the first question's history at 24 drops the shared cut at 26 (min_gap): its chunk end is 24, the history mark's own
++    const t1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4, 6, 2, 6, 4, 3, 3, 8, 3, 2, 7 };
++    var b1: Box = .{};
++    const r1: Request = .{ .prompt = &t1, .max_tokens = 2, .history_len = 24, .shared_prefixes = &.{26} };
++    try e.submit(1, &r1, .{ .ctx = &b1, .event = Box.event });
++    try std.testing.expectEqual(Reason.length, b1.wait());
++    try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
++    try std.testing.expectEqual(@as(u32, 24), store.entries.items[0].at);
++    try std.testing.expect(store.entries.items[0].shared); // flagged by the plan, although the ring never notes it
++    try std.testing.expectEqual(@as(usize, 0), store.shared_keys.items.len);
++    // the switch off: the same kind of keep is unflagged, exactly as in base
++    store.shared_plan = false;
++    const t2 = [_]u32{ 2, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9, 0, 4, 5, 2, 3, 2, 7, 9, 5, 0, 2, 8, 8, 4, 1, 9, 7 };
++    var b2: Box = .{};
++    const r2: Request = .{ .prompt = &t2, .max_tokens = 2, .history_len = 24, .shared_prefixes = &.{26} };
++    try e.submit(2, &r2, .{ .ctx = &b2, .event = Box.event });
++    try std.testing.expectEqual(Reason.length, b2.wait());
++    try std.testing.expectEqual(@as(usize, 2), store.entries.items.len);
++    try std.testing.expect(!store.entries.items[1].shared);
++}
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+index d1677d2e..7372ee8b 100644
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -429,6 +429,8 @@ pub const Rules = struct {
+     tail: u32 = 0,
+     /// The family's own resume grid (dsv41: its 2048-row chunk; 0: none): durable points and shared marks stand on it.
+     grid: u32 = 0,
++    /// The chunk end at or before a mark where its state is kept (dsv41's markEnds; 0: at the mark): the shared flags.
++    chunk: u32 = 0,
+     /// The rows a resumed pass replays at its end (dsv41: the window): a state is usable only this far from the end.
+     window: u32 = 0,
+     /// TF_DS_KEEP_PROTECT=1: a longer state counts as superseding only within its own conversation (`related`), so a
+@@ -475,11 +477,12 @@ pub const Entry = struct {
+ 
+ pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
+ 
+-/// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
+-pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
++/// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`); `shared` names the keeps
++/// that stand at a shared cut (each cut's position as the family keeps it, marked or not; TF_DS_SHARED_PLAN).
++pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{}, shared: []const u32 = &.{} };
+ 
+-/// The entry a backend restores itself (null: the pass starts at 0) and the pass's marks.
+-pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
++/// The entry a backend restores itself (null: the pass starts at 0), the pass's marks and its shared keeps.
++pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{}, shared: []const u32 = &.{} };
+ 
+ /// A side-effect-free look at what a prompt would resume: the best usable memory state, and a longer durable point.
+ pub const Probe = struct { memory: ?*Entry = null, durable: ?Point = null };
+@@ -493,8 +496,14 @@ pub const KeepInfo = struct {
+     parent: ?u64 = null,
+     fork: u32 = 0,
+     lineage: []const Fork = &.{}, // the pass's (Store.passLineage), copied into the entry
++    shared: bool = false, // the state stands at a shared cut (Plan/Lookup's `shared`); TF_DS_SHARED_PLAN trusts it over the note ring
+ };
+ 
++/// TF_DS_SHARED_PLAN=1: a kept state is flagged shared from the marks plan at the kept hook (off: the note ring).
++pub fn sharedPlan(v: ?[]const u8) bool {
++    return std.mem.eql(u8, v orelse "0", "1");
++}
++
+ pub const Store = struct {
+     gpa: Allocator,
+     family: Snapshots,
+@@ -505,6 +514,7 @@ pub const Store = struct {
+     entries: std.ArrayList(*Entry) = .empty,
+     counts: Counts = .{},
+     shared_keys: std.ArrayList(u64) = .empty, // the tokens of recently planned shared cuts, hashed (at most SHARED_KEYS)
++    shared_plan: bool = false, // TF_DS_SHARED_PLAN=1: keepWith flags shared from KeepInfo, not the note ring
+     imprint: ?*imprint.Imprint = null, // --learn: shared cuts' states on disk, read back by later sessions and servers
+     tier: ?Tier = null, // spill v2: kept states written at keep, read back by restore jobs (setTier)
+     groups: bool = false, // 0111: kept states carry their conversation (setTier turns it on)
+@@ -865,7 +875,7 @@ pub const Store = struct {
+     /// Before a prompt pass: restore the longest state `prompt` resumes (from 0: none or a failed copy) and plan its marks.
+     pub fn begin(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque) !Plan {
+         const l = try s.lookup(a, prompt, history_len, shared, starts);
+-        const e = l.entry orelse return .{ .marks = l.marks };
++        const e = l.entry orelse return .{ .marks = l.marks, .shared = l.shared };
+         const ok = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| true else |err| blk: {
+             note("restoring {d} tokens failed ({s}); prefilling from the start", .{ e.at, @errorName(err) });
+             break :blk false;
+@@ -873,7 +883,7 @@ pub const Store = struct {
+         const from = if (ok) e.at else 0;
+         s.resumed(e, prompt, ok);
+         s.reserve(prompt, null, l.marks); // restored: the state it resumed may go too (a peer restores before it drops)
+-        return .{ .from = from, .marks = l.marks };
++        return .{ .from = from, .marks = l.marks, .shared = l.shared };
+     }
+ 
+     /// begin without the restore, for backends that restore inside their own prompt pass and then call `resumed`.
+@@ -889,8 +899,9 @@ pub const Store = struct {
+             const at = if (s.rules.planned) m else s.rules.floorGrid(w);
+             if (at > 0) s.noteShared(prompt[0 .. at + s.rules.lookahead]);
+         }
++        const shared_ats: []const u32 = if (s.shared_plan) try s.sharedKeeps(a, starts, shared) else &.{};
+         s.reserve(prompt, e, marks_);
+-        return .{ .entry = e, .marks = marks_ };
++        return .{ .entry = e, .marks = marks_, .shared = shared_ats };
+     }
+ 
+     /// Room for every state the pass keeps, made before it: a peer that mirrors the keeps hears of these evictions with the request.
+@@ -923,6 +934,18 @@ pub const Store = struct {
+         s.shared_keys.append(s.gpa, k) catch {};
+     }
+ 
++    /// Where the family keeps each shared cut's state (`Lookup.shared`; TF_DS_SHARED_PLAN): its mark, the chunk end at
++    /// or before it, or the cut on the family's grid — unlike the note ring's key, kept even when the cut's mark dropped.
++    fn sharedKeeps(s: *const Store, a: Allocator, starts: []const u32, shared: []const u32) ![]const u32 {
++        var out: std.ArrayList(u32) = .empty;
++        for (shared) |w| {
++            // (the planned branch is unreachable today: glm sets planned but never shared_plan; future: glm + TF_DS_SHARED_PLAN)
++            const at = if (s.rules.planned) floorStart(starts, w) else if (s.rules.chunk > 0) w / s.rules.chunk * s.rules.chunk else s.rules.floorGrid(w);
++            if (at > 0 and std.mem.indexOfScalar(u32, out.items, at) == null) try out.append(a, at);
++        }
++        return out.toOwnedSlice(a);
++    }
++
+     /// The marks whose state the budget can hold (a new slice in `a`); the rest are refused now, so no pass, nor a peer, copies them.
+     fn fitting(s: *Store, a: Allocator, marks_: []const u32) ![]const u32 {
+         defer a.free(marks_);
+@@ -992,7 +1015,7 @@ pub const Store = struct {
+         const n = @as(usize, at) + s.rules.lookahead;
+         if (at == 0 or n > prompt.len) return false;
+         s.clock += 1;
+-        const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
++        const shared = if (s.shared_plan) info.shared else std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
+         for (s.entries.items) |e| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n])) {
+             e.used = s.clock; // the same state again: no copy
+             if (shared and !e.shared) { // now a shared prefix: the family's copy marked, and on disk
+diff --git a/zig/src/core/prompt_cache_test.zig b/zig/src/core/prompt_cache_test.zig
+index 0cd6ac7b..06c9b866 100644
+--- a/zig/src/core/prompt_cache_test.zig
++++ b/zig/src/core/prompt_cache_test.zig
+@@ -446,6 +446,86 @@ test "TF_DS_EDIT_MARK: the stable mark keeps min_gap from the resume point and f
+     try std.testing.expectEqualSlices(u32, &.{16}, try on.marks(a, &prompt, 0, 16, &.{}, &.{}, &near_history));
+ }
+ 
++test "TF_DS_SHARED_PLAN: only 1 turns it on" {
++    try std.testing.expect(pc.sharedPlan("1"));
++    for ([_]?[]const u8{ null, "", "0", "2", "on", "true", " 1", "1 " }) |v| try std.testing.expect(!pc.sharedPlan(v));
++}
++
++test "TF_DS_SHARED_PLAN: a state kept at a shared cut's chunk end is shared even when the ring never notes it" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0, .min_gap = 4, .chunk = 8 }, 1 << 20);
++    defer s.deinit();
++    s.shared_plan = true;
++    var prompt: [40]u32 = undefined;
++    for (&prompt, 1..) |*t, i| t.* = @intCast(i);
++    // the first question's history at 27 drops the shared cut at 26 (min_gap): its chunk end is kept all the same
++    const l = try s.lookup(a, &prompt, 27, &.{26}, &.{});
++    try std.testing.expectEqualSlices(u32, &.{27}, l.marks);
++    try std.testing.expectEqualSlices(u32, &.{24}, l.shared);
++    try std.testing.expectEqual(@as(usize, 0), s.shared_keys.items.len); // the ring misses: the cut's note is never made
++    for (l.marks) |m| { // dsv41 keeps at the chunk end of each mark (markEnds), the hook asked as lane_host's is
++        const at = m / 8 * 8;
++        f.at = at;
++        _ = s.keepWith(&prompt, at, null, &.{}, .{ .shared = std.mem.indexOfScalar(u32, l.shared, at) != null });
++    }
++    const e = s.find(&prompt, &.{});
++    try std.testing.expectEqual(@as(u32, 24), e.?.at);
++    try std.testing.expect(e.?.shared); // flagged: eviction protection and the tier's share
++}
++
++test "TF_DS_SHARED_PLAN: a shared keep is flagged with the switch on as the ring flags it with the switch off" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var prompt: [40]u32 = undefined;
++    for (&prompt, 1..) |*t, i| t.* = @intCast(i);
++    for ([_]bool{ false, true }) |on| {
++        var f: Fake = .{ .gpa = gpa };
++        var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0, .min_gap = 4, .chunk = 8 }, 1 << 20);
++        defer s.deinit();
++        s.shared_plan = on;
++        const l = try s.lookup(a, &prompt, 33, &.{24}, &.{}); // the cut at 24 and the history at 33: two chunk ends
++        try std.testing.expectEqualSlices(u32, &.{ 24, 33 }, l.marks);
++        try std.testing.expectEqual(@as(usize, if (on) 1 else 0), l.shared.len); // the flags come only with the switch on
++        for (l.marks) |m| {
++            const at = m / 8 * 8;
++            f.at = at;
++            _ = s.keepWith(&prompt, at, null, &.{}, .{ .shared = std.mem.indexOfScalar(u32, l.shared, at) != null });
++        }
++        try std.testing.expect(s.find(prompt[0..25], &.{}).?.shared); // the cut's own keep: noted and planned alike
++        try std.testing.expect(!s.find(prompt[0..33], &.{}).?.shared); // the history mark's keep stands at no shared cut
++    }
++}
++
++test "TF_DS_SHARED_PLAN: a shared cut stays flagged after interleaved lookups rotate the note ring" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var prompt: [40]u32 = undefined;
++    for (&prompt, 1..) |*t, i| t.* = @intCast(i);
++    for ([_]bool{ false, true }) |on| {
++        var f: Fake = .{ .gpa = gpa };
++        var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0, .min_gap = 4, .chunk = 8 }, 1 << 20);
++        defer s.deinit();
++        s.shared_plan = on;
++        const l = try s.lookup(a, &prompt, 30, &.{24}, &.{}); // the cut at 24 notes its key
++        try std.testing.expectEqual(@as(usize, 1), s.shared_keys.items.len);
++        for (0..64) |i| { // 64 interleaved cuts: the FIFO rotates the first note out
++            const other = [_]u32{ @intCast(100 + i), 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
++            _ = try s.lookup(a, &other, 10, &.{14}, &.{});
++        }
++        f.at = 24;
++        _ = s.keepWith(&prompt, 24, null, &.{}, .{ .shared = std.mem.indexOfScalar(u32, l.shared, 24) != null });
++        try std.testing.expect(s.find(prompt[0..25], &.{}).?.shared == on); // on: the plan's flag; off: the ring's miss (base)
++    }
++}
++
+ test "prompts under min_prompt keep nothing (their extra prompt call would cost more than reuse saves), longer ones keep as before" {
+     const gpa = std.testing.allocator;
+     var arena: std.heap.ArenaAllocator = .init(gpa);
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index 0e53fec9..bf5cb11d 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -458,6 +458,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+             // the spill tier (off by default: nothing below runs then)
+             if (@hasField(@TypeOf(loaded), "tier")) {
+                 const store = &h.cache.?;
++                store.rules.chunk = loaded.grid; // the family keeps at the chunk end at or before a mark, tier or not
++                store.shared_plan = api.prompt_cache.sharedPlan(getenv("TF_DS_SHARED_PLAN"));
+                 if (loaded.tier) |t| {
+                     if (@hasField(@TypeOf(sn), "usable")) h.snap_vt.usable = sn.usable;
+                     var seed: [4]u8 = undefined;

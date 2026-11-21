@@ -1,0 +1,188 @@
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index 544ac7b..2e98502 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -898,8 +898,19 @@ extern "C" __global__ void tf_ds_apply_pool_kernel(float* score, long long ss, i
+     }
+ }
+ 
+-// An inclusive cutoff on the unique score/column keys for a pool of at most 8192 blocks.
+-__device__ __forceinline__ unsigned long long tf_ds_pool_kth(const float* row, int n, int k) {
++// The key's top 32 bits, which hold the score's whole order (the low half is the inverted column): the fused pool keeps
++// this in shared memory instead of the float maximum, and rebuilds the key when a pass needs it.
++__device__ __forceinline__ unsigned tf_ds_score_high(float x) {
++    return (unsigned)(tf_ds_score_key(x, 0) >> 32);
++}
++
++// A cached high word and its column as the key tf_ds_score_key makes for that score.
++__device__ __forceinline__ unsigned long long tf_ds_score_key_from(unsigned high, int j) {
++    return ((unsigned long long)high << 32) | (unsigned long long)(0xFFFFFFFFu - (unsigned int)j);
++}
++
++// An inclusive cutoff on the unique score/column keys for a pool of at most 8192 blocks, over cached high words.
++__device__ __forceinline__ unsigned long long tf_ds_pool_kth(const unsigned* highs, int n, int k) {
+     __shared__ unsigned int hist[256];
+     __shared__ unsigned long long prefix_s, mask_s;
+     __shared__ int want_s;
+@@ -915,7 +926,7 @@ __device__ __forceinline__ unsigned long long tf_ds_pool_kth(const float* row, i
+         __syncthreads();
+         const unsigned long long prefix = prefix_s, mask = mask_s;
+         for (int i = threadIdx.x; i < n; i += blockDim.x) {
+-            const unsigned long long u = tf_ds_score_key(row[i], i);
++            const unsigned long long u = tf_ds_score_key_from(highs[i], i);
+             if ((u & mask) == prefix) atomicAdd(&hist[(u >> (8 * d)) & 0xff], 1u);
+         }
+         __syncthreads();
+@@ -970,7 +981,7 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+     pdl_enter(pdl);
+     const int r = blockIdx.x;
+     const int nb = 1 + (width - 1) / bsize;
+-    extern __shared__ float maxima[];
++    extern __shared__ unsigned highs[];   // each block's key high word (tf_ds_score_high: the score's whole order)
+     const float ninf = -__int_as_float(0x7f800000);
+     const float* row = score + (long long)r * ss;
+     // phase 1: the block maxima (tf_ds_block_max_kernel's rule, one thread a block) and, with `keys`, that block's
+@@ -1000,7 +1011,7 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+             }
+             float v = nan ? __int_as_float(0x7fc00000) : m;
+             if (b == last) v = __int_as_float(0x7f800000);
+-            maxima[b] = v;
++            highs[b] = tf_ds_score_high(v);
+         }
+         if (fold) {
+             // bsize == 8: a 64-key tile is eight consecutive blocks, i.e. eight consecutive lanes of this iteration
+@@ -1014,7 +1025,7 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+         }
+     }
+     __syncthreads();
+-    const unsigned long long kth = k == nb ? 0 : tf_ds_pool_kth(maxima, nb, k);
++    const unsigned long long kth = k == nb ? 0 : tf_ds_pool_kth(highs, nb, k);
+     const long long limit = every[r];
+     const int lane = threadIdx.x & 31;
+     const int warp = threadIdx.x >> 5;
+@@ -1022,8 +1033,8 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+     int base = 0;
+     for (int first = 0; first < nb; first += blockDim.x) {
+         const int col = first + threadIdx.x;
+-        const float value = col < nb ? maxima[col] : ninf;
+-        const bool picked = col < nb && tf_ds_score_key(value, col) >= kth;
++        const unsigned high = col < nb ? highs[col] : 0u;   // 0 sorts below every key's high word
++        const bool picked = col < nb && tf_ds_score_key_from(high, col) >= kth;
+         const unsigned bits = __ballot_sync(0xffffffffu, picked);
+         if (lane == 0) warp_end[warp] = __popc(bits);
+         __syncthreads();
+@@ -1037,7 +1048,9 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+             warp_end[lane] = total;
+         }
+         __syncthreads();
+-        const bool valid = picked && col < limit && value > ninf;
++        // the old test was `value > -inf`: -inf's high word is the floor and the canonical NaN's is above +inf's but
++        // is not a value, so both are invalid here without rebuilding the float
++        const bool valid = picked && col < limit && high > 0x007FFFFFu && high != 0xFFC00000u;
+         if (mask && col < nb) mask[(long long)r * ms + col] = valid;
+         if (picked && cblk) {
+             const int rank = base + (warp ? warp_end[warp - 1] : 0) + __popc(bits & ((1u << lane) - 1));
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 31ce7ca..fe43564 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -76,6 +76,13 @@ pub fn scoreKey(x: f32, j: usize) u64 {
+     return key ^ 0x8000000000000000;
+ }
+ 
++/// The fused pool's shared array: each block's cached high word, from the same rule as `blockMaxima`.
++pub fn blockHighs(score: []const f32, width: usize, bsize: usize, vis: i64, out: []u32) void {
++    var v: [max_nbk]f32 = undefined;
++    blockMaxima(score, width, bsize, vis, v[0 .. (width + bsize - 1) / bsize]);
++    for (out[0 .. (width + bsize - 1) / bsize], v[0 .. (width + bsize - 1) / bsize]) |*o, x| o.* = scoreHigh(x);
++}
++
+ /// The block maxima (tf_ds_block_max_kernel's rule): an amax over each block of `bsize` scores (a NaN wins, the NaN is
+ /// quiet 0x7fc00000), the row's newest block (floor((vis - 1) / bsize), floor division on negatives) +inf.
+ pub fn blockMaxima(score: []const f32, width: usize, bsize: usize, vis: i64, out: []f32) void {
+@@ -97,6 +104,23 @@ pub fn blockMaxima(score: []const f32, width: usize, bsize: usize, vis: i64, out
+     }
+ }
+ 
++/// The cached high word the kernel keeps in shared memory (tf_ds_score_high): the key's top 32 bits, which is the whole
++/// score order. The float maximum is not needed once the column's key can be rebuilt from it.
++pub fn scoreHigh(x: f32) u32 {
++    return @truncate(scoreKey(x, 0) >> 32);
++}
++
++/// A cached high word and its column as the key `scoreKey` makes for that score (tf_ds_score_key_from).
++pub fn keyFromHigh(high: u32, j: usize) u64 {
++    return (@as(u64, high) << 32) | (0xFFFFFFFF - @as(u64, @intCast(j)));
++}
++
++/// The pool pick's validity on a cached high word, which replaces the old `value > -inf` test: -inf's high word is the
++/// floor and the canonical NaN's sorts above +inf yet is not a value, so both are invalid.
++pub fn highValid(high: u32) bool {
++    return high > scoreHigh(ninf) and high != scoreHigh(@bitCast(@as(u32, 0x7FC00000)));
++}
++
+ /// The top-k of the maxima by the key order (ties to the lower column; k <= nb), ascending columns, a column at or
+ /// past `every` as -1. Independent of the kernel's radix select (a sort, the same total order).
+ pub fn topCols(bmax: []const f32, every: i64, k: usize, out: []i64) void {
+@@ -232,6 +256,48 @@ test "poolPick zeroes the mask, sets picked blocks above -inf, lists -1 otherwis
+     try expectEqual([_]i32{ -1, 0 }, cblk2);
+ }
+ 
++test "scoreHigh/keyFromHigh: a cached high word rebuilds the very key scoreKey makes" {
++    const corpus = [_]f32{
++        0.0, -0.0, 1.0, -1.0, 1e-30, -1e-30, 65504.0, -65504.0, std.math.inf(f32), ninf,
++        @bitCast(@as(u32, 0x7FC00000)), @bitCast(@as(u32, 0x7F800001)), // canonical and a signalling NaN pattern
++        @bitCast(@as(u32, 0x00000001)), -3.402823466e+38, 3.402823466e+38,
++    };
++    for (corpus) |x| for ([_]usize{ 0, 1, 7, 8191, 8192 }) |j| {
++        if (j >= max_nbk) continue;
++        try expectEqual(scoreKey(x, j), keyFromHigh(scoreHigh(x), j));
++    };
++    // the highs order the scores as the keys do, and -inf/NaN are the two invalid ones
++    try std.testing.expect(scoreHigh(-1.0) < scoreHigh(0.0));
++    try std.testing.expect(scoreHigh(0.0) < scoreHigh(1.0));
++    try std.testing.expect(scoreHigh(1.0) < scoreHigh(std.math.inf(f32)));
++    try std.testing.expect(scoreHigh(std.math.inf(f32)) < scoreHigh(@bitCast(@as(u32, 0x7FC00000))));
++    try std.testing.expect(!highValid(scoreHigh(ninf)));
++    try std.testing.expect(!highValid(scoreHigh(@bitCast(@as(u32, 0x7FC00000)))));
++    try std.testing.expect(highValid(scoreHigh(0.0)));
++    try std.testing.expect(highValid(scoreHigh(std.math.inf(f32))));
++    try std.testing.expect(highValid(scoreHigh(-65504.0)));
++    // signed zeros share one key byte for byte
++    try std.testing.expectEqual(scoreHigh(0.0), scoreHigh(-0.0));
++}
++
++test "blockHighs: the newest block's +inf is valid, a NaN and -inf blocks are not, signed zeros tie" {
++    var s = [_]f32{ 0.0, -0.0, ninf, 3.0 };
++    var highs: [2]u32 = undefined;
++    blockHighs(&s, 4, 2, 4, &highs); // vis = 4: the newest block is 1, pinned +inf
++    try expectEqual(scoreHigh(std.math.inf(f32)), highs[1]);
++    try std.testing.expect(highValid(highs[1]));
++    try expectEqual(scoreHigh(0.0), highs[0]); // -0.0 vs +0.0: one key
++    try std.testing.expect(highValid(highs[0]));
++    // an -inf block is invalid even when selected; a NaN block is invalid too (it sorts above +inf)
++    var neg = [_]f32{ ninf, ninf };
++    blockHighs(&neg, 2, 2, 0, highs[0..1]); // vis 0 pins nothing: the block is the -inf floor
++    try std.testing.expect(!highValid(highs[0]));
++    var nan = [_]f32{ @bitCast(@as(u32, 0x7FC00000)), 0.0 };
++    blockHighs(&nan, 2, 2, 0, highs[0..1]);
++    try std.testing.expect(!highValid(highs[0]));
++    try std.testing.expect(highs[0] > scoreHigh(std.math.inf(f32)));
++}
++
+ test "foldKeys: the keys are scoreKey's, a tile's maximum is its largest key (unsigned), NaN ranks first" {
+     // a tile boundary at 64 keys, plus a partial last tile
+     var s: [70]f32 = undefined;
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 9a7941c..9941db7 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -505,7 +505,7 @@ pub const Ops = struct {
+         a.add(keys);
+         a.add(tmax);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
+-        try cuda.launch.launch(o.idx_fused_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
++        try cuda.launch.launch(o.idx_fused_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(u32)), .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// model.py apply_candidates, in place: -inf at every column of score [rows, width] (row stride ss) whose block of

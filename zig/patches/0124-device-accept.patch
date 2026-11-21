@@ -1,0 +1,377 @@
+From 210c1d7aa5812402053243cdf08ffc3e473ec820 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Sun, 15 Nov 2026 11:40:38 -0800
+Subject: [PATCH 2/6] dsv41: TF_DS_DEVICE_ACCEPT (off by default) computes a
+ chain window's keep on the device - the foundational piece of an on-device
+ accept
+
+Switch: TF_DS_DEVICE_ACCEPT ("1" or "on"; anything else or unset: off). Read by rank 0's lane at init on every rank alike; the switch carries no fingerprint bit and no switches-frame bit: it changes only which side compares, and an uneven pair is still bit-identical (the follower never reads the keep). Greedy and device-draw rounds only: a host_draw round (speculative sampling's p off the host logits) never calls the pick kernel's accept path, and a tree window (Window.parents != null) never gets the device keep; both keep the host rule, byte for byte as the base.
+
+The accept rule (core/lanes/accept.zig's acceptPath) for a CHAIN window (no parents; row i's parent row i - 1) is the identity prefix 0..keep where keep is the longest prefix r >= 1 with tokens[r] == picks[r - 1], keep in [1, rows]. Today the picks come back (sync + D2H of R u32 into amax_host) and the host's conclude walks the window to rebuild that path. This patch computes the keep on the device, bit-identically: a new tf_ds_accept_chain_kernel (kernels/cuda/dsv41_ops.cu; one block per window, 32 threads, one thread walks R <= 16 rows) runs right after the pick kernel in roundArgmax, reading the same buffers the forward already wrote (Round.inputs' int64 window ids; the picks at amax), and lands one u32 keep per window right after the picks in amax (keeps at amax + R * 4). The same D2H then carries R + nwin u32s, and verifyFn stores each window's keep in its Verified's new device_keep field. conclude takes it: for a non-forced window whose keep is in range and whose parent array is a chain, the path is chainPath(keep) (the first keep rows) instead of acceptPath; anything else - an out-of-range keep, a tree, an absent one - takes acceptPath, unchanged. The keeps and the picks never cross ranks: each rank reads the same frames as before, and the bytes on the wire (and the reply) are the same as the base, set or unset.
+
+Sizing. amax and amax_host grew by max_streams (16) u32 keep slots, not by this patch's design sketch's +4: the workspace bound for windows per round is max_streams everywhere (round.max_rows = 48 rows + 16 keeps * 4 B = 256 B, one small arena take). With the sketch's +4, a shared round of more than four windows (allowed: --parallel goes to 16) would have let the kernel write past the amax slot into whatever the bump allocator lays out next (arena.take has no guard). The memcpy stays (R + nwin) * 4; an unset switch launches nothing and memcpy's exactly the base's R * 4.
+
+What this is not. It does not make the draft pass one frame. The depth rule (rule.headDepth) is rank 0's host state; the cuts (the thinking budget, the loop guard, the call gate) are Stream host state evaluated on the committed tokens inside conclude; the T26 keyed-draft keys exist only in the pass frame; trees need the parent array uploaded (chains need only row0/counts). Baseten's one-graph steps (spec_accept, crates/kernels/cu/ops.cu:591, capture_spec_blk, capture_spec_vadapt) read committed tokens from a snapshot two steps back, which maps onto Baseten's one-stream loop, not onto this engine's two-frame round with rank 1 a follower of every frame. This patch is the foundational piece - the accept's keep, on the device, for the windows that need no more state than row offsets - plus a measure of completeness: with it, device accept is exactly as complete as the depth rule and the cuts allow, and that is still short of a one-frame round.
+
+LOSSY: no. Bits identical: the device computes the same integer the host would (the longest matching prefix), the path is the same, the committed tokens and the reply are the same. exact.py must stay IDENTICAL with the switch on; if it does not, the kernel is wrong and this does not ship. Gates on the pair, in order: exact.py (IDENTICAL expected), then tf-dsv41-lanes --profile and the served process's TF_DS_ROUND_PROFILE /metrics line (0123) for the send/logits/sample shares - if small, stop; this patch alone does not move them much (it removes the host acceptPath walk, not the sync). TF_DS_DEVICE_ACCEPT_CHECK was considered and dropped: equivalence is covered by host tests (accept.zig's chain property test over all 0/1 token windows up to 6 rows pins acceptPath to the identity prefix; engine.zig's chainPath test pins the identity by length; conclude falls back to acceptPath on any out-of-range keep or non-chain parent array) and by exact.py on the pair. A design note rides at docs/device-accept.md in the Sparks repo (untracked there).
+
+Tests (host): accept.zig's a chain's acceptPath is the identity prefix over the matching drafts (exhaustive 0/1 tokens, 1..6 rows) and engine.zig's chainPath takes a window's first keep rows, alongside the existing suites; the device path itself needs the pair. The .cu gets only a syntax check on this host: clang++ -fsyntax-only on the extracted kernel under a plain-C++ stub (no CUDA toolkit on this host: no nvcc, no libdevice; the -x cuda frontend cannot run) passes; the image's nvcc build on the Sparks is the first real compile of the new kernel. Host gates: `zig build test` (one reported spurious "failed command" on this host, pre-existing flaky big binaries; that binary - 408/408 - and every .zig-cache/o test binary pass standalone), and `zig build install native -Dfatbins=/home/colum/.cache/tf-dummy-fatbins` succeeds (the CUDA path type-checks; the .cu itself is not compiled here). Not run here: any pair, any smoke, exact.py.
+
+base: series-0119 (TF_REF fbbc971 + zig/patches 0001-0122) + 0123
+---
+ zig/kernels/cuda/dsv41_ops.cu    | 27 ++++++++++++++++++++++++
+ zig/src/core/lanes/accept.zig    | 25 +++++++++++++++++++++++
+ zig/src/core/lanes/backend.zig   |  3 ++-
+ zig/src/core/lanes/engine.zig    | 28 +++++++++++++++++++++----
+ zig/src/families/dsv41/lanes.zig | 35 ++++++++++++++++++++++++++++++++
+ zig/src/families/dsv41/model.zig | 33 ++++++++++++++++++++++++++----
+ zig/src/families/dsv41/ops.zig   | 18 ++++++++++++++++
+ 7 files changed, 160 insertions(+), 9 deletions(-)
+
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index d849036..b804195 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -552,6 +552,33 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_argmax_rows_kernel(cons
+     if (threadIdx.x == 0) out[blockIdx.x] = token;
+ }
+ 
++// TF_DS_DEVICE_ACCEPT: the longest prefix of a CHAIN window's drafts whose tokens equal the target's picks
++// (acceptPath's keep for a chain; the full tree rule stays on the host). One block per window; the ids
++// (i64) and the picks (u32) are the buffers the forward already wrote, so no new data crosses the pair.
++extern "C" __global__ void __launch_bounds__(32) tf_ds_accept_chain_kernel(
++        const long long* ids, const unsigned* picks, const unsigned* row0, const unsigned* wrows,
++        int nwin, unsigned* keep_out) {
++    const int w = blockIdx.x;
++    if (w >= nwin) return;
++    const unsigned r0 = row0[w], rows = wrows[w];
++    if (rows == 0) { if (threadIdx.x == 0) keep_out[w] = 0; return; }
++    // one thread walks the rows (R <= 16): keep = 1 + the longest matching prefix
++    if (threadIdx.x == 0) {
++        unsigned keep = 1;
++        unsigned at = 0;
++        while (at + 1 < rows) {
++            const unsigned r = r0 + at + 1;
++            const unsigned pr = r0 + at;
++            const long long id = ids[r];
++            const unsigned pick = picks[pr];
++            if (id != (long long)pick) break;
++            keep += 1;
++            at += 1;
++        }
++        keep_out[w] = keep;
++    }
++}
++
+ // ---- the vision tower (vit.zig): DeepSeek's ViT and aligner as the served lane runs them on torch, each torch op its
+ // own rounding point (this file builds with --fmad=false, so a product and a sum stay two roundings).
+ 
+diff --git a/zig/src/core/lanes/accept.zig b/zig/src/core/lanes/accept.zig
+index 1d175eb..81d642b 100644
+--- a/zig/src/core/lanes/accept.zig
++++ b/zig/src/core/lanes/accept.zig
+@@ -78,6 +78,31 @@ pub fn sanitizeTree(gpa: Allocator, tokens: []const u32, parents: []const i32, b
+     return .{ .tokens = try out_t.toOwnedSlice(gpa), .parents = try out_p.toOwnedSlice(gpa) };
+ }
+ 
++test "a chain's acceptPath is the identity prefix over the matching drafts" {
++    const gpa = std.testing.allocator;
++    for ([_]usize{ 1, 2, 3, 5, 6 }) |rows| {
++        const parents = try rowParents(gpa, rows, null);
++        defer gpa.free(parents);
++        const total = @as(usize, 1) << @intCast(2 * rows);
++        var combo: usize = 0;
++        while (combo < total) : (combo += 1) {
++            var tokens: [6]u32 = undefined;
++            var picks: [6]u32 = undefined;
++            for (0..rows) |i| {
++                tokens[i] = @intCast((combo >> @intCast(i)) & 1);
++                picks[i] = @intCast((combo >> @intCast(rows + i)) & 1);
++            }
++            const path = try acceptPath(gpa, tokens[0..rows], parents, picks[0..rows]);
++            defer gpa.free(path);
++            // the 5-line host rule the device kernel implements: 1 + the longest prefix with tokens[r] == picks[r - 1]
++            var keep: usize = 1;
++            while (keep < rows and tokens[keep] == picks[keep - 1]) keep += 1;
++            try std.testing.expectEqual(keep, path.len);
++            for (path, 0..) |r, i| try std.testing.expectEqual(@as(u32, @intCast(i)), r);
++        }
++    }
++}
++
+ test "accept path follows matching children" {
+     const gpa = std.testing.allocator;
+     const parents = [_]i32{ -1, 0, 0, 1 };
+diff --git a/zig/src/core/lanes/backend.zig b/zig/src/core/lanes/backend.zig
+index 1474d02..c8ca753 100644
+--- a/zig/src/core/lanes/backend.zig
++++ b/zig/src/core/lanes/backend.zig
+@@ -26,7 +26,8 @@ pub const Window = struct {
+ pub const Alternative = struct { tokens: [4]u32, probs: [4]f64 };
+ 
+ /// A window's results: each row's drawn token and the held drafts the forward verified (host drafts echo back).
+-pub const Verified = struct { sampled: []u32, drafts: []u32 };
++/// `device_keep`: TF_DS_DEVICE_ACCEPT's keep count for a chain window (the device's; null: the host's acceptPath decides).
++pub const Verified = struct { sampled: []u32, drafts: []u32, device_keep: ?u32 = null };
+ 
+ /// Absorb a stream's kept rows into its draft head and hold `depth` drafts for its next round.
+ pub const DraftRequest = struct {
+diff --git a/zig/src/core/lanes/engine.zig b/zig/src/core/lanes/engine.zig
+index 47e335f..f9afcbe 100644
+--- a/zig/src/core/lanes/engine.zig
++++ b/zig/src/core/lanes/engine.zig
+@@ -23,6 +23,13 @@ const Outcome = struct { got: []const u32, path: []const u32, cut: ?usize, follo
+ const Result = struct { rows: u32, keep: u32, got: []const u32 };
+ const Unread = struct { event: usize, handle: u64 };
+ 
++/// A chain window's path from the device's keep count: its first `keep` rows (acceptPath's identity prefix for a chain).
++fn chainPath(a: Allocator, keep: u32) ![]u32 {
++    const path = try a.alloc(u32, keep);
++    for (path, 0..) |*r, i| r.* = @intCast(i);
++    return path;
++}
++
+ pub const Engine = struct {
+     gpa: Allocator,
+     cfg: *const Config,
+@@ -337,7 +344,7 @@ pub const Engine = struct {
+         try e.backend.verify(&windows, &out);
+         const tokens = try win.tokens(e, windows[0], out[0]);
+         const parents = try win.rowParents(e, windows[0]);
+-        const o = try e.conclude(s, plan, out[0].sampled, tokens, parents, windows[0].positions);
++        const o = try e.conclude(s, plan, out[0].sampled, tokens, parents, windows[0].positions, out[0].device_keep);
+         if (o.path.len < rows or plan.parents != null) try e.backend.keep(&windows, &.{o.path});
+         const held_levels = s.held_levels;
+         if (e.cfg.family_mtp and s.drafts) {
+@@ -394,7 +401,7 @@ pub const Engine = struct {
+         const paths = try a.alloc([]const u32, plans.len);
+         for (plans, windows, out, outcomes, paths) |p, w, o, *oc, *path| {
+             const tokens = try win.tokens(e, w, o);
+-            oc.* = try e.conclude(p.stream, p, o.sampled, tokens, try win.rowParents(e, w), w.positions);
++            oc.* = try e.conclude(p.stream, p, o.sampled, tokens, try win.rowParents(e, w), w.positions, o.device_keep);
+             path.* = oc.path;
+             const rows: u32 = @intCast(w.rows());
+             p.stream.min_rows = if (p.stream.min_rows == 0) rows else @min(p.stream.min_rows, rows);
+@@ -428,7 +435,7 @@ pub const Engine = struct {
+     }
+ 
+     /// Commit the target-sampled path (after the thinking budget's cut); the kept rows and their following tokens.
+-    fn conclude(e: *Engine, s: *Stream, p: Plan, sampled: []const u32, tokens: []const u32, parents: []const i32, positions: []const u64) !Outcome {
++    fn conclude(e: *Engine, s: *Stream, p: Plan, sampled: []const u32, tokens: []const u32, parents: []const i32, positions: []const u64, device_keep: ?u32) !Outcome {
+         const a = e.arena.allocator();
+         const rows = tokens.len;
+         var path: []u32 = undefined;
+@@ -439,7 +446,13 @@ pub const Engine = struct {
+             try committed.appendSlice(a, p.forced);
+             try committed.append(a, s.popForce() orelse sampled[rows - 1]);
+         } else {
+-            path = try accept.acceptPath(a, tokens, parents, sampled);
++            path = blk: {
++                if (device_keep) |keep| {
++                    // the device's keep for a chain window; an out-of-range one (or a tree) takes the host rule
++                    if (keep >= 1 and keep <= tokens.len and accept.isChain(parents)) break :blk try chainPath(a, keep);
++                }
++                break :blk try accept.acceptPath(a, tokens, parents, sampled);
++            };
+             for (path[1..]) |r| try committed.append(a, tokens[r]);
+             try committed.append(a, sampled[path[path.len - 1]]);
+             if (rows > 1) {
+@@ -712,3 +725,10 @@ pub const Engine = struct {
+         e.backend.release(s);
+     }
+ };
++
++test "chainPath takes a window's first keep rows" {
++    const a = std.testing.allocator;
++    const path = try chainPath(a, 7);
++    defer a.free(path);
++    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5, 6 }, path);
++}
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 77f70f2..4d62189 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -672,6 +672,7 @@ pub const Lanes = struct {
+     next: u64 = 0,
+     snaps: std.ArrayList(*Snap) = .empty, // kept prompt states, oldest first
+     keep_protect: bool = false, // TF_DS_KEEP_PROTECT=1: a placement takes a snap a longer one covers first, then the oldest non-shared (placeKept)
++    accept_chain: bool = false, // TF_DS_DEVICE_ACCEPT=1: chain windows' keep counts from the device (bit-identical; rank 0's host rule stands when off)
+     switches_sent: bool = false, // sendSwitches ran (openPair can run twice: openSpill)
+     next_snap: u64 = 1,
+     fill: ?Fill = null, // the prompt pass that runs in pieces between rounds, from its next chunk
+@@ -687,6 +688,7 @@ pub const Lanes = struct {
+     pub fn init(gpa: std.mem.Allocator, m: *Model) Lanes {
+         var ln: Lanes = .{ .gpa = gpa, .m = m, .peer = if (m.world > 1) m.peer() else null };
+         ln.keep_protect = api.prompt_cache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null); // every rank alike
++        ln.accept_chain = envOne("TF_DS_DEVICE_ACCEPT"); // every rank alike; an uneven pair is still bit-identical (the follower never reads the keep)
+         // the round costs by rows: ROUND_MS[min(rows, len) - 1] (the served table, or TF_DS_ROUND_MS)
+         const t = m.round_ms;
+         for (&ln.wc, 0..) |*c, i| c.* = .{ .width = @intCast(i + 1), .ms = t[@min(i, t.len - 1)] };
+@@ -1409,6 +1411,29 @@ fn chunkRows(start: usize, len: usize) usize {
+         // TF_DS_SPEC_SAMPLE: a sampled round reads its logits on the host (the drafted rows' p), whatever the draw switch
+         const spec = m.ops.spec and m.dr != null and m.dr.?.sq != 0;
+         const path = if (spec and rules.sampled) .host_draw else rules.path(m.ops.draw_rows != null);
++        // TF_DS_DEVICE_ACCEPT: chain windows' keep counts from the device (one kernel after the pick, in roundArgmax);
++        // every window a chain and the rows' picks from the device, else the host's acceptPath decides as before
++        var accept_n: usize = 0;
++        if (self.accept_chain and path != .host_draw) {
++            var chain = true;
++            for (windows) |w| {
++                if (w.parents != null) {
++                    chain = false;
++                    break;
++                }
++            }
++            if (chain) {
++                var a_row0: [max_streams]u32 = undefined;
++                var a_wrows: [max_streams]u32 = undefined;
++                for (0..windows.len) |k| {
++                    a_row0[k] = @intCast(self.built.wins[k].row);
++                    a_wrows[k] = @intCast(windows[k].rows());
++                }
++                try m.setAccept(a_row0[0..windows.len], a_wrows[0..windows.len]);
++                accept_n = windows.len;
++            }
++        }
++        defer m.accept_rows = 0;
+         const n_rows = rows.ids.len;
+         var draw_tab: [round.max_rows]ops.DrawRow = undefined;
+         if (path == .device_draw) {
+@@ -1422,6 +1447,10 @@ fn chunkRows(start: usize, len: usize) usize {
+         }
+         defer m.draw_rows = 0;
+         const tokens: []const u32 = if (path == .host_draw) &.{} else try m.roundArgmax(n_rows);
++        // TF_DS_DEVICE_ACCEPT: the keeps ride the amax buffer right after the picks (roundArgmax memcpy'd them out)
++        if (accept_n != 0) {
++            for (0..accept_n) |k| out[k].device_keep = m.amax_host[n_rows + k];
++        }
+         const logits: []const f32 = if (path == .host_draw) try m.roundLogits(n_rows) else &.{};
+         if (m.ringFailed()) return error.RingFailed; // (robustness: a graph's collect gave up on a dead peer's flags)
+         const t3 = m.now();
+@@ -2033,6 +2062,12 @@ pub fn survivals(conf: []const f32, out: []f64) void {
+     }
+ }
+ 
++/// The series' switches' parse ("1" or "on"; unset, "0", "off", "" or anything else: off).
++fn envOne(name: [:0]const u8) bool {
++    const v = std.c.getenv(name) orelse return false;
++    return std.mem.eql(u8, std.mem.span(v), "1") or std.mem.eql(u8, std.mem.span(v), "on");
++}
++
+ fn getenv(name: [:0]const u8) ?[]const u8 {
+     return std.mem.span(std.c.getenv(name) orelse return null);
+ }
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index ee29cd5..94c8221 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -186,10 +186,12 @@ pub const Model = struct {
+     ids64: []i64,
+     vocab: usize,
+     logits: []f32, // round.max_rows rows of logits on the host
+-    amax: u64, // u32 [round.max_rows]: a round's greedy tokens on the device (roundArgmax)
+-    amax_host: [round.max_rows]u32 = undefined,
++    amax: u64, // u32 [round.max_rows + max_streams]: a round's greedy tokens on the device (roundArgmax), then each window's keep (TF_DS_DEVICE_ACCEPT)
++    amax_host: [round.max_rows + max_streams]u32 = undefined,
+     draw_tab: u64 = 0, // ops.DrawRow [round.max_rows] (TF_DS_T27_DEVICE_DRAW; 0: off)
+     draw_rows: usize = 0, // rows the round's tokens are drawn on the device (setDraw; 0: the greedy argmax)
++    accept_tab: u64 = 0, // TF_DS_DEVICE_ACCEPT: the device tab [row0 ..][wrows ..] of the round's windows (setAccept)
++    accept_rows: usize = 0, // windows the round's chain keeps are computed on the device (setAccept; 0: off)
+     // the stream a fill is running: its slot and its view of the caches (its extent from base)
+     fill_slot: usize = 0,
+     // the prompt a fill's chunks come from (the caller's, set for the fill) and the thread reading the next chunk's
+@@ -459,7 +461,8 @@ pub const Model = struct {
+         try m.agreePrune();
+         try m.agreeKeyed();
+         if (m.kvs != null) try m.rd.useShard(&m.eng, &m.arena, a);
+-        m.amax = try m.arena.take(round.max_rows * 4);
++        m.amax = try m.arena.take((round.max_rows + max_streams) * 4);
++        m.accept_tab = try m.arena.take(max_streams * 8); // [row0 ..][wrows ..] u32 each, the wrows half nwin * 4 bytes in
+         m.draw_tab = if (m.ops.draw_rows != null) try m.arena.take(round.max_rows * @sizeOf(ops_mod.DrawRow)) else 0;
+         m.draw_rows = 0;
+         if (o.graphs) m.graphs = round.Graphs.init(gpa, o.graph_cap);
+@@ -1614,6 +1617,24 @@ pub const Model = struct {
+         return @intCast(std.Io.Timestamp.now(m.io, .awake).nanoseconds);
+     }
+ 
++    /// The next round's chain windows' keep counts are computed on the device: one tf_ds_accept_chain_kernel after the
++    /// pick in roundArgmax reads `row0`/`wrows` (one a window, u32) and lands one keep per window right after the picks
++    /// in `amax`. The keeps show up in `amax_host[R..]` after the round's memcpy. No-op when len == 0.
++    pub fn setAccept(m: *Model, row0: []const u32, wrows: []const u32) !void {
++        if (row0.len == 0) {
++            m.accept_rows = 0;
++            return;
++        }
++        if (row0.len != wrows.len or row0.len > max_streams) return error.BadAccept;
++        const d = m.ctx.d;
++        const n = row0.len;
++        var tab: [2 * max_streams]u32 = undefined;
++        @memcpy(tab[0..n], row0);
++        @memcpy(tab[n..][0..n], wrows);
++        try d.check(d.api.cuMemcpyHtoDAsync_v2(m.accept_tab, &tab, 2 * n * 4, m.stream.handle), "cuMemcpyHtoDAsync");
++        m.accept_rows = n;
++    }
++
+     /// The next round's rows are drawn on the device by `rules` (one per row) instead of taking the argmax; call after
+     /// verify and before roundArgmax, and set draw_rows back to 0 once the round's tokens are read.
+     pub fn setDraw(m: *Model, rules: []const ops_mod.DrawRow) !void {
+@@ -1639,8 +1660,12 @@ pub const Model = struct {
+     pub fn roundArgmax(m: *Model, R: usize) ![]const u32 {
+         const d = m.ctx.d;
+         try m.launchPick(R);
++        // TF_DS_DEVICE_ACCEPT: the chain keeps, one kernel after the pick (the picks are on the device already)
++        if (m.accept_rows != 0) try m.ops.acceptChain(m.stream, m.rd.inputs, m.amax, m.accept_tab, m.accept_rows, m.amax + @as(u64, R) * 4);
+         try m.stream.synchronize();
+-        try d.check(d.api.cuMemcpyDtoH_v2(&m.amax_host, m.amax, R * 4), "cuMemcpyDtoH");
++        const n_keep = m.accept_rows;
++        try d.check(d.api.cuMemcpyDtoH_v2(&m.amax_host, m.amax, (R + n_keep) * 4), "cuMemcpyDtoH");
++        m.accept_rows = 0; // the keeps ride amax_host[R..] until the caller reads them; the next round memcpy's only
+         return m.amax_host[0..R];
+     }
+ 
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index c786ea7..1913858 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -100,6 +100,7 @@ pub const Ops = struct {
+     gather: cuda.Function,
+     copy16: cuda.Function,
+     argmax_rows: cuda.Function,
++    accept_chain: cuda.Function, // TF_DS_DEVICE_ACCEPT (only launched under it)
+     gpu_clock: cuda.Function,
+     prune: ?expert_prune.Mode = null, // TF_DS_T13_EXPERT_PRUNE and _EXPERT_CAP, read at load
+     prune_fn: ?cuda.Function = null, // looked up only when the switch is on
+@@ -144,6 +145,7 @@ pub const Ops = struct {
+             .gather = try mv.function("tf_gather_rows_kernel"),
+             .copy16 = try fm.function("tf_ds_copy_rows16_kernel"),
+             .argmax_rows = try fm.function("tf_ds_argmax_rows_kernel"),
++            .accept_chain = try fm.function("tf_ds_accept_chain_kernel"),
+             .gpu_clock = try fm.function("tf_ds_clock_kernel"),
+             .prune = prune,
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
+@@ -401,6 +403,22 @@ pub const Ops = struct {
+         try go(o.argmax_rows, s, rows, 1024, &a);
+     }
+ 
++    /// TF_DS_DEVICE_ACCEPT: each window's chain keep (acceptPath's, for a chain: 1 + the longest prefix of drafts whose
++    /// tokens equal the target's picks). `ids` the round's int64 token ids (Round.inputs), `picks` the per-row picks
++    /// (amax), `tab` setAccept's device [row0 ..][wrows ..] tab (the wrows half `nwin` * 4 bytes in), `out` where the
++    /// keeps land (amax right after the picks). One block a window.
++    pub fn acceptChain(o: *const Ops, s: cuda.Stream, ids: u64, picks: u64, tab: u64, nwin: usize, out: u64) !void {
++        if (nwin == 0) return;
++        var a: cuda.Args = .{};
++        a.add(ids);
++        a.add(picks);
++        a.add(tab);
++        a.add(tab + @as(u64, @intCast(nwin)) * 4);
++        a.add(@as(c_int, @intCast(nwin)));
++        a.add(out);
++        try go(o.accept_chain, s, nwin, 32, &a);
++    }
++
+     /// Each row's sampled token (sampling.sampleRow of the row's rule, or its argmax at temperature <= 0): out [rows] u32
+     /// of logits [rows, n] fp32 (row stride ld floats); `table` the device DrawRow of each row.
+     pub fn drawRows(o: *const Ops, s: cuda.Stream, logits: u64, ld: usize, n: usize, rows: usize, table: u64, out: u64) !void {
+-- 
+2.56.0
+

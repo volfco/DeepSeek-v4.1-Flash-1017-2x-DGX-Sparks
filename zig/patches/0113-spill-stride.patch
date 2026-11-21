@@ -1,0 +1,371 @@
+From 0000000000000000000000000000000000000113 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:29:36 +0000
+Subject: [PATCH] feat(dsv41): TF_SPILL_STRIDE=N keeps every Nth old turn manifest at a trim
+ (unset: as before)
+
+core/spill's trimPath deletes every turn manifest on a conversation's active path past the newest
+TF_SPILL_TURNS at each publish: the blocks survive (the newer point's manifest names them) but the
+older cuts become unresumable, so a regenerate, rewind or branch back past the window re-encodes the
+whole middle (docs/prefix-cache-hitrate-review.md finding 5).
+
+With TF_SPILL_STRIDE=N (u32, N >= 1) every Nth turn past the window stays as well, at most
+store.stride_kept_max (64) extra manifests per path so the point index stays bounded: kept cuts are
+turns t, t-N, t-2N, ... anchored in each point's in-memory turn depth from the branch root (the
+root at depth 1, so every depth stays on the stride's grid), so they survive later publishes; a
+reopen takes every surviving manifest as one stride and strides on from there. Eviction (victims,
+quota, floor) is unchanged and still governs disk pressure; the stride only
+changes what trimPath deletes at publish.
+
+TF_SPILL_STRIDE is plumbed exactly like TF_SPILL_TURNS: server/cli.zig's spill_env list and spill()
+parse, engine_api's api.Spill, spillSettings into spill_tier.Settings, and Settings.follower's
+environment on the follower ranks (start.sh passes TF_SPILL_* to both). Like turns today it is
+per-rank and compared nowhere (not in the fingerprint's features nor storeCompat); a rank whose trim
+kept a point another rank dropped is handled by the existing rank_wire presence flow.
+
+Unset/0: trimPath removes exactly the manifests it removed before, and every new setting stays inert;
+no manifest format and no kernel shape changes.
+
+Tests: zig build test and zig/tests/server/zig_test.sh pass; core/spill store checks "stride" (kept
+set is t, t-N, t-2N... plus the newest turns, N=2 and N=3), "stride off" (unset keeps exactly the
+newest 4), "stride cap" (64 extras past the window, the oldest gone) and "stride restart" (the
+extras survive a reopen and the next publish's trim); cli's spill test and the follower-settings
+test cover the two env reads. Not run on a pair.
+---
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index a24dc71d..40aa399e 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -202,6 +202,8 @@ pub const Spill = struct {
+     min_tokens: u32 = 8192,
+     /// TF_SPILL_TURNS: old turns kept on a conversation's active path before they go first (0: until room is needed).
+     turns: u32 = 4,
++    /// TF_SPILL_STRIDE: every Nth old turn manifest past that window stays as a rewind/branch resume point (0: none).
++    stride: u32 = 0,
+     /// TF_SPILL_LOAD_MS: one service's budget for every restore together, then staged writes (at least 1).
+     load_ms: u32 = 40,
+     /// TF_SPILL_LOAD_WAIT_MS: how long a request waits parked on a restore, or at the queue's front for the pool's room
+diff --git a/zig/src/core/spill/store.zig b/zig/src/core/spill/store.zig
+index d6d9887a..26c8919f 100644
+--- a/zig/src/core/spill/store.zig
++++ b/zig/src/core/spill/store.zig
+@@ -43,6 +43,9 @@ pub const Slot = slots_mod.Slot;
+ pub const Staging = slots_mod.Staging;
+ pub const Hooks = fsio.Hooks;
+ 
++/// TF_SPILL_STRIDE's extra manifests kept per path past the retention window: keeps the point index bounded.
++pub const stride_kept_max: u32 = 64;
++
+ /// The logical rows a write reads from: the family's extent and its generation. A later occupant of the same base
+ /// has another generation, so a delayed staging can never attach to it.
+ pub const Source = struct {
+@@ -74,6 +77,9 @@ pub const Config = struct {
+     quota: f64 = 0,
+     /// Newest states kept on a conversation's active path (0: every turn until room is needed).
+     turns: u32 = 4,
++    /// With `turns` on: every `stride`th turn past the window stays as a rewind/branch resume point, at most
++    /// `stride_kept_max` of them (0: the trim deletes every turn past the window).
++    stride: u32 = 0,
+     /// Shorter states are not written.
+     min_tokens: u32 = 8192,
+     /// Bytes of unpublished writes (rows still in device memory, queued staging) past which a keep is refused.
+@@ -253,6 +259,7 @@ const Inode = struct { bytes: u64, names: std.ArrayList(Digest) = .empty };
+ const Point = struct {
+     key: Digest,
+     at: u32,
++    depth: u32 = 0, // turns from the branch's root at publish; trimPath's stride slot (in memory: the manifest has no turn count)
+     shared: bool,
+     group: u64,
+     used: i96,
+@@ -691,7 +698,13 @@ pub const Store = struct {
+                 return a.at < b.at;
+             }
+         }.shorter);
+-        for (order.items) |p| try s.parent.put(gpa, p.key, s.parentOf(p));
++        for (order.items) |p| {
++            const up = s.parentOf(p);
++            try s.parent.put(gpa, p.key, up);
++            // every manifest that survived the last run takes one stride (the root anchored at 1, so every depth
++            // stays 1 mod stride and trimPath keeps them eligible): the turns its trims deleted are gone
++            p.depth = if (up) |uk| s.points.get(uk).?.depth + @max(s.cfg.stride, 1) else 1;
++        }
+         s.clock = 0;
+         for (order.items) |p| s.clock = @max(s.clock, p.used);
+     }
+@@ -920,7 +933,9 @@ pub const Store = struct {
+ 
+     /// `p` just entered the index: its parent, and the points it now stands between.
+     fn adopt(s: *Store, p: *Point) void {
+-        s.parent.put(s.gpa, p.key, s.parentOf(p)) catch {};
++        const up = s.parentOf(p);
++        s.parent.put(s.gpa, p.key, up) catch {};
++        p.depth = (if (up) |uk| s.points.get(uk).?.depth else 0) + 1;
+         var it = s.points.valueIterator();
+         while (it.next()) |qq| {
+             const q = qq.*;
+@@ -1165,7 +1180,9 @@ pub const Store = struct {
+     }
+ 
+     /// After `p` is published: on its conversation's path (its ancestors below a shared point) the newest `turns`
+-    /// stay, older ones go now (they free their small files only: `p` names every block they named).
++    /// stay, older ones go now (they free their small files only: `p` names every block they named). With `stride`
++    /// on, every `stride`th turn past the window (from the branch's root) stays too, `stride_kept_max` of them:
++    /// resume points for rewinds and branches past the window.
+     fn trimPath(s: *Store, p: *Point) void {
+         if (s.cfg.turns == 0 or p.shared) return;
+         var path: std.ArrayList(Digest) = .empty;
+@@ -1178,7 +1195,15 @@ pub const Store = struct {
+             cur = s.parent.get(k) orelse null;
+         }
+         if (path.items.len <= s.cfg.turns) return;
++        var kept: u32 = 0;
+         for (path.items[s.cfg.turns..]) |k| {
++            if (s.cfg.stride != 0 and kept < stride_kept_max) {
++                const q = s.points.get(k).?;
++                if ((q.depth - 1) % s.cfg.stride == 0) {
++                    kept += 1;
++                    continue;
++                }
++            }
+             if (!s.reading.contains(k)) s.remove(k, "trimmed_turns");
+         }
+     }
+diff --git a/zig/src/core/spill/store_test.zig b/zig/src/core/spill/store_test.zig
+index 57ece3a8..21ac6f0b 100644
+--- a/zig/src/core/spill/store_test.zig
++++ b/zig/src/core/spill/store_test.zig
+@@ -45,6 +45,8 @@ const Opts = struct {
+     cap: u64 = 64 << 20,
+     floor: u64 = 0,
+     turns: u32 = 4,
++    stride: u32 = 0,
++    max_tokens: u32 = max_tokens,
+     quota: f64 = 0,
+     max_reads: u32 = 2,
+     keep_builds: u32 = 1,
+@@ -161,8 +163,8 @@ const H = struct {
+         }
+         h.cfg = .{
+             .root = h.root, .rank = 0, .compat = @splat(0x5a),
+-            .limits = .{ .max_tokens = max_tokens, .block_tokens = block_tokens, .block_bytes = block_bytes, .max_small_bytes = small_max },
+-            .cap_bytes = o.cap, .floor_bytes = o.floor, .quota = o.quota, .turns = o.turns, .min_tokens = 16, .backlog_bytes = o.backlog,
++            .limits = .{ .max_tokens = o.max_tokens, .block_tokens = block_tokens, .block_bytes = block_bytes, .max_small_bytes = small_max },
++            .cap_bytes = o.cap, .floor_bytes = o.floor, .quota = o.quota, .turns = o.turns, .stride = o.stride, .min_tokens = 16, .backlog_bytes = o.backlog,
+             .staging = .{ .write = &h.lists[0], .read = &h.lists[1], .small = &h.lists[2], .restore = &h.lists[3] },
+             .readers = 3, .max_reads = o.max_reads, .keep_builds = o.keep_builds,
+             .hooks = .{ .ctx = &h.hk, .crash = Hk.crash, .event = Hk.event, .pwrite = Hk.pwrite, .free = Hk.freeBytes, .no_direct = o.no_direct },
+@@ -201,7 +203,7 @@ const H = struct {
+     fn src(h: *H, id: u64) []u8 {
+         const gop = h.rows.getOrPut(h.gpa, id) catch @panic("oom");
+         if (!gop.found_existing) {
+-            const r = h.gpa.alloc(u8, max_tokens * bpt) catch @panic("oom");
++            const r = h.gpa.alloc(u8, h.cfg.limits.max_tokens * bpt) catch @panic("oom");
+             var prng = std.Random.DefaultPrng.init(id *% 0x9e3779b97f4a7c15 +% 1);
+             prng.random().bytes(r);
+             gop.value_ptr.* = r;
+@@ -1207,6 +1209,70 @@ fn checkTurns(gpa: Allocator) !void {
+     try ensure(std.mem.eql(u8, got, h.src(11)[0 .. 3 * block_tokens * bpt]), @src());
+ }
+ 
++/// TF_SPILL_STRIDE: every Nth turn past the window stays (turns t, t-N, t-2N... of the path; t=13 is on the
++/// stride for both N here) as a resume point, and the trimmed ones' blocks stay named by the newer points.
++fn checkStride(gpa: Allocator) !void {
++    for ([_]usize{ 2, 3 }) |n| {
++        const h = try H.init(gpa, .{ .tag = "stride", .turns = 4, .stride = @intCast(n) });
++        defer h.deinit();
++        const all = try idsOf(gpa, 13 * block_tokens, 1600);
++        defer gpa.free(all);
++        var keys: [13]Digest = undefined;
++        for (1..14) |t| keys[t - 1] = try write(h, all[0 .. t * block_tokens], .{ .lineage = lin(16), .source = 16 });
++        var trimmed: u64 = 0;
++        for (1..14) |t| {
++            const want = t >= 10 or (t - 1) % n == 0;
++            if (!want) trimmed += 1;
++            try ensure(h.s.points.contains(keys[t - 1]) == want, @src());
++        }
++        const ct = h.s.counts();
++        try ensure(ct.trimmed_turns == trimmed and ct.blocks == 13 and ct.staged_blocks == 13, @src());
++    }
++}
++
++/// TF_SPILL_STRIDE unset/0: the trim keeps exactly the newest `turns`, as before.
++fn checkStrideOff(gpa: Allocator) !void {
++    const h = try H.init(gpa, .{ .tag = "strideoff", .turns = 4 });
++    defer h.deinit();
++    const all = try idsOf(gpa, 13 * block_tokens, 1601);
++    defer gpa.free(all);
++    var keys: [13]Digest = undefined;
++    for (1..14) |t| keys[t - 1] = try write(h, all[0 .. t * block_tokens], .{ .lineage = lin(17), .source = 17 });
++    for (1..14) |t| try ensure(h.s.points.contains(keys[t - 1]) == (t >= 10), @src());
++    const ct = h.s.counts();
++    try ensure(ct.trimmed_turns == 9 and ct.blocks == 13 and ct.staged_blocks == 13, @src());
++}
++
++/// The stride's extras per path are bounded: `stride_kept_max` past the window, the oldest ones gone.
++fn checkStrideCap(gpa: Allocator) !void {
++    const h = try H.init(gpa, .{ .tag = "stridecap", .turns = 4, .stride = 1, .max_tokens = 2048 });
++    defer h.deinit();
++    const all = try idsOf(gpa, 71 * block_tokens, 1602);
++    defer gpa.free(all);
++    var keys: [71]Digest = undefined;
++    for (1..72) |t| keys[t - 1] = try write(h, all[0 .. t * block_tokens], .{ .lineage = lin(18), .source = 18 });
++    const kept: u32 = 4 + store.stride_kept_max;
++    const first: usize = 72 - kept;
++    try ensure(h.s.points.count() == kept, @src());
++    for (1..72) |t| try ensure(h.s.points.contains(keys[t - 1]) == (t >= first), @src());
++}
++
++/// TF_SPILL_STRIDE across a restart: the reopen anchors the surviving path's depth grid at 1 (every survivor one
++/// stride later), so the next publish's trim still finds the extras on the stride and keeps them.
++fn checkStrideRestart(gpa: Allocator) !void {
++    const h = try H.init(gpa, .{ .tag = "stridere", .turns = 4, .stride = 2 });
++    defer h.deinit();
++    const all = try idsOf(gpa, 14 * block_tokens, 1603);
++    defer gpa.free(all);
++    var keys: [14]Digest = undefined;
++    for (1..14) |t| keys[t - 1] = try write(h, all[0 .. t * block_tokens], .{ .lineage = lin(19), .source = 19 });
++    const extras = [_]usize{ 1, 3, 5, 7, 9 }; // t-N, t-2N... past the window, on the stride
++    for (extras) |t| try ensure(h.s.points.contains(keys[t - 1]), @src());
++    try h.reopen();
++    keys[13] = try write(h, all, .{ .lineage = lin(19), .source = 19 }); // one more turn: the trim runs again
++    for (extras) |t| try ensure(h.s.points.contains(keys[t - 1]), @src());
++}
++
+ /// A resume forks the lineage at its cut: the same names before it (nothing restaged), its own after.
+ fn checkFork(gpa: Allocator) !void {
+     const h = try H.init(gpa, .{ .tag = "fork" });
+@@ -1723,6 +1789,10 @@ const checks = [_]Check{
+     .{ .name = "guard cancel", .f = checkGuardCancel },
+     .{ .name = "eviction order", .f = checkEvictionOrder },
+     .{ .name = "turns", .f = checkTurns },
++    .{ .name = "stride", .f = checkStride },
++    .{ .name = "stride off", .f = checkStrideOff },
++    .{ .name = "stride cap", .f = checkStrideCap },
++    .{ .name = "stride restart", .f = checkStrideRestart },
+     .{ .name = "fork", .f = checkFork },
+     .{ .name = "groups", .f = checkGroups },
+     .{ .name = "quota", .f = checkQuota },
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 3b043024..34b6866a 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -462,8 +462,8 @@ pub fn spillPreflight(env: *const fn ([:0]const u8) ?[]const u8) !void {
+ }
+ 
+ /// The spill tier's switches from the server's (rank 0; api.Spill's fields) and TF_DS_SPILL_STAGING_MIB.
+-pub fn spillSettings(dir: []const u8, gib: f64, min_free_gib: f64, quota: f64, min_tokens: u32, turns: u32, flush_ms: u32) !spill_tier.Settings {
+-    var s: spill_tier.Settings = .{ .dir = dir, .gib = gib, .min_free_gib = min_free_gib, .quota = quota, .min_tokens = min_tokens, .turns = turns, .flush_ms = flush_ms };
++pub fn spillSettings(dir: []const u8, gib: f64, min_free_gib: f64, quota: f64, min_tokens: u32, turns: u32, stride: u32, flush_ms: u32) !spill_tier.Settings {
++    var s: spill_tier.Settings = .{ .dir = dir, .gib = gib, .min_free_gib = min_free_gib, .quota = quota, .min_tokens = min_tokens, .turns = turns, .stride = stride, .flush_ms = flush_ms };
+     if (getenv("TF_DS_SPILL_STAGING_MIB")) |v| s.staging_mib = std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch return error.BadSpillSetting;
+     if (s.staging_mib < spill_tier.min_staging_mib) return error.BadSpillSetting;
+     s.image_cache = spill_tier.Settings.imageCache(getenv("TF_DS_IMAGE_CACHE")); // (pictures' points: the fingerprint's reading)
+diff --git a/zig/src/families/dsv41/spill_tier.zig b/zig/src/families/dsv41/spill_tier.zig
+index 6254b315..5b0ea6b0 100644
+--- a/zig/src/families/dsv41/spill_tier.zig
++++ b/zig/src/families/dsv41/spill_tier.zig
+@@ -48,6 +48,7 @@ pub const Settings = struct {
+     quota: f64 = 0,
+     min_tokens: u32 = 8192,
+     turns: u32 = 4,
++    stride: u32 = 0,
+     flush_ms: u32 = 60_000,
+     /// Pinned host staging for every write, read and small state together (the plan's 128 MiB a rank).
+     staging_mib: u32 = 128,
+@@ -81,7 +82,8 @@ pub const Settings = struct {
+ 
+     /// A follower's settings: its flags first (`flag` returns a flag's value or null), else the environment
+     /// (TF_DS_SPILL_DIR, TF_DS_SPILL_GIB, TF_DS_SPILL_MIN_FREE_GIB, TF_DS_SPILL_MIN_TOKENS, TF_DS_SPILL_QUOTA,
+-    /// TF_DS_SPILL_STAGING_MIB, and the server's TF_SPILL_TURNS / TF_SPILL_FLUSH_MS); null when spill is off there.
++    /// TF_DS_SPILL_STAGING_MIB, and the server's TF_SPILL_TURNS / TF_SPILL_STRIDE / TF_SPILL_FLUSH_MS); null when
++    /// spill is off there.
+     pub fn follower(flag: *const fn ([]const u8) ?[]const u8, env: *const fn ([:0]const u8) ?[]const u8) !?Settings {
+         const dir = flag("--spill-dir") orelse env("TF_DS_SPILL_DIR") orelse return null;
+         if (dir.len == 0) return null;
+@@ -93,6 +95,7 @@ pub const Settings = struct {
+         s.quota = try num(f64, flag("--spill-quota") orelse env("TF_DS_SPILL_QUOTA"), s.quota);
+         s.staging_mib = try num(u32, flag("--spill-staging-mib") orelse env("TF_DS_SPILL_STAGING_MIB"), s.staging_mib);
+         s.turns = try num(u32, env("TF_SPILL_TURNS"), s.turns);
++        s.stride = try num(u32, env("TF_SPILL_STRIDE"), s.stride);
+         s.image_cache = imageCache(env("TF_DS_IMAGE_CACHE"));
+         s.flush_ms = try num(u32, env("TF_SPILL_FLUSH_MS"), s.flush_ms);
+         if (!std.math.isFinite(s.gib) or !std.math.isFinite(s.quota) or s.quota < 0 or s.quota > 1) return error.BadSpillSetting;
+@@ -392,6 +395,7 @@ pub fn Side(comptime Dev: type) type {
+                 .floor_bytes = s.floorBytes(),
+                 .quota = s.quota,
+                 .turns = s.turns,
++                .stride = s.stride,
+                 .min_tokens = s.min_tokens,
+                 .staging = .{ .write = &self.lists[0], .read = &self.lists[1], .small = &self.lists[2], .restore = &self.lists[3] },
+                 .readers = s.readers,
+diff --git a/zig/src/families/dsv41/spill_tier_test.zig b/zig/src/families/dsv41/spill_tier_test.zig
+index 0515f9a0..d4565cdd 100644
+--- a/zig/src/families/dsv41/spill_tier_test.zig
++++ b/zig/src/families/dsv41/spill_tier_test.zig
+@@ -632,6 +632,7 @@ test "follower settings: flags over the environment, off without a directory or
+             if (std.mem.eql(u8, n, "TF_DS_SPILL_DIR")) return "/nvme/spill";
+             if (std.mem.eql(u8, n, "TF_DS_SPILL_GIB")) return "2";
+             if (std.mem.eql(u8, n, "TF_DS_SPILL_MIN_TOKENS")) return "4096";
++            if (std.mem.eql(u8, n, "TF_SPILL_STRIDE")) return "3";
+             return null;
+         }
+         fn none(_: [:0]const u8) ?[]const u8 {
+@@ -647,6 +648,7 @@ test "follower settings: flags over the environment, off without a directory or
+     try testing.expectEqualStrings("/nvme/spill", s.dir);
+     try testing.expectEqual(@as(f64, 8), s.gib);
+     try testing.expectEqual(@as(u32, 4096), s.min_tokens);
++    try testing.expectEqual(@as(u32, 3), s.stride);
+     try testing.expect(try tier.Settings.follower(Env.flagNone, Env.none) == null);
+     try testing.expectError(error.BadSpillSetting, tier.Settings.follower(Env.flagNone, Env.bad));
+ }
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index f1b00202..0e53fec9 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -394,7 +394,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+     const spill_on = o.spill.enabled() and @hasField(F.Options, "spill");
+     var fo: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments };
+     if (comptime @hasField(F.Options, "spill")) if (spill_on) {
+-        fo.spill = F.spillSettings(o.spill.dir.?, o.spill.gib, o.spill.min_free_gib, o.spill.quota, o.spill.min_tokens, o.spill.turns, o.spill.flush_ms) catch |e| {
++        fo.spill = F.spillSettings(o.spill.dir.?, o.spill.gib, o.spill.min_free_gib, o.spill.quota, o.spill.min_tokens, o.spill.turns, o.spill.stride, o.spill.flush_ms) catch |e| {
+             problem.* = F.explain(null, e) orelse try std.fmt.allocPrint(a, "the spill tier's settings ({s})", .{@errorName(e)});
+             return null;
+         };
+diff --git a/zig/src/server/cli.zig b/zig/src/server/cli.zig
+index c9688a91..ea14e311 100644
+--- a/zig/src/server/cli.zig
++++ b/zig/src/server/cli.zig
+@@ -109,7 +109,7 @@ pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENS
+     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB" } else [_][]const u8{});
+ 
+ /// The prompt cache tier's variables (api.Spill): its knobs beyond the flags.
+-pub const spill_env = [_][]const u8{ "TF_SPILL_TURNS", "TF_SPILL_LOAD_MS", "TF_SPILL_LOAD_WAIT_MS", "TF_SPILL_DEFER_MS", "TF_SPILL_FLUSH_MS" };
++pub const spill_env = [_][]const u8{ "TF_SPILL_TURNS", "TF_SPILL_STRIDE", "TF_SPILL_LOAD_MS", "TF_SPILL_LOAD_WAIT_MS", "TF_SPILL_DEFER_MS", "TF_SPILL_FLUSH_MS" };
+ 
+ pub const Args = struct {
+     model: []const u8 = "",
+@@ -293,6 +293,7 @@ fn spillFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usag
+ pub fn spill(args: Args, env_: anytype) api.Spill {
+     var s: api.Spill = .{ .dir = args.spill_dir, .gib = args.spill_gib, .min_free_gib = args.spill_min_free_gib, .quota = args.spill_quota, .min_tokens = args.spill_min_tokens };
+     if (env_.get("TF_SPILL_TURNS")) |v| s.turns = std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch s.turns;
++    if (env_.get("TF_SPILL_STRIDE")) |v| s.stride = std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch s.stride;
+     if (env_.get("TF_SPILL_LOAD_MS")) |v| s.load_ms = positive(v) orelse s.load_ms;
+     if (env_.get("TF_SPILL_LOAD_WAIT_MS")) |v| s.load_wait_ms = positive(v) orelse s.load_wait_ms;
+     if (env_.get("TF_SPILL_DEFER_MS")) |v| s.defer_ms = std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch s.defer_ms;
+@@ -442,7 +443,7 @@ test "spill flags and variables: off by default, checked, passed whole" {
+     try std.testing.expect(!off.enabled());
+     try std.testing.expectEqual(api.Spill{}, off);
+     const args = try parse(a, &.{ "m", "--spill-dir", "/nvme/spill", "--spill-gib", "64", "--spill-min-free-gib=20", "--spill-min-tokens", "4096", "--spill-quota", "0.25" }, &u);
+-    const on = spill(args, Env{ .pairs = &.{ .{ "TF_SPILL_TURNS", "2" }, .{ "TF_SPILL_LOAD_MS", "25" }, .{ "TF_SPILL_FLUSH_MS", "x" }, .{ "TF_SPILL_DEFER_MS", "0" } } });
++    const on = spill(args, Env{ .pairs = &.{ .{ "TF_SPILL_TURNS", "2" }, .{ "TF_SPILL_STRIDE", "3" }, .{ "TF_SPILL_LOAD_MS", "25" }, .{ "TF_SPILL_FLUSH_MS", "x" }, .{ "TF_SPILL_DEFER_MS", "0" } } });
+     try std.testing.expectEqual(@as(u32, 0), on.defer_ms); // (0: a capacity-refused restore is not deferred)
+     try std.testing.expectEqual(@as(u32, 5_000), spill(args, Env{ .pairs = &.{.{ "TF_SPILL_DEFER_MS", "-3" }} }).defer_ms);
+     try std.testing.expect(on.enabled());
+@@ -452,6 +453,7 @@ test "spill flags and variables: off by default, checked, passed whole" {
+     try std.testing.expectEqual(@as(u32, 4096), on.min_tokens);
+     try std.testing.expectEqual(@as(f64, 0.25), on.quota);
+     try std.testing.expectEqual(@as(u32, 2), on.turns);
++    try std.testing.expectEqual(@as(u32, 3), on.stride);
+     try std.testing.expectEqual(@as(u32, 25), on.load_ms);
+     try std.testing.expectEqual(@as(u32, 60_000), on.flush_ms); // an invalid value keeps the default
+     const zero = spill(try parse(a, &.{"m"}, &u), Env{ .pairs = &.{ .{ "TF_SPILL_LOAD_MS", "0" }, .{ "TF_SPILL_LOAD_WAIT_MS", "250" } } });

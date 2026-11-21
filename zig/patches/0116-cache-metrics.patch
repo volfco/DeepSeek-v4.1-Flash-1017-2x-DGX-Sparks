@@ -1,0 +1,910 @@
+From 0000000000000000000000000000000000000116 Mon Sep 17 00:00:00 2001
+From: colum <colum@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:40:52 +0000
+Subject: [PATCH] core: TF_DS_CACHE_METRICS=on publishes the memory cache's counters regardless of
+ tier, a resume-depth histogram and the coarse counters' causes
+
+The prompt cache's counters reach /health and /metrics only when a tier or grouping is on
+(LaneHost.configure), so the default pair (SPILL_GIB=0) shows nothing to a hit-rate campaign;
+misses/refused/evicted/failed each merge several causes and there is no resume-depth distribution
+(review finding 12).
+
+TF_DS_CACHE_METRICS (on by default, as TF_DS_ENGRAM_METRICS; 0 or off turns it off) publishes the
+memory CacheStats regardless of tier (lane_host's publish from configure and start; engine_api's
+CacheStats in Status), splits the coarse counters by cause at the branches that already distinguish
+them (misses: no prefix / tail-window / stale, a cause raised only by an entry whose tokens
+prefix-match the prompt; refused: budget / restores in flight; evicted:
+superseded / LRU; failed: save / restore) and accumulates a per-pass resume-depth histogram
+(0/25/50/75/90/99/100 percent of prompt tokens resumed) on /metrics and /health beside the existing
+counters. Because the counters alone no longer imply a tier, Spill.unbound now reads a tier-bound
+marker (CacheStats.tier_bound) instead of Status.cache nullness.
+
+With the switch off (0 or off) the store counts neither the cause splits nor the depth, the detail is
+absent and the output is byte-identical to base; the prompt cache: log line and
+tensorfold:engram_lookup_seconds are untouched. The switch is per-rank observability only and needs
+no rank-pair agreement; start.sh's TF_DS_* passthrough carries it unchanged.
+
+Tests: zig build test and zig/tests/server/zig_test.sh pass; the patch's own tests: the "0"/"off"
+parse, the metrics-off status test (nothing parked, no cache counters), the no-tier publishing
+test, the miss/eviction/failure cause splits, the miss-cause attribution case (an entry longer
+than the prompt raises no tail_window), the refused budget-vs-restores split, the
+resume-depth buckets, the off-path no-counting test, and the render/health publishing tests. Not
+run on a pair.
+---
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index 40aa399e..aa4ec2ed 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -221,12 +221,13 @@ pub const Spill = struct {
+     }
+ 
+     /// Whether the disk tier was asked for and `engine` did not take it: a backend that wires it configures its lane
+-    /// host (LaneHost.configure), whose status then carries the cache's counters.
++    /// host (LaneHost.configure), whose status then carries the cache's counters and marks the tier bound (the
++    /// counters alone say nothing: TF_DS_CACHE_METRICS publishes them without a tier).
+     pub fn unbound(s: Spill, engine: Engine) bool {
+         if (!s.enabled()) return false;
+         var st: Status = .{};
+         engine.status(&st, &.{});
+-        return st.cache == null;
++        return st.cache == null or !st.cache.?.tier_bound;
+     }
+ };
+ 
+@@ -251,8 +252,43 @@ pub const EngramSource = struct {
+     read: *const fn (ctx: *anyopaque, out: *EngramStats) void,
+ };
+ 
++/// TF_DS_CACHE_METRICS (on; `0` or `off` turns it off): the prompt cache's coarse counters split by cause, and the
++/// resume depth of finished prompt passes, published beside the counters (CacheStats.detail). Read from HTTP threads
++/// as one copy (LaneHost publishes it on its engine thread); counted only while the switch is on.
++pub const CacheDetail = struct {
++    /// Of CacheStats.memory_misses: why the look-up found no usable kept state.
++    misses_no_prefix: u64 = 0,
++    misses_tail_window: u64 = 0,
++    misses_stale: u64 = 0,
++    /// Of CacheStats.refused: why the keep was refused.
++    refused_budget: u64 = 0,
++    refused_restores: u64 = 0,
++    /// Of CacheStats.evicted: which state the store freed first.
++    evicted_superseded: u64 = 0,
++    evicted_lru: u64 = 0,
++    /// Of CacheStats.failed: what failed.
++    failed_save: u64 = 0,
++    failed_restore: u64 = 0,
++    /// The resume depth of finished prompt passes (the histogram's 0/25/50/75/90/99/100 percent buckets).
++    depth: prompt_cache.ResumeDepth = .{},
++
++    /// Each field's /metrics help (a missing one fails the build).
++    pub const help = .{
++        .misses_no_prefix = "Of memory_misses: no kept state's tokens matched the prompt's.",
++        .misses_tail_window = "Of memory_misses: a state matched but the tail, window or grid rules passed it over.",
++        .misses_stale = "Of memory_misses: a state matched but the family staled it.",
++        .refused_budget = "Of refused: the state alone passed the memory budget.",
++        .refused_restores = "Of refused: restores in flight held the budget's rest.",
++        .evicted_superseded = "Of evicted: a state a later prompt extends (its superseded turn).",
++        .evicted_lru = "Of evicted: the least recently used state.",
++        .failed_save = "Of failed: a keep's save failed.",
++        .failed_restore = "Of failed: a restore failed (this pass's resume, or a peer's).",
++    };
++};
++
+ /// The prompt cache's counters for /health and /metrics, read from HTTP threads as one copy (LaneHost publishes it on
+-/// its engine thread). Null in Status unless a tier or grouping is on. Totals unless in `gauges`.
++/// its engine thread). Null in Status unless a tier or grouping is on, or TF_DS_CACHE_METRICS is (then regardless of
++/// tier). Totals unless in `gauges`.
+ pub const CacheStats = struct {
+     memory_hits: u64 = 0,
+     memory_misses: u64 = 0,
+@@ -296,6 +332,11 @@ pub const CacheStats = struct {
+     computed_tokens: u64 = 0,
+     /// The tier's own counters, each rank's (null: no tier).
+     spill: ?prompt_cache.RankCounts = null,
++    /// The coarse counters' causes and the resume depth (TF_DS_CACHE_METRICS; null: `0`).
++    detail: ?CacheDetail = null,
++    /// Whether the cache is wired to the spill tier (or grouping, which a tier turns on): `Spill.unbound` asks this,
++    /// live from LaneHost.configure (before telemetry's first snapshot fills the counters).
++    tier_bound: bool = false,
+ 
+     pub const gauges = [_][]const u8{ "entries", "held_bytes", "restores_active", "restoring_bytes", "restore_blocks_done", "restore_blocks_total", "parked" };
+ 
+@@ -374,7 +415,7 @@ pub const Status = struct {
+     streams: usize = 0,
+     /// Generated tokens held by live streams, excluding their prompts.
+     generation_tokens: u64 = 0,
+-    /// The prompt cache's counters, when its tier or grouping is on.
++    /// The prompt cache's counters, when its tier or grouping is on, or TF_DS_CACHE_METRICS is (then regardless of tier).
+     cache: ?CacheStats = null,
+     /// The Engram table reads' latency histogram (TF_DS_ENGRAM_METRICS; null: `0`).
+     engram: ?EngramStats = null,
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index 2a524baa..e242a14c 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -88,6 +88,9 @@ pub const LaneHost = struct {
+     host_counts: HostCounts = .{},
+     /// What status reports under `cache` (published on the engine thread at each noteLive; null until configured).
+     tele: ?api.CacheStats = null,
++    /// TF_DS_CACHE_METRICS (on; `0` or `off` turns it off): the cache's cause splits and resume depth, counted and
++    /// published with the counters, which it also publishes without a tier. Set from the environment in init.
++    cache_metrics: bool = false,
+     /// A backend's KV-ownership stats (its parts), read on the engine thread at each noteLive, published as `kv_tele`.
+     kv_parts: ?lanes.kv_parts.Source = null,
+     kv_tele: ?api.KvParts = null,
+@@ -304,22 +307,32 @@ pub const LaneHost = struct {
+         enforced.loop_guard = true;
+         var ms: i96 = 0;
+         if (std.c.getenv("TF_DS_PREFILL_INTERLEAVE_MS")) |v| ms = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
+-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced, .interleave_ns = ms * std.time.ns_per_ms };
++        const metrics = cacheMetricsEnabled(if (std.c.getenv("TF_DS_CACHE_METRICS")) |v| std.mem.span(v) else null);
++        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced, .interleave_ns = ms * std.time.ns_per_ms, .cache_metrics = metrics };
+     }
+ 
+     /// The tier's switches (before start). Telemetry is published from here on when either is on: a tier on the cache
+-    /// (Store.setTier), or grouping.
++    /// (Store.setTier), or grouping; or the cache metrics (TF_DS_CACHE_METRICS), which publish it regardless of tier.
+     pub fn configure(h: *LaneHost, sp: api.Spill) void {
+         h.tier.service_ns = @as(u64, @max(sp.load_ms, 1)) * std.time.ns_per_ms;
+         h.tier.pump_ns = @min(h.tier.pump_ns, h.tier.service_ns);
+         h.tier.load_wait_ns = @as(i96, @max(sp.load_wait_ms, 1)) * std.time.ns_per_ms;
+         h.tier.flush_ns = @as(u64, sp.flush_ms) * std.time.ns_per_ms;
+         h.tier.defer_ns = @as(i96, sp.defer_ms) * std.time.ns_per_ms;
++        h.publish();
++    }
++
++    /// What status publishes: the cache's counters when a tier or grouping is on or the cache metrics are (the latter
++    /// regardless of tier), carrying whether the tier is bound (Spill.unbound asks before telemetry fills counters).
++    /// The store counts its detail only while the metrics are on.
++    fn publish(h: *LaneHost) void {
+         const store_on = if (h.cache) |s| s.tier != null or s.groups else false;
+-        h.tele = if (store_on) .{} else null;
++        if (h.cache) |s| s.metrics = h.cache_metrics;
++        h.tele = if (store_on or (h.cache_metrics and h.cache != null)) .{ .tier_bound = store_on } else null;
+     }
+ 
+     pub fn start(h: *LaneHost) !void {
++        h.publish(); // (the cache metrics publish without a tier, and no configure runs then)
+         h.thread = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, run, .{h});
+         if (h.pair) |pol| if (pol.stall_ns > 0) {
+             h.pair_monitor = std.Thread.spawn(.{}, pairMonitor, .{h}) catch |e| blk: {
+@@ -1606,6 +1619,8 @@ pub const LaneHost = struct {
+         if (h.cache) |store| {
+             const c = store.counts;
+             const s = store.stats;
++            t.tier_bound = store.tier != null or store.groups;
++            t.detail = h.detail(store);
+             t.memory_hits = c.hits;
+             t.memory_misses = c.misses;
+             t.kept = c.kept;
+@@ -1653,8 +1668,33 @@ pub const LaneHost = struct {
+         t.parked = h.loading.items.len + h.deferred.items.len;
+         return t;
+     }
++
++    /// The store's cause splits and resume depth (null while TF_DS_CACHE_METRICS is off; the store counts neither then).
++    fn detail(h: *LaneHost, store: *pc.Store) ?api.CacheDetail {
++        if (!h.cache_metrics) return null;
++        const c = store.counts;
++        return .{
++            .misses_no_prefix = c.misses_no_prefix,
++            .misses_tail_window = c.misses_tail_window,
++            .misses_stale = c.misses_stale,
++            .refused_budget = c.refused_budget,
++            .refused_restores = c.refused_restores,
++            .evicted_superseded = c.evicted_superseded,
++            .evicted_lru = c.evicted_lru,
++            .failed_save = c.failed_save,
++            .failed_restore = c.failed_restore,
++            .depth = store.depth,
++        };
++    }
+ };
+ 
++/// TF_DS_CACHE_METRICS=0 (or =off) turns the cache's detail counters and resume depth off (on by default, as
++/// TF_DS_ENGRAM_METRICS is).
++pub fn cacheMetricsEnabled(v: ?[]const u8) bool {
++    const value = v orelse return true;
++    return !std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "off");
++}
++
+ /// A line on the engine's log; tests stay quiet (the build runner fails a test that writes to stderr).
+ fn note(comptime fmt: []const u8, args: anytype) void {
+     if (@import("builtin").is_test) return;
+@@ -1971,6 +2011,15 @@ test "the service fence: never inside a round, a prompt pass's chunk or a graph
+     try std.testing.expectEqual(@as(u64, 4), host.service_refused);
+ }
+ 
++test "TF_DS_CACHE_METRICS: 0 and off turn the cache metrics off, everything else leaves them on" {
++    try std.testing.expect(cacheMetricsEnabled(null));
++    try std.testing.expect(cacheMetricsEnabled("1"));
++    try std.testing.expect(cacheMetricsEnabled("on"));
++    try std.testing.expect(cacheMetricsEnabled(""));
++    try std.testing.expect(!cacheMetricsEnabled("0"));
++    try std.testing.expect(!cacheMetricsEnabled("off"));
++}
++
+ test {
+     _ = @import("lane_host_test.zig");
+     _ = @import("lane_host_tier_test.zig");
+diff --git a/zig/src/core/lane_host_tier_test.zig b/zig/src/core/lane_host_tier_test.zig
+index b7c907e4..2a12a510 100644
+--- a/zig/src/core/lane_host_tier_test.zig
++++ b/zig/src/core/lane_host_tier_test.zig
+@@ -376,7 +376,7 @@ test "shutdown with requests parked on a restore that never ends: they are cance
+     try std.testing.expectEqual(@as(u64, 1), r.tier.flushed);
+ }
+ 
+-test "without a tier nothing is parked and status carries no cache counters" {
++test "without a tier and the cache metrics off, nothing is parked and status carries no cache counters" {
+     const gpa_ = gpa;
+     var cfg = try lanes.Config.init(gpa_, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+     defer cfg.deinit(gpa_);
+@@ -388,6 +388,7 @@ test "without a tier nothing is parked and status carries no cache counters" {
+     var store = pc.Store.init(gpa_, .{ .ptr = &target, .vtable = &.{ .bytes = Rig.bytes, .save = Rig.save, .restore = Rig.restore, .drop = Rig.drop } }, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
+     defer store.deinit();
+     var host = LaneHost.init(gpa_, io, &core, .{ .lanes = 2 });
++    host.cache_metrics = false; // TF_DS_CACHE_METRICS=0: the base behaviour this test pins
+     host.cache = &store;
+     host.configure(.{});
+     try host.start();
+@@ -467,6 +468,38 @@ test "restores are serviced between decode rounds while another stream decodes"
+     try std.testing.expectEqual(Reason.cancelled, a.wait());
+ }
+ 
++test "with the cache metrics on the memory cache's counters publish without a tier" {
++    const gpa_ = gpa;
++    var cfg = try lanes.Config.init(gpa_, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
++    defer cfg.deinit(gpa_);
++    var target: lanes.fake.Fake = .{ .gpa = gpa_ };
++    defer target.deinit();
++    var clock: lanes.fake.FixedClock = .{};
++    var core = lanes.Engine.init(gpa_, &cfg, target.backend(), clock.clock());
++    defer core.deinit();
++    var store = pc.Store.init(gpa_, .{ .ptr = &target, .vtable = &.{ .bytes = Rig.bytes, .save = Rig.save, .restore = Rig.restore, .drop = Rig.drop } }, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
++    defer store.deinit();
++    var host = LaneHost.init(gpa_, io, &core, .{ .lanes = 2 });
++    host.cache_metrics = true; // TF_DS_CACHE_METRICS on (its default)
++    host.cache = &store;
++    host.configure(.{});
++    try host.start();
++    defer host.stop();
++    var b: Box = .{};
++    defer b.deinit();
++    const req: Request = .{ .prompt = &t2, .max_tokens = 3, .history_len = 14 };
++    try host.engine().submit(1, &req, b.sink());
++    try std.testing.expectEqual(Reason.length, b.wait());
++    var st: api.Status = .{};
++    host.engine().status(&st, &.{});
++    try std.testing.expect(st.cache != null); // the memory cache's counters publish without a tier
++    try std.testing.expect(!st.cache.?.tier_bound);
++    try std.testing.expect(st.cache.?.detail != null);
++    try std.testing.expectEqual(@as(u64, 1), store.counts.kept);
++    try std.testing.expectEqual(@as(u64, 1), st.cache.?.kept);
++    try std.testing.expectEqual(@as(u64, 1), st.cache.?.detail.?.depth.n);
++}
++
+ test "spill switches a backend never bound are refused, not ignored" {
+     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+     defer cfg.deinit(gpa);
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+index 7372ee8b..772f5cca 100644
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -475,7 +475,47 @@ pub const Entry = struct {
+     lineage: []Fork = &.{}, // the computation its rows belong to (store-owned; empty without a tier)
+ };
+ 
+-pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
++pub const Counts = struct {
++    hits: u64 = 0,
++    misses: u64 = 0,
++    kept: u64 = 0,
++    evicted: u64 = 0,
++    refused: u64 = 0,
++    failed: u64 = 0,
++    // Each coarse counter's cause split (TF_DS_CACHE_METRICS; counted only while the switch is on).
++    misses_no_prefix: u64 = 0,
++    misses_tail_window: u64 = 0,
++    misses_stale: u64 = 0,
++    refused_budget: u64 = 0,
++    refused_restores: u64 = 0,
++    evicted_superseded: u64 = 0,
++    evicted_lru: u64 = 0,
++    failed_save: u64 = 0,
++    failed_restore: u64 = 0,
++};
++
++/// Why a look-up found no usable kept state (the misses' split), closest to a hit first: a stale state was a hit but
++/// for the family's rule, a passed-over one but for the tail/window rules, a mismatched one never was.
++pub const MissCause = enum { no_prefix, tail_window, stale };
++
++/// Raises `why` to the miss cause closer to a hit (MissCause's order).
++fn worse(why: *MissCause, c: MissCause) void {
++    if (@intFromEnum(c) > @intFromEnum(why.*)) why.* = c;
++}
++
++/// The resume depth of finished prompt passes (TF_DS_CACHE_METRICS): one observation per pass, the percent of its
++/// prompt tokens a kept state resumed. The buckets are cumulative at 0/25/50/75/90/99/100 percent (the histogram's
++/// edges), the last count the ones past every edge (never: a resumed fraction never passes 100).
++pub const ResumeDepth = struct {
++    counts: [bucket_edges.len + 1]u64 = @splat(0),
++    /// Percent resumed, summed over the observations.
++    total: f64 = 0,
++    /// Passes observed.
++    n: u64 = 0,
++
++    pub const bucket_edges = [_]f64{ 0, 25, 50, 75, 90, 99, 100 };
++    pub const help = "Percent of a finished prompt pass's prompt tokens that a kept prompt state resumed, one observation per pass (0/25/50/75/90/99/100 percent).";
++};
+ 
+ /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`); `shared` names the keeps
+ /// that stand at a shared cut (each cut's position as the family keeps it, marked or not; TF_DS_SHARED_PLAN).
+@@ -513,6 +553,10 @@ pub const Store = struct {
+     clock: u64 = 0,
+     entries: std.ArrayList(*Entry) = .empty,
+     counts: Counts = .{},
++    // TF_DS_CACHE_METRICS (on; `0` turns it off): the cause splits and the resume depth counted for /metrics
++    // (LaneHost sets it from the switch; off: this store counts neither, exactly as before).
++    metrics: bool = false,
++    depth: ResumeDepth = .{},
+     shared_keys: std.ArrayList(u64) = .empty, // the tokens of recently planned shared cuts, hashed (at most SHARED_KEYS)
+     shared_plan: bool = false, // TF_DS_SHARED_PLAN=1: keepWith flags shared from KeepInfo, not the note ring
+     imprint: ?*imprint.Imprint = null, // --learn: shared cuts' states on disk, read back by later sessions and servers
+@@ -602,22 +646,42 @@ pub const Store = struct {
+     }
+ 
+     /// Whether a kept state still restores for a prompt of `len` tokens: the family's own rule, then the native one
+-    /// (both only where set: a family without them keeps the old behaviour).
++    /// (both only where set: a family without them keeps the old behaviour). The miss cause when not.
++    fn liveWhy(s: *const Store, e: *const Entry, len: usize) ?MissCause {
++        if (s.family.vtable.usable) |f| if (!f(s.family.ptr, e.saved, @intCast(@min(len, std.math.maxInt(u32))))) return .stale;
++        if (s.rules.grid == 0 and s.rules.window == 0) return null;
++        return if (s.rules.eligible(e.at, len)) null else .tail_window;
++    }
++
+     fn live(s: *const Store, e: *const Entry, len: usize) bool {
+-        if (s.family.vtable.usable) |f| if (!f(s.family.ptr, e.saved, @intCast(@min(len, std.math.maxInt(u32))))) return false;
+-        if (s.rules.grid == 0 and s.rules.window == 0) return true;
+-        return s.rules.eligible(e.at, len);
++        return s.liveWhy(e, len) == null;
+     }
+ 
+     /// The longest kept state `prompt` resumes exactly: its tokens a prefix of the prompt, at least one row and `tail` left.
+     pub fn find(s: *Store, prompt: []const u32, starts: []const u32) ?*Entry {
++        var why: MissCause = .no_prefix;
++        return s.findWhy(prompt, starts, &why);
++    }
++
++    /// `find`, setting `why` to the miss cause when nothing is usable (the closest rejection explains the miss).
++    /// Only an entry whose tokens prefix-match the prompt may raise a cause: a longer one (another conversation's)
++    /// can never match and the tail/usable gates pass over a matching entry before its cause counts.
++    fn findWhy(s: *Store, prompt: []const u32, starts: []const u32, why: *MissCause) ?*Entry {
+         var best: ?*Entry = null;
++        why.* = .no_prefix;
+         for (s.entries.items) |e| {
+-            if (e.tokens.len > prompt.len or e.at >= prompt.len or @as(usize, e.at) + s.rules.tail > prompt.len or !s.usable(e.at, starts)) continue;
+-            if (best != null and e.at <= best.?.at) continue;
++            if (e.tokens.len > prompt.len) continue; // longer than the prompt: never its prefix, and never its cause
++            if (best != null and e.at <= best.?.at) continue; // (order-independent: the hit is the longest match)
+             const n = e.tokens.len;
+             if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
+-            if (!s.live(e, prompt.len)) continue; // stale or ineligible: never shadows a shorter usable state or a point
++            if (e.at >= prompt.len or @as(usize, e.at) + s.rules.tail > prompt.len or !s.usable(e.at, starts)) {
++                worse(why, .tail_window); // matched, but the tail/window and usable rules pass it over
++                continue;
++            }
++            if (s.liveWhy(e, prompt.len)) |c| { // stale or ineligible: never shadows a shorter usable state or a point
++                worse(why, c);
++                continue;
++            }
+             best = e;
+         }
+         return best;
+@@ -888,8 +952,16 @@ pub const Store = struct {
+ 
+     /// begin without the restore, for backends that restore inside their own prompt pass and then call `resumed`.
+     pub fn lookup(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32) !Lookup {
+-        const e = s.recall(prompt, starts, s.find(prompt, starts));
+-        if (e == null) s.counts.misses += 1;
++        var why: MissCause = .no_prefix;
++        const e = s.recall(prompt, starts, s.findWhy(prompt, starts, &why));
++        if (e == null) {
++            s.counts.misses += 1;
++            if (s.metrics) switch (why) {
++                .no_prefix => s.counts.misses_no_prefix += 1,
++                .tail_window => s.counts.misses_tail_window += 1,
++                .stale => s.counts.misses_stale += 1,
++            };
++        }
+         const marks_ = try s.fitting(a, try s.marks(a, prompt, if (e) |x| x.at else 0, history_len, shared, starts, if (e) |x| x.last else &.{}));
+         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
+             // the mark as `marks` computed it (a chunk start, or the cut itself), and the state the family keeps for
+@@ -919,6 +991,7 @@ pub const Store = struct {
+     pub fn forget(s: *Store, prompt: []const u32, at: u32) void {
+         for (s.entries.items, 0..) |e, i| if (e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len])) {
+             s.counts.failed += 1;
++            if (s.metrics) s.counts.failed_restore += 1;
+             return s.remove(i);
+         };
+     }
+@@ -954,6 +1027,7 @@ pub const Store = struct {
+             const bytes = s.family.vtable.bytes(s.family.ptr, at);
+             if (bytes <= s.budget) try out.append(a, at) else {
+                 s.counts.refused += 1;
++                if (s.metrics) s.counts.refused_budget += 1;
+                 note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
+             }
+         }
+@@ -965,6 +1039,7 @@ pub const Store = struct {
+         const i = std.mem.indexOfScalar(*Entry, s.entries.items, e) orelse return;
+         if (!ok) {
+             s.counts.failed += 1;
++            if (s.metrics) s.counts.failed_restore += 1;
+             return s.remove(i);
+         }
+         s.clock += 1;
+@@ -1032,6 +1107,7 @@ pub const Store = struct {
+         const bytes = s.family.vtable.bytes(s.family.ptr, at);
+         if (bytes > s.budget) {
+             s.counts.refused += 1;
++            if (s.metrics) s.counts.refused_budget += 1;
+             note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
+             return false;
+         }
+@@ -1051,6 +1127,7 @@ pub const Store = struct {
+             const reuses = if (s.family.vtable.reuses) |f| f(s.family.ptr, at) else false;
+             if (!reuses) {
+                 s.counts.refused += 1;
++                if (s.metrics) s.counts.refused_restores += 1;
+                 note("kept nothing at {d} tokens: restores in flight hold {d} MiB of the {d} MiB budget", .{ at, s.restoring_bytes >> 20, s.budget >> 20 });
+                 return false;
+             }
+@@ -1147,14 +1224,29 @@ pub const Store = struct {
+         return have;
+     }
+ 
+-    /// One log line after a prompt pass: where it resumed, how many states it kept, and what the store holds.
+-    pub fn report(s: *const Store, prompt: usize, from: u32, kept: u64) void {
++    /// One log line after a prompt pass: where it resumed, how many states it kept, and what the store holds. The
++    /// resume depth of the pass is counted here too (TF_DS_CACHE_METRICS).
++    pub fn report(s: *Store, prompt: usize, from: u32, kept: u64) void {
++        s.noteDepth(prompt, from);
+         if (@import("builtin").is_test) return;
+         std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} MiB and {d} MiB spare of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.spare() >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed });
+     }
+ 
++    /// A finished prompt pass resumed `cached` of `prompt` tokens: one observation in the resume-depth histogram
++    /// (TF_DS_CACHE_METRICS; counted only while the switch is on).
++    pub fn noteDepth(s: *Store, prompt: usize, cached: u32) void {
++        if (!s.metrics or prompt == 0) return;
++        const p = @min(100.0, 100.0 * @as(f64, @floatFromInt(cached)) / @as(f64, @floatFromInt(prompt)));
++        var i: usize = 0;
++        while (i < ResumeDepth.bucket_edges.len and p > ResumeDepth.bucket_edges[i]) i += 1;
++        s.depth.counts[i] += 1;
++        s.depth.total += p;
++        s.depth.n += 1;
++    }
++
+     fn fail(s: *Store, at: u32, err: anyerror) bool {
+         defer s.counts.failed += 1;
++        if (s.metrics) s.counts.failed_save += 1;
+         note("keeping {d} tokens failed ({s}); a later turn prefills them", .{ at, @errorName(err) });
+         return false;
+     }
+@@ -1173,7 +1265,8 @@ pub const Store = struct {
+     }
+ 
+     /// The entry to free first, never `skip` (a pass's resume): one a later prompt extends (never a shared cut), oldest first; else the oldest.
+-    fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32, group: u64, lineage: []const Fork) ?usize {
++    /// Its caller always frees what it names (counts.evicted); the cause split is counted here (TF_DS_CACHE_METRICS).
++    fn victimBut(s: *Store, skip: ?*Entry, prompt: []const u32, group: u64, lineage: []const Fork) ?usize {
+         var best: ?usize = null;
+         for (s.entries.items, 0..) |e, i| {
+             if (e.shared or e == skip) continue; // a shared cut is evicted only as the least recently used
+@@ -1183,12 +1276,19 @@ pub const Store = struct {
+             } else false;
+             if (moved_on and (best == null or e.used < s.entries.items[best.?].used)) best = i;
+         }
+-        if (best) |i| return i;
++        if (best) |i| {
++            if (s.metrics) s.counts.evicted_superseded += 1;
++            return i;
++        }
+         var oldest: ?usize = null;
+         for (s.entries.items, 0..) |e, i| if (e != skip and (oldest == null or e.used < s.entries.items[oldest.?].used)) {
+             oldest = i;
+         };
+-        return oldest;
++        if (oldest) |i| {
++            if (s.metrics) s.counts.evicted_lru += 1;
++            return i;
++        }
++        return null;
+     }
+ 
+     // -- 0111: continuation ---------------------------------------------------------------------------------------
+diff --git a/zig/src/core/prompt_cache_test.zig b/zig/src/core/prompt_cache_test.zig
+index 06c9b866..a632466b 100644
+--- a/zig/src/core/prompt_cache_test.zig
++++ b/zig/src/core/prompt_cache_test.zig
+@@ -29,6 +29,7 @@ const Fake = struct {
+     sum: u64 = 0,
+     fail_save: bool = false,
+     fail_restore: bool = false,
++    stale: ?Saved = null, // `usable` stales this state (the misses' stale split)
+     live: usize = 0,
+     spare_bytes: u64 = 0,
+     peer: ?*Peer = null, // speed-up mode's rank 1: it keeps the same states and drops them only when a request names them
+@@ -36,7 +37,7 @@ const Fake = struct {
+     const State = struct { at: u32, sum: u64 };
+ 
+     fn snapshots(f: *Fake) Snapshots {
+-        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn } };
++        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .usable = usableFn } };
+     }
+     /// With learned states on disk: a state's position and sum in one file.
+     fn learned(f: *Fake) Snapshots {
+@@ -100,6 +101,9 @@ const Fake = struct {
+     fn of(ptr: *anyopaque) *Fake {
+         return @ptrCast(@alignCast(ptr));
+     }
++    fn usableFn(ptr: *anyopaque, saved: Saved, _: u32) bool {
++        return of(ptr).stale != saved;
++    }
+     fn bytesFn(_: *anyopaque, at: u32) u64 {
+         return 100 + at;
+     }
+@@ -134,7 +138,7 @@ const Fake = struct {
+ 
+     /// A prompt pass from `plan.from`, keeping at each mark; returns the sum a fresh pass would give.
+     fn pass(f: *Fake, s: *Store, prompt: []const u32, plan: Plan) u64 {
+-        if (plan.from == 0) f.* = .{ .gpa = f.gpa, .fail_save = f.fail_save, .fail_restore = f.fail_restore, .live = f.live, .spare_bytes = f.spare_bytes, .peer = f.peer };
++        if (plan.from == 0) f.* = .{ .gpa = f.gpa, .fail_save = f.fail_save, .fail_restore = f.fail_restore, .stale = f.stale, .live = f.live, .spare_bytes = f.spare_bytes, .peer = f.peer };
+         if (f.peer) |p| p.in_pass = true;
+         defer if (f.peer) |p| {
+             p.in_pass = false;
+@@ -719,3 +723,197 @@ test "past the learned-state cap the least recently used state is forgotten, and
+     try std.testing.expectEqual(fresh(&p3), g.pass(&t, &p3, plan));
+     try std.testing.expect(im.has(imprint.Imprint.keyOf(&two))); // learned again by that pass
+ }
++
++test "TF_DS_CACHE_METRICS: the misses split into no prefix, tail-window and stale" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    // no kept state's tokens match the prompt
++    var f0: Fake = .{ .gpa = gpa };
++    var s0 = Store.init(gpa, f0.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
++    defer s0.deinit();
++    s0.metrics = true;
++    _ = try s0.lookup(a, &[_]u32{ 1, 2, 3, 4 }, 0, &.{}, &.{});
++    try std.testing.expectEqual(@as(u64, 1), s0.counts.misses);
++    try std.testing.expectEqual(@as(u64, 1), s0.counts.misses_no_prefix);
++    // a state inside the tail of the prompt's end
++    var f1: Fake = .{ .gpa = gpa };
++    var s1 = Store.init(gpa, f1.snapshots(), .{ .tail = 3, .min_prompt = 0 }, 1 << 20);
++    defer s1.deinit();
++    s1.metrics = true;
++    const long = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
++    _ = f1.pass(&s1, &long, .{ .marks = &.{8} });
++    const short = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 20, 21 }; // shares 8 tokens and ends 2 past them, inside the tail
++    _ = try s1.lookup(a, &short, 9, &.{}, &.{});
++    try std.testing.expectEqual(@as(u64, 1), s1.counts.misses_tail_window);
++    try std.testing.expectEqual(@as(u64, 0), s1.counts.misses_no_prefix);
++    // a state the family staled
++    var f2: Fake = .{ .gpa = gpa };
++    var s2 = Store.init(gpa, f2.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
++    defer s2.deinit();
++    s2.metrics = true;
++    const t2 = [_]u32{ 1, 2, 3, 4, 5, 6 };
++    _ = f2.pass(&s2, &t2, .{ .marks = &.{4} });
++    f2.stale = s2.entries.items[0].saved;
++    _ = try s2.lookup(a, &t2, 4, &.{}, &.{});
++    try std.testing.expectEqual(@as(u64, 1), s2.counts.misses_stale);
++    // the closest rejection explains the miss: a stale state beats a passed-over one
++    var f3: Fake = .{ .gpa = gpa };
++    var s3 = Store.init(gpa, f3.snapshots(), .{ .tail = 3, .min_prompt = 0 }, 1 << 20);
++    defer s3.deinit();
++    s3.metrics = true;
++    _ = f3.pass(&s3, &long, .{ .marks = &.{ 4, 8 } });
++    f3.stale = s3.entries.items[0].saved; // the state at 4 goes stale, the one at 8 is passed over by the tail
++    _ = try s3.lookup(a, &short, 9, &.{}, &.{});
++    try std.testing.expectEqual(@as(u64, 1), s3.counts.misses_stale);
++    try std.testing.expectEqual(@as(u64, 0), s3.counts.misses_tail_window);
++}
++
++test "a miss's cause comes only from a matching entry: one longer than the prompt never raises tail_window" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    // an entry longer than the prompt (another conversation's) beside one of the prompt's length that does not match:
++    // the miss is no_prefix (a longer entry can never prefix-match, so it is never the miss's cause)
++    var f0: Fake = .{ .gpa = gpa };
++    var s0 = Store.init(gpa, f0.snapshots(), .{ .tail = 3, .min_prompt = 0 }, 1 << 20);
++    defer s0.deinit();
++    s0.metrics = true;
++    const twelve = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
++    _ = f0.pass(&s0, &twelve, .{ .marks = &.{8} }); // an 8-token state: longer than the 6-token prompt below
++    const other = [_]u32{ 5, 5, 5, 5, 5, 5 };
++    _ = f0.pass(&s0, &other, .{ .marks = &.{6} }); // a 6-token state that does not match that prompt
++    _ = try s0.lookup(a, &[_]u32{ 9, 9, 9, 9, 9, 9 }, 0, &.{}, &.{});
++    try std.testing.expectEqual(@as(u64, 1), s0.counts.misses);
++    try std.testing.expectEqual(@as(u64, 1), s0.counts.misses_no_prefix);
++    try std.testing.expectEqual(@as(u64, 0), s0.counts.misses_tail_window);
++    // a matching entry the tail rule passes over is still the miss's cause
++    var f1: Fake = .{ .gpa = gpa };
++    var s1 = Store.init(gpa, f1.snapshots(), .{ .tail = 3, .min_prompt = 0 }, 1 << 20);
++    defer s1.deinit();
++    s1.metrics = true;
++    _ = f1.pass(&s1, &twelve, .{ .marks = &.{8} });
++    const short = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 20, 21 }; // shares the 8 tokens and ends 2 past them, inside the tail
++    _ = try s1.lookup(a, &short, 9, &.{}, &.{});
++    try std.testing.expectEqual(@as(u64, 1), s1.counts.misses_tail_window);
++    try std.testing.expectEqual(@as(u64, 0), s1.counts.misses_no_prefix);
++}
++
++test "TF_DS_CACHE_METRICS: evictions split into superseded and least recently used" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    // a superseded turn state goes before anything else
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 330); // fake bytes: 100 + at
++    defer s.deinit();
++    s.metrics = true;
++    const other = [_]u32{ 5, 5, 5, 5 };
++    _ = f.pass(&s, &other, try s.begin(a, &other, 3, &.{}, &.{}, null));
++    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6 };
++    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null));
++    const t2 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
++    _ = f.pass(&s, &t2, try s.begin(a, &t2, 6, &.{}, &.{}, null));
++    const t3 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
++    _ = f.pass(&s, &t3, try s.begin(a, &t3, 8, &.{}, &.{}, null)); // 108 bytes: t1's state (a superseded turn) goes
++    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
++    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted_superseded);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.evicted_lru);
++    // unrelated conversations: the least recently used state goes
++    var g: Fake = .{ .gpa = gpa };
++    var u = Store.init(gpa, g.snapshots(), .{ .min_prompt = 0 }, 330);
++    defer u.deinit();
++    u.metrics = true;
++    for ([3][4]u32{ .{ 1, 1, 1, 1 }, .{ 2, 2, 2, 2 }, .{ 3, 3, 3, 3 } }) |p| {
++        _ = g.pass(&u, &p, try u.begin(a, &p, 3, &.{}, &.{}, null)); // 103 bytes each, none extends another
++    }
++    const p4 = [4]u32{ 4, 4, 4, 4 };
++    _ = g.pass(&u, &p4, try u.begin(a, &p4, 3, &.{}, &.{}, null)); // 412 of 330: the oldest goes
++    try std.testing.expectEqual(@as(u64, 1), u.counts.evicted);
++    try std.testing.expectEqual(@as(u64, 0), u.counts.evicted_superseded);
++    try std.testing.expectEqual(@as(u64, 1), u.counts.evicted_lru);
++}
++
++test "TF_DS_CACHE_METRICS: failures split into save and restore" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var f: Fake = .{ .gpa = gpa, .fail_save = true };
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
++    defer s.deinit();
++    s.metrics = true;
++    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6 };
++    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null));
++    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
++    try std.testing.expectEqual(@as(u64, 1), s.counts.failed_save);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.failed_restore);
++    f.fail_save = false;
++    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null));
++    f.fail_restore = true;
++    const t2 = [_]u32{ 1, 2, 3, 4, 5, 6, 7 };
++    _ = f.pass(&s, &t2, try s.begin(a, &t2, 6, &.{}, &.{}, null));
++    try std.testing.expectEqual(@as(u64, 2), s.counts.failed);
++    try std.testing.expectEqual(@as(u64, 1), s.counts.failed_restore);
++    f.fail_restore = false;
++    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null));
++    s.forget(&t1, 4); // a state a peer could not resume: its restore failed too
++    try std.testing.expectEqual(@as(u64, 3), s.counts.failed);
++    try std.testing.expectEqual(@as(u64, 2), s.counts.failed_restore);
++}
++
++test "TF_DS_CACHE_METRICS: the resume depth buckets each finished pass by the fraction it resumed" {
++    const gpa = std.testing.allocator;
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
++    defer s.deinit();
++    s.metrics = true;
++    s.report(100, 0, 0); // 0%: the first bucket
++    s.report(8, 1, 0); // 12.5%: past 0, at most 25
++    s.report(8, 2, 0); // 25%: at most 25
++    s.report(8, 4, 0); // 50%
++    s.report(8, 6, 0); // 75%
++    s.report(100, 90, 0); // 90%
++    s.report(100, 95, 0); // 95%: past 90, at most 99
++    s.report(8, 8, 0); // 100%: the last edge's bucket
++    try std.testing.expectEqual(@as(u64, 1), s.depth.counts[0]);
++    try std.testing.expectEqual(@as(u64, 2), s.depth.counts[1]);
++    try std.testing.expectEqual(@as(u64, 1), s.depth.counts[2]);
++    try std.testing.expectEqual(@as(u64, 1), s.depth.counts[3]);
++    try std.testing.expectEqual(@as(u64, 1), s.depth.counts[4]);
++    try std.testing.expectEqual(@as(u64, 1), s.depth.counts[5]);
++    try std.testing.expectEqual(@as(u64, 1), s.depth.counts[6]);
++    try std.testing.expectEqual(@as(u64, 8), s.depth.n);
++    try std.testing.expectEqual(@as(f64, 0 + 12.5 + 25 + 50 + 75 + 90 + 95 + 100), s.depth.total);
++    s.report(0, 0, 0); // no prompt tokens: no observation
++    try std.testing.expectEqual(@as(u64, 8), s.depth.n);
++}
++
++test "TF_DS_CACHE_METRICS=0: the cause splits and the resume depth count nothing" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var f: Fake = .{ .gpa = gpa, .fail_save = true };
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20); // metrics off: the base behaviour
++    defer s.deinit();
++    _ = try s.lookup(a, &[_]u32{ 1, 2, 3, 4 }, 0, &.{}, &.{});
++    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6 };
++    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null));
++    s.report(8, 4, 0);
++    try std.testing.expectEqual(@as(u64, 2), s.counts.misses); // the coarse counters count as before (the look-up's and begin's)
++    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.misses_no_prefix);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.misses_tail_window);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.misses_stale);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.refused_budget);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.refused_restores);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.evicted_superseded);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.evicted_lru);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.failed_save);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.failed_restore);
++    try std.testing.expectEqual(@as(u64, 0), s.depth.n);
++}
+diff --git a/zig/src/core/prompt_cache_tier_test.zig b/zig/src/core/prompt_cache_tier_test.zig
+index 1cf58a43..0e57bb40 100644
+--- a/zig/src/core/prompt_cache_tier_test.zig
++++ b/zig/src/core/prompt_cache_tier_test.zig
+@@ -829,3 +829,26 @@ test "a NoRoom is worth waiting for only when the restores in flight hold the re
+     try std.testing.expectError(error.NoRoom, s.restoreBeginOver(pb, &b, .{}));
+     try std.testing.expect(!s.deferrable(error.NoRoom));
+ }
++
++test "TF_DS_CACHE_METRICS: a keep refused for the restores in flight splits from one past the budget" {
++    var f: Sum = .{};
++    var tier: FakeTier = .{ .gpa = gpa, .codec = f.codec() };
++    defer tier.deinit();
++    tier.polls = 1 << 20; // the restore stays in flight
++    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 300);
++    defer s.deinit();
++    s.metrics = true;
++    s.setTier(tier.tier(), 0);
++    const a = seq(48, 1);
++    _ = try tier.put(a[0..30], 30, std.mem.asBytes(&Sum.State{ .at = 30, .sum = Sum.fresh(&a, 30) }), 0, 0, false);
++    const ra = try s.restoreBeginOver(s.probe(&a, &.{}).durable.?, &a, .{}); // 130 of 300 in flight
++    const b = seq(300, 501);
++    try std.testing.expect(!keepAt(&s, &f, &b, 150, .{})); // 250 bytes beside the restore's 130: refused
++    try std.testing.expectEqual(@as(u64, 1), s.counts.refused);
++    try std.testing.expectEqual(@as(u64, 1), s.counts.refused_restores);
++    try std.testing.expectEqual(@as(u64, 0), s.counts.refused_budget);
++    s.restoreCancel(ra);
++    try std.testing.expect(!keepAt(&s, &f, &b, 250, .{})); // 350 bytes alone past the 300 budget: refused
++    try std.testing.expectEqual(@as(u64, 2), s.counts.refused);
++    try std.testing.expectEqual(@as(u64, 1), s.counts.refused_budget);
++}
+diff --git a/zig/src/server/metrics.zig b/zig/src/server/metrics.zig
+index 8de495ed..a5e2eacf 100644
+--- a/zig/src/server/metrics.zig
++++ b/zig/src/server/metrics.zig
+@@ -197,6 +197,13 @@ pub fn cacheFamilies(w: *std.Io.Writer, c: api.CacheStats) !void {
+             for (rc.slice(), 0..) |t, r| try w.print("{s}spill_{s}{{rank=\"{d}\"}} {d}\n", .{ prefix, name, r, @field(t, name) });
+         }
+     }
++    if (c.detail) |d| { // TF_DS_CACHE_METRICS: the coarse counters' causes, then the resume depth's histogram
++        const D = api.CacheDetail.help;
++        inline for (@typeInfo(api.CacheDetail).@"struct".field_names, @typeInfo(api.CacheDetail).@"struct".field_types) |name, T| if (T == u64) {
++            try gauge(w, "prompt_cache_" ++ name, "counter", @field(D, name), @field(d, name));
++        };
++        try histogram(w, "prompt_cache_resume_depth_percent", api.prompt_cache.ResumeDepth.help, d.depth);
++    }
+ }
+ 
+ /// KV ownership's counters (a backend that shards its pool: tensorfold:kv_shard_*), then every part's rows
+@@ -351,6 +358,38 @@ test "render counts restored prompt tokens where the engine keeps prompt states,
+     try std.testing.expectEqual(@as(u64, 96), t.cached);
+ }
+ 
++test "render publishes the cache's cause counters and resume depth only while the metrics carry them" {
++    const gpa = std.testing.allocator;
++    var m: Metrics = .{ .gpa = gpa };
++    var depth: api.prompt_cache.ResumeDepth = .{};
++    depth.counts = .{ 1, 2, 0, 0, 0, 0, 1, 0 };
++    depth.n = 4;
++    depth.total = 150.0;
++    var stub: RenderStub = .{ .status_value = .{ .cache = .{ .detail = .{ .misses_no_prefix = 2, .misses_stale = 1, .refused_restores = 3, .evicted_lru = 4, .depth = depth } } } };
++    var out: std.Io.Writer.Allocating = .init(gpa);
++    defer out.deinit();
++    try m.render(std.testing.io, &out.writer, stub.engine(), 4096);
++    const body = out.written();
++    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_cache_misses_no_prefix 2\n") != null);
++    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_cache_misses_stale 1\n") != null);
++    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_cache_refused_restores 3\n") != null);
++    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_cache_evicted_lru 4\n") != null);
++    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_cache_resume_depth_percent_bucket{le=\"0\"} 1\n") != null);
++    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_cache_resume_depth_percent_bucket{le=\"25\"} 3\n") != null);
++    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_cache_resume_depth_percent_bucket{le=\"+Inf\"} 4\n") != null);
++    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_cache_resume_depth_percent_sum 150\n") != null);
++    try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:prompt_cache_resume_depth_percent_count 4\n") != null);
++    // TF_DS_CACHE_METRICS=0: the detail is absent and the body holds none of its names (the base body)
++    stub.status_value.cache.?.detail = null;
++    var off: std.Io.Writer.Allocating = .init(gpa);
++    defer off.deinit();
++    try m.render(std.testing.io, &off.writer, stub.engine(), 4096);
++    const off_body = off.written();
++    for ([_][]const u8{ "misses_no_prefix", "misses_tail_window", "misses_stale", "refused_budget", "refused_restores", "evicted_superseded", "evicted_lru", "failed_save", "failed_restore", "resume_depth" }) |name|
++        try std.testing.expect(std.mem.indexOf(u8, off_body, name) == null);
++    try std.testing.expect(std.mem.indexOf(u8, off_body, "tensorfold:prompt_cache_memory_hits 0\n") != null); // the counters stay
++}
++
+ test "render exposes live counters, rounds, prefill and TPOT without cache family" {
+     const gpa = std.testing.allocator;
+     var m: Metrics = .{ .gpa = gpa };
+diff --git a/zig/src/server/status_routes.zig b/zig/src/server/status_routes.zig
+index 013ccd48..9b980bf1 100644
+--- a/zig/src/server/status_routes.zig
++++ b/zig/src/server/status_routes.zig
+@@ -65,6 +65,8 @@ pub fn putPair(a: Allocator, o: *json.Object, p: api.PairStatus) !void {
+ /// The prompt cache's counters, when its tier or grouping is on: the GLM engine's top-level names (chats_continued,
+ /// chats_continued_prefill_tokens), then every
+ /// counter under prompt_cache, the tier's own under prompt_cache.spill (an array, one object per rank, rank 0 first).
++/// With TF_DS_CACHE_METRICS the cause splits join them and resume_depth holds the histogram's bucket counts (the
++/// 0/25/50/75/90/99/100 percent edges).
+ pub fn putCache(a: Allocator, o: *json.Object, c: api.CacheStats) Allocator.Error!void {
+     try o.put(a, "chats_continued", try json.intValue(a, c.chats_continued));
+     try o.put(a, "chats_continued_prefill_tokens", try json.intValue(a, c.chats_continued_prefill_tokens));
+@@ -82,6 +84,17 @@ pub fn putCache(a: Allocator, o: *json.Object, c: api.CacheStats) Allocator.Erro
+         }
+         try pc.put(a, "spill", .{ .array = arr });
+     }
++    if (c.detail) |d| { // TF_DS_CACHE_METRICS: the coarse counters' causes, then the resume depth's histogram
++        const di = @typeInfo(api.CacheDetail).@"struct";
++        inline for (di.field_names, di.field_types) |name, T| if (T == u64) try pc.put(a, name, try json.intValue(a, @field(d, name)));
++        const buckets = try a.alloc(Value, d.depth.counts.len);
++        for (d.depth.counts, buckets) |n, *v| v.* = try json.intValue(a, n);
++        const depth = try json.newObject(a);
++        try depth.put(a, "count", try json.intValue(a, d.depth.n));
++        try depth.put(a, "sum_percent", .{ .float = d.depth.total });
++        try depth.put(a, "buckets", .{ .array = buckets });
++        try pc.put(a, "resume_depth", .{ .object = depth });
++    }
+     try o.put(a, "prompt_cache", .{ .object = pc });
+ }
+ 
+@@ -225,6 +238,27 @@ test "health's prompt cache counters: the GLM names on top, every counter below,
+     try std.testing.expect(none.get("prompt_cache").?.object.get("spill") == null);
+ }
+ 
++test "health's prompt cache detail: the cause counters and resume depth under prompt_cache, only while the metrics carry them" {
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var d: api.CacheDetail = .{ .misses_no_prefix = 2, .failed_restore = 1 };
++    d.depth.counts[0] = 3;
++    d.depth.n = 3;
++    const o = try json.newObject(a);
++    try putCache(a, o, .{ .detail = d });
++    const pc = o.get("prompt_cache").?.object;
++    try std.testing.expectEqualStrings("2", pc.get("misses_no_prefix").?.int);
++    try std.testing.expectEqualStrings("1", pc.get("failed_restore").?.int);
++    const depth = pc.get("resume_depth").?.object;
++    try std.testing.expectEqualStrings("3", depth.get("count").?.int);
++    try std.testing.expectEqualStrings("3", depth.get("buckets").?.array[0].int);
++    const none = try json.newObject(a);
++    try putCache(a, none, .{});
++    try std.testing.expect(none.get("prompt_cache").?.object.get("misses_no_prefix") == null);
++    try std.testing.expect(none.get("prompt_cache").?.object.get("resume_depth") == null);
++}
++
+ test "health's kv shard counters: every counter under kv_shard, each part's rows under per_part" {
+     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+     defer arena.deinit();

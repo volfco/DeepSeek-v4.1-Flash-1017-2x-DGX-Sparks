@@ -1,0 +1,274 @@
+From ca3ec5a17c3de8a9a0bc38ef87e5b1069fad533d Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Sun, 15 Nov 2026 10:25:36 -0800
+Subject: [PATCH 1/6] dsv41: TF_DS_ROUND_PROFILE (off by default) gives the
+ served process the round profile the batch driver prints, at /metrics
+
+Switch: TF_DS_ROUND_PROFILE (1 or 2; off otherwise). Read once at open by rank 0's served process (the dsv41 CUDA family's open, before the Loaded is built): exactly `1` sets the same counters the batch driver's --profile sets (Lanes.prof, Model.prof, the Engram host profile's eh.profile), exactly `2` also times the rounds' phases (Model.usePhaseTimer, eager rounds). Anything else (unset, `0`, `off`, `true`) sets nothing, allocates nothing and prints nothing: the replies are bit for bit the base ones and /metrics is untouched. TF_DS_CLOCK_MARKS is read as the batch driver reads it (u8, default 0, trimmed) and Model.useClock is called with it; marks 0 is exactly a batch driver with no TF_DS_CLOCK_MARKS (the forward's start and each stretch's ends only).
+
+The profile is attributed to a scrape, not a run, and the numbers must not be read as the unprofiled round cost. The profile syncs the GPU every round (with Model.prof on, verify synchronizes before and after the forward and the Engram host's stamps synchronize), so the figures include the sync. It is printed at /metrics, the one place a live pair can be read without stopping it, and the caveat rides with the numbers in the log: a separate line `{"rank": 0, "profile_note": "attribution only: the round profile syncs the GPU every round; figures include the sync and are not the unprofiled round cost"}` prints last, after the profile and clock lines. The profile line itself stays exactly the batch driver's shape, so it survives a strict key-equality compare against `tf-dsv41-lanes --profile`; the note is its own line, not a key on the profile line. The README row (added separately) carries the same attribution-only caveat, as does the line.
+
+/metrics and not every N rounds: the lane core (core/lanes/engine.zig) has no hook a family could use for a periodic print, and the profile is a diagnostics switch for a live pair, not a steady-state feature; the counters are cumulative since process start and are never reset, and the `rounds` counter in the line lets a reader take deltas between scrapes. The values may be torn mid-round (u64 loads, no snapshot lock); the next scrape fixes them. The print fires once per /metrics scrape, after the reply is sent (conn.finish), via a family-agnostic Engine.roundProfile hook: a new optional vtable method (null for Metal and the other families, which leave LaneHost.round_profile null and print nothing) and a one-line api.Engine wrapper. Nothing prints on the request path, nothing prints when the switch is off (one null check and an indirect call, no allocation), and the Prometheus body in status_routes is byte for byte what it was (metrics.zig is untouched).
+
+The wiring mirrors kv_parts/engram. LaneHost gains round_profile (null by default); its vtable exposes roundProfileFn, which calls the family's print when set. The dsv41 open sets it (Loaded.round_profile, the CUDA host forwards it to the lane host, both with @hasField on the family's Loaded type), and status_routes' metrics() calls srv.engine.roundProfile() after the reply. Metal, glm_host and qwen35 construct their LaneHosts unchanged and leave round_profile null: they print nothing at /metrics.
+
+printRoundProfile (dsv41/native.zig) ports the batch driver's end-of-process print to std.log.info (stderr, the container's log; one JSON object per line, only the JSON object as this code's text):
+1. The lanes_main Profile line, verbatim in shape: {"rank": 0, "profile": {"rounds": .., "rows_a_round": .., "step_ms": -1, "send_ms": .., "enqueue_ms": .., "forward_ms": .., "absorb_ms": .., "logits_ms": .., "sample_ms": .., "passes": .., "streams_a_pass": .., "pass_ms": .., "prefills": .., "prefill_ms": ..}}, computed with the batch driver's own arithmetic (rows_a_round and the others from the same nanoseconds-per-round/pass/prefill ratios and formats, the if (n == 0) 0 guard where a count is 0).
+2. With clk_rounds > 0, the two printClock lines (round_clock_us, round_launches), ported with rank the literal 0, m.rd.launches, round.PhaseTimer.phases and round.Round.clock_wait/clock_tail.
+3. With m.timer != null (switch 2), the phases_ms line; no "chunks": that is prefill_phases_ms in the batch driver, which this path does not print.
+4. The profile_note line above, always.
+
+step_ms is -1: the batch driver gets it from a local step's ns over core.steps, which the serve path does not have, so -1 is a sentinel for "not measured (serve path)" and every other field is real.
+
+Host gates (this host): `zig build test` exits 0 (its runner reported one spurious "failed command" for fedec0d2cb3b809f6ce4dfea3c223076/test on the first run of the suite, exactly the flaky big binaries the untouched branch shows; that binary passes standalone). The standalone gate (every .zig-cache/o subdirectory's test binary run directly) passes all 14 binaries. `zig build install native -Dfatbins=/home/colum/.cache/tf-dummy-fatbins` succeeds (the CUDA path type-checks; no CUDA code changed). Not run here, host-only: any pair, any smoke, exact.py. The bench pair should: start with TF_DS_ROUND_PROFILE=1 (plus TF_DS_CLOCK_MARKS to taste), scrape /metrics under load, and compare the profile line against `tf-dsv41-lanes --profile` (strict key-equality holds; step_ms is -1 by design). exact.py must stay IDENTICAL with the switch on: the profile syncs the GPU, it does not change a token. With the switch unset, /metrics' output is unchanged.
+
+base: series-0119 (TF_REF fbbc971 + zig/patches 0001-0122)
+---
+ zig/src/core/engine_api.zig       |  17 +++++
+ zig/src/core/lane_host.zig        |  11 +++-
+ zig/src/families/dsv41/native.zig | 100 +++++++++++++++++++++++++++++-
+ zig/src/native/cuda.zig           |   5 ++
+ zig/src/server/status_routes.zig  |   1 +
+ 5 files changed, 132 insertions(+), 2 deletions(-)
+
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index f07141a..c48c428 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -478,6 +478,14 @@ pub const KvParts = lanes.kv_parts.Stats;
+ 
+ pub const SubmitError = error{ Closed, Busy };
+ 
++/// What a backend hands the server for its round-profile print (TF_DS_ROUND_PROFILE): the served process's copy of
++/// what the batch driver's --profile prints. The metrics handler calls `print` after the reply; the family owns the
++/// rendering and what the counters mean.
++pub const RoundProfile = struct {
++    ctx: *anyopaque,
++    print: *const fn (ctx: *anyopaque) void,
++};
++
+ pub const Engine = struct {
+     ctx: *anyopaque,
+     vtable: *const VTable,
+@@ -494,6 +502,9 @@ pub const Engine = struct {
+         keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
+         /// One logit per label, and the vocabulary logsumexp. Null until a family scores decisions.
+         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
++        /// The round-profile print, for the metrics handler after its reply (TF_DS_ROUND_PROFILE). Null: the family
++        /// has none, and nothing prints. Cumulative; never resets.
++        roundProfile: ?*const fn (ctx: *anyopaque) void = null,
+     };
+ 
+     pub fn info(e: Engine) Info {
+@@ -522,6 +533,12 @@ pub const Engine = struct {
+         const f = e.vtable.score orelse return error.Unsupported;
+         return f(e.ctx, prompt, labels, logits);
+     }
++
++    /// The round-profile hook, or nothing: a family without one (Metal) leaves the vtable's null, and nothing prints.
++    pub fn roundProfile(e: Engine) void {
++        const f = e.vtable.roundProfile orelse return;
++        f(e.ctx);
++    }
+ };
+ 
+ /// A backend's own driver for a lone greedy stream (the GPU round), which LaneHost runs while the stream is alone.
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index f92692d..3e8830a 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -97,6 +97,9 @@ pub const LaneHost = struct {
+     /// A backend's Engram table-read latencies (TF_DS_ENGRAM_METRICS; `0` turns them off), read and published as `engram_tele`.
+     engram: ?api.EngramSource = null,
+     engram_tele: ?api.EngramStats = null,
++    /// The family's round-profile print (TF_DS_ROUND_PROFILE), set by it; /metrics calls it after the reply. Null:
++    /// the switch is off (nothing prints, nothing costs).
++    round_profile: ?api.RoundProfile = null,
+     // -- a broken rank pair (the backend's policy, set before start; null: off, nothing below runs) ---------------
+     pair: ?PairPolicy = null,
+     pair_state: std.atomic.Value(u8) = .init(0), // 0 whole, 1 a cause being recorded, 2 broken (why/drain/since set)
+@@ -367,7 +370,13 @@ pub const LaneHost = struct {
+     }
+ 
+     pub fn engine(h: *LaneHost) Engine {
+-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn } };
++        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .roundProfile = roundProfileFn } };
++    }
++
++    /// The family's round-profile print, if it set one (TF_DS_ROUND_PROFILE): called after the metrics reply.
++    fn roundProfileFn(ctx: *anyopaque) void {
++        const h = self(ctx);
++        if (h.round_profile) |p| p.print(p.ctx);
+     }
+ 
+     /// The family's queue as a keepalive target, when it set one.
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 527eede..a898115 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -161,6 +161,9 @@ pub const Loaded = struct {
+     pair: ?Pair = null,
+     /// Whether the model's stream is free of a CUDA graph capture (the lane host's service fence), with `ctx`.
+     quiet: ?*const fn (ctx: *anyopaque) bool = null,
++    /// TF_DS_ROUND_PROFILE: the served process's round-profile print for /metrics (rank 0 only; null: the switch
++    /// off, and nothing prints). `ctx` is `ctx`.
++    round_profile: ?api.RoundProfile = null,
+ };
+ 
+ pub const Snaps = struct {
+@@ -301,6 +304,26 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     inline for (lanes_mod.depth_pins, 0..) |d, i| pins[i] = getenv(d.name);
+     st.lanes.draft_pin = lanes_mod.parseDepthPin(&pins) catch return error.BadDraftPin;
+     st.lanes.no_copies = if (getenv("TF_DS_NO_COPIES")) |v| !std.mem.eql(u8, v, "0") else false;
++    // TF_DS_ROUND_PROFILE (1 or 2; anything else or unset: off, nothing below runs and nothing changes): the served
++    // process's copy of the batch driver's --profile. 1 sets the same counters the lanes backend and the model read;
++    // 2 also times the rounds' phases (usePhaseTimer, eager rounds). The profile prints at /metrics' scrape
++    // (status_routes calls Engine.roundProfile after the reply), never on the request path.
++    var round_profile: ?api.RoundProfile = null;
++    if (getenv("TF_DS_ROUND_PROFILE")) |t| {
++        const v = std.mem.trim(u8, t, " ");
++        if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "2")) {
++            st.lanes.prof = .{};
++            st.m.prof = true;
++            if (st.m.eh) |*eh| {
++                eh.io = io;
++                eh.profile = true;
++            }
++            if (std.mem.eql(u8, v, "2")) try st.m.usePhaseTimer();
++            const clock_marks: u8 = if (getenv("TF_DS_CLOCK_MARKS")) |c| std.fmt.parseInt(u8, std.mem.trim(u8, c, " "), 10) catch 0 else 0;
++            try st.m.useClock(clock_marks);
++            round_profile = .{ .ctx = st, .print = printRoundProfile };
++        }
++    }
+     // a vision checkpoint's tower on this rank, from the kit's vision/ (torch's attention cubin, the routing bias)
+     st.vision = null;
+     if (st.m.cfg.vision) st.vision = try vision_mod.Vision.open(gpa, io, st.m, dir, getenv("TF_DS_KIT").?);
+@@ -322,7 +345,82 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+     const engram: ?api.EngramSource = if (st.m.eh != null and st.m.eh.?.metrics) .{ .ctx = &st.lanes, .read = L.engramStatsFn } else null;
+     const pair: ?Pair = if (pair_mode == .exit) .{ .watch = pairWatch, .abort = pairAbort } else null;
+     if (pair != null) std.log.info("dsv41: a broken rank pair ends this server with status {d} for a restart of both ranks (TF_DS_PAIR_BROKEN=degrade: requests fail one by one instead)", .{api.LaneHost.pair_exit_code});
+-    return .{ .backend = st.lanes.backend(), .facts = st.lanes.facts(), .rows = @intCast(st.m.eng.round_rows), .stream_bytes = 0, .ctx = st, .deinit = deinitFn, .snaps = snaps, .vision = if (st.vision) |v| v.hook() else null, .window = window, .tier = tier, .grid = model.chunk_rows, .replay = @intCast(st.m.cfg.window), .kv_parts = kv_parts, .engram = engram, .pair = pair, .quiet = quietFn };
++    return .{ .backend = st.lanes.backend(), .facts = st.lanes.facts(), .rows = @intCast(st.m.eng.round_rows), .stream_bytes = 0, .ctx = st, .deinit = deinitFn, .snaps = snaps, .vision = if (st.vision) |v| v.hook() else null, .window = window, .tier = tier, .grid = model.chunk_rows, .replay = @intCast(st.m.cfg.window), .kv_parts = kv_parts, .engram = engram, .pair = pair, .quiet = quietFn, .round_profile = round_profile };
++}
++
++// -- the round profile (TF_DS_ROUND_PROFILE; rank 0's /metrics scrape) -------------------------------------------
++
++/// The round profile, printed at /metrics' scrape (status_routes calls Engine.roundProfile after the reply): what
++/// tf-dsv41-lanes --profile prints at the end of its run, one JSON object per line, via std.log.info to stderr.
++/// step_ms is -1: the batch driver computes it from a local step's ns, which the serve path does not keep, so the
++/// field is a sentinel for "not measured (serve path)"; every other field is real. The counters are cumulative since
++/// process start and a scrape mid-round may read one torn (u64 loads); nothing resets them, and the `rounds` counter
++/// is in the line so a reader can take deltas between scrapes. Only rank 0 serves, so the rank is the literal 0.
++/// The profile line stays exactly the batch driver's shape; the attribution-only caveat rides as its own last line
++/// (profile_note): the profile syncs the GPU every round, so the figures include the sync and are not the unprofiled
++/// round cost.
++fn printRoundProfile(ctx: *anyopaque) void {
++    const st: *State = @ptrCast(@alignCast(ctx));
++    const p = st.lanes.prof orelse return; // (the switch is off: nothing to say)
++    const m = st.m;
++    // Values from a /metrics scrape are cumulative and may be torn mid-round; std.log.info writes to stderr (the
++    // container's log), with only the JSON object as our text.
++    var out: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
++    defer out.deinit();
++    const w = &out.writer;
++    const ms = struct {
++        fn f(ns: u64, n: u64) f64 {
++            return if (n == 0) 0 else @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(n)) / 1e6;
++        }
++    }.f;
++    w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": -1, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), p.prefills, ms(p.prefill, p.prefills) }) catch return;
++    std.log.info("{s}", .{out.written()});
++    out.clearRetainingCapacity();
++    // lanes_main.zig's printClock, ported: the rounds' GPU clock gaps and launch counts (only with useClock, i.e.
++    // the profile on)
++    if (m.clk_rounds > 0) {
++        const r: f64 = @floatFromInt(m.clk_rounds);
++        w.print("{{\"rank\": 0, \"round_clock_us\": {{\"rounds\": {d}", .{m.clk_rounds}) catch return;
++        const names = round.PhaseTimer.phases;
++        for (0..256) |i| {
++            if (m.clk_cnt[i] == 0) continue;
++            const name = if (i < names.len) names[i] else switch (i) {
++                round.Round.clock_wait => "wait",
++                round.Round.clock_tail => "tail",
++                else => "other",
++            };
++            if (i >= 64 and i < 128) {
++                w.print(", \"L{d}\": [{d:.1}, {d:.1}]", .{ i - 64, @as(f64, @floatFromInt(m.clk_ph[i])) / r / 1e3, @as(f64, @floatFromInt(m.clk_cnt[i])) / r }) catch return;
++                continue;
++            }
++            w.print(", \"{s}\": [{d:.1}, {d:.1}]", .{ name, @as(f64, @floatFromInt(m.clk_ph[i])) / r / 1e3, @as(f64, @floatFromInt(m.clk_cnt[i])) / r }) catch return;
++        }
++        w.print("}}}}", .{}) catch return;
++        std.log.info("{s}", .{out.written()});
++        out.clearRetainingCapacity();
++        w.print("{{\"rank\": 0, \"round_launches\": {{", .{}) catch return;
++        var first = true;
++        for (m.rd.launches, 0..) |n, i| {
++            if (n == 0 or i >= names.len) continue;
++            w.print("{s}\"{s}\": {d:.1}", .{ if (first) "" else ", ", names[i], @as(f64, @floatFromInt(n)) / r }) catch return;
++            first = false;
++        }
++        w.print("}}}}", .{}) catch return;
++        std.log.info("{s}", .{out.written()});
++        out.clearRetainingCapacity();
++    }
++    // lanes_main.zig's phases_ms line (m.timer from usePhaseTimer; the phases' ms a round, no "chunks": that is
++    // prefill_phases_ms, which this path does not print)
++    if (m.timer) |tm| {
++        w.print("{{\"rank\": 0, \"phases_ms\": {{", .{}) catch return;
++        for (round.PhaseTimer.phases, 0..) |name, i| w.print("{s}\"{s}\": {d:.3}", .{ if (i == 0) "" else ", ", name, if (tm.rounds == 0) 0 else tm.ms[i] / @as(f64, @floatFromInt(tm.rounds)) }) catch return;
++        w.print("}}}}", .{}) catch return;
++        std.log.info("{s}", .{out.written()});
++        out.clearRetainingCapacity();
++    }
++    // the caveat rides with the numbers in the log: a line read in isolation must not look like an unprofiled truth
++    w.print("{{\"rank\": 0, \"profile_note\": \"attribution only: the round profile syncs the GPU every round; figures include the sync and are not the unprofiled round cost\"}}", .{}) catch return;
++    std.log.info("{s}", .{out.written()});
+ }
+ 
+ // -- the broken-pair policy (robustness, docs/port/robustness.md) ------------------------------------------------
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index 3dd73fc..99e84a1 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -163,6 +163,7 @@ const Host = struct {
+     cache: ?api.prompt_cache.Store = null, // kept prompt states, when the family keeps them
+     kv_parts: ?lanes.kv_parts.Source = null, // the family's KV-ownership stats (its pool sharded over the ranks)
+     engram: ?api.EngramSource = null, // the family's Engram table-read latencies (TF_DS_ENGRAM_METRICS; 0: off)
++    round_profile: ?api.RoundProfile = null, // the family's round-profile print (TF_DS_ROUND_PROFILE), for /metrics
+     snap_vt: api.prompt_cache.Snapshots.VTable = undefined,
+     spill: ?api.Spill = null, // the spill tier the family bound: the lane host is configured with it
+     // robustness: the family's broken-pair policy and service fence, handed to the lane host before it starts
+@@ -216,6 +217,7 @@ const Host = struct {
+         if (h.cache) |*store| h.host.cache = store;
+         h.host.kv_parts = h.kv_parts;
+         h.host.engram = h.engram;
++        h.host.round_profile = h.round_profile;
+         if (h.spill) |sp| h.host.configure(sp); // (after the cache and its tier: Spill.unbound sees Status.cache)
+         h.host.pair = h.pair;
+         h.host.quiet = h.quiet;
+@@ -445,6 +447,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+     errdefer gpa.free(h.startup);
+     if (@hasField(@TypeOf(loaded), "kv_parts")) h.kv_parts = loaded.kv_parts;
+     if (@hasField(@TypeOf(loaded), "engram")) h.engram = loaded.engram;
++    if (@hasField(@TypeOf(loaded), "round_profile")) if (loaded.round_profile) |p| {
++        h.round_profile = p;
++    };
+     // robustness: a family's broken-pair policy (dsv41: TF_DS_PAIR_BROKEN=exit) and its device's word for the
+     // lane host's service fence; both null keep the host exactly as before
+     if (@hasField(@TypeOf(loaded), "pair")) if (loaded.pair) |p| {
+diff --git a/zig/src/server/status_routes.zig b/zig/src/server/status_routes.zig
+index 9b980bf..e2839c7 100644
+--- a/zig/src/server/status_routes.zig
++++ b/zig/src/server/status_routes.zig
+@@ -154,6 +154,7 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
+     var len: [24]u8 = undefined;
+     conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{body.len}) catch return) catch return;
+     conn.finish(body) catch {};
++    srv.engine.roundProfile(); // after the reply (the family's TF_DS_ROUND_PROFILE print; nothing when off)
+ }
+ 
+ pub fn dashboard(srv: *Server, conn: *Conn, a: Allocator) void {
+-- 
+2.56.0
+

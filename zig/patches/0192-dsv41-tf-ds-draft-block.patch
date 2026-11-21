@@ -1,0 +1,475 @@
+diff --git a/zig/src/families/dsv41/draft.zig b/zig/src/families/dsv41/draft.zig
+index 23a270c..6ff45bd 100644
+--- a/zig/src/families/dsv41/draft.zig
++++ b/zig/src/families/dsv41/draft.zig
+@@ -47,6 +47,41 @@ pub const ring_extra = 16;
+ /// The stages (DSpark blocks) and a stream's block rows at most.
+ pub const max_stages = 4;
+ pub const max_block = 8;
++
++/// TF_DS_DRAFT_BLOCK (off by default; every rank alike, Model.agree): the most block rows a drafter pass runs, from
++/// the checkpoint's dspark_block_size (5: [token, noise x 4], five drafts) to max_draft_block. A pass asked for more
++/// drafts than the checkpoint's block runs as many block rows as drafts ([token, noise x (steps - 1)]); a pass asked
++/// for no more runs the checkpoint's block, launch for launch what it ran without the switch. The drafter was trained
++/// on its own block: the rows past it are extrapolation, and the verify decides (a reply keeps its bits either way:
++/// drafts only choose how many rows a round verifies).
++pub const block_env = "TF_DS_DRAFT_BLOCK";
++/// The widest block the switch takes: lanes.window_rows is one row more (the pending row).
++pub const max_draft_block = 7;
++
++/// TF_DS_DRAFT_BLOCK's value: unset, empty or "0" is the checkpoint's block (`base`); else base .. max_draft_block.
++pub fn parseBlock(text: ?[]const u8, base: usize) !usize {
++    const s = std.mem.trim(u8, text orelse return base, " ");
++    if (s.len == 0 or std.mem.eql(u8, s, "0")) return base;
++    const v = std.fmt.parseInt(usize, s, 10) catch return error.BadDraftBlock;
++    if (v < base or v > max_draft_block or v > max_block) return error.BadDraftBlock;
++    return v;
++}
++
++pub fn blockFromEnv(base: usize) !usize {
++    return parseBlock(if (std.c.getenv(block_env)) |v| std.mem.span(v) else null, base);
++}
++
++test "TF_DS_DRAFT_BLOCK: unset is the checkpoint's block, a value from it to max_draft_block" {
++    try std.testing.expectEqual(@as(usize, 5), try parseBlock(null, 5));
++    try std.testing.expectEqual(@as(usize, 5), try parseBlock("", 5));
++    try std.testing.expectEqual(@as(usize, 5), try parseBlock("0", 5));
++    try std.testing.expectEqual(@as(usize, 5), try parseBlock("5", 5));
++    try std.testing.expectEqual(@as(usize, 6), try parseBlock(" 6 ", 5));
++    try std.testing.expectEqual(@as(usize, 7), try parseBlock("7", 5));
++    try std.testing.expectError(error.BadDraftBlock, parseBlock("4", 5));
++    try std.testing.expectError(error.BadDraftBlock, parseBlock("8", 5));
++    try std.testing.expectError(error.BadDraftBlock, parseBlock("six", 5));
++}
+ /// absorb_many's rows at most: every drafting stream's verify window (16 rows a round).
+ pub const max_absorb = 48; // a round's drafting rows at most (round.max_rows)
+ 
+@@ -117,7 +152,7 @@ const NoiseTap = struct {
+         const x: *NoiseTap = @ptrCast(@alignCast(ctx));
+         const mk = x.dr.mk;
+         const lw = mk.rowCols();
+-        try x.e.ops.keyedNoise(x.e.s, x.dr.local + 4 * step * lw, x.dr.n * lw, lw, mk.col0(), x.dr.nz, step, x.n);
++        try x.e.ops.keyedNoise(x.e.s, x.dr.local + 4 * step * lw, x.dr.bn * lw, lw, mk.col0(), x.dr.nz, step, x.n);
+     }
+ };
+ 
+@@ -204,7 +239,9 @@ pub const PassGraphs = struct {
+ 
+ pub const Drafter = struct {
+     ds: weights.DSpark,
+-    n: usize, // a stream's block rows: [token, noise x (n - 1)]
++    n: usize, // a stream's block rows: [token, noise x (n - 1)] (the checkpoint's dspark_block_size)
++    n_most: usize, // TF_DS_DRAFT_BLOCK: the most block rows a pass runs (n when unset)
++    bn: usize, // the block rows of the pass being run or captured: blockRows(its steps)
+     noise: i64,
+     topk: usize,
+     slots_moe: usize, // the MoE's slots a row: top-k routed and the shared expert
+@@ -309,6 +346,13 @@ pub const Drafter = struct {
+         var dr: Drafter = undefined;
+         dr.ds = ds;
+         dr.n = c.dspark_block;
++        dr.n_most = try blockFromEnv(c.dspark_block);
++        dr.bn = dr.n;
++        if (dr.n_most != dr.n) {
++            // TF_DS_SPEC_SAMPLE's buffers are laid by the checkpoint's block: the two switches are not combined
++            if (e.ops.spec) return error.DraftBlockWithSpecSample;
++            std.log.info("dsv41: {s}={d} (rank {d}): a pass asked for more than {d} drafts runs as many block rows as drafts", .{ block_env, dr.n_most, sp.rank, dr.n });
++        }
+         dr.noise = c.dspark_noise;
+         dr.topk = c.draft_top_k;
+         dr.slots_moe = c.draft_top_k + 1;
+@@ -511,14 +555,21 @@ pub const Drafter = struct {
+         try prompt.grouped(e, ch, n, ls[0..S], xs[0..S], ldxs[0..S], dr.ak[0..S], ldos[0..S], types[0..S]);
+     }
+ 
++    /// A pass's block rows a stream for `steps` drafts: the checkpoint's block, or as many rows as drafts past it
++    /// (TF_DS_DRAFT_BLOCK; steps <= n_most).
++    pub fn blockRows(dr: *const Drafter, steps: usize) usize {
++        return @max(dr.n, steps);
++    }
++
+     /// BatchDraftGraph.run for N streams (tokens at positions q0 in slots): each stream's `steps` drafts and their
+     /// confidences into drafts / confs. Each slot's rings hold its positions before q0 (absorbed).
+     pub fn pass(dr: *Drafter, e: *const Engine, ch: *const Chunk, pool: *const Pool, tokens: []const i64, q0: []const i64, slots: []const i64, steps: usize, probe: ?Probe, keyed: ?Keyed) !void {
+         const N = tokens.len;
+-        const n = dr.n;
++        if (steps == 0 or steps > dr.n_most) return error.BadDraftPass;
++        const n = dr.blockRows(steps);
+         const R = N * n;
+         if (N == 0 or N > max_streams or R > max_rows or q0.len != N or slots.len != N) return notPorted(@src());
+-        if (steps == 0 or steps > n) return error.BadDraftPass;
++        dr.bn = n; // the body's (a captured pass's key is its streams and steps: its block rows follow from the steps)
+         // _body's index rows: ids [token, noise ...], positions q0 + j, window positions q0 - 1, ring bases
+         var hv: [6 * max_rows]i64 = @splat(0);
+         var hb: [max_rows * pick_pad]i64 = @splat(-1);
+@@ -587,7 +638,8 @@ pub const Drafter = struct {
+     fn body(dr: *Drafter, e: *const Engine, ch: *const Chunk, pool: *const Pool, N: usize, steps: usize, probe: ?Probe, noisy: bool) !void {
+         const c = e.c;
+         const t = e.t;
+-        const n = dr.n;
++        const n = dr.bn;
++        std.debug.assert(n == dr.blockRows(steps));
+         const R = N * n;
+         const d = c.hidden;
+         // the streams: every row's token embedding in each stream, pre (1, 0, 0, 0)
+@@ -707,7 +759,7 @@ pub const Drafter = struct {
+             .ring = true,
+             .comp = .{ .bf16 = dr.kvb },
+             .idx = dr.bidx,
+-            .n_idx = dr.n,
++            .n_idx = dr.bn,
+             .pos = dr.row(2),
+             .scale = prompt.scale(hd),
+             .window = c.window,
+@@ -744,7 +796,9 @@ pub const Drafter = struct {
+         const lay = dr.ds.blocks[j];
+         const ne: usize = lay.experts.count - 1;
+         var kc: usize = 0;
+-        if (R <= tri.decode_rows) {
++        // TF_DS_DRAFT_BLOCK: the kit's drafter gates are the row counts its capture ran (a five-row block a stream:
++        // RB 5, 10, 15); a pass of other rows takes the wide passes' cuBLAS gate, which every row count has
++        if (R <= tri.decode_rows and tri_norm.rowmmGateFits(e.t, dr.x, c.hidden, lay.gate_w, dr.gl, R, c.hidden, ne)) {
+             kc = try tri_norm.rowmmGate(e.t, dr.x, c.hidden, lay.gate_w, dr.gl, R, c.hidden, ne);
+         } else {
+             // x.float() @ gate_w.float().t() through cuBLAS, then the plain routing
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 51deb18..7190d9d 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -47,8 +47,15 @@ comptime {
+     std.debug.assert(round.EngramStash.rows_max == window_rows);
+ }
+ 
+-/// A window of the pending row and the drafter's block: the widest one the gates checked row for row.
+-pub const window_rows = 6;
++/// TF_DS_DRAFT_BLOCK: the confidence of a held draft its pass did not run (its sigmoid is 0 in f64 and f32).
++const no_chance: f32 = -1000.0;
++
++/// A window of the pending row and the drafter's block, at the widest block a build takes (TF_DS_DRAFT_BLOCK's most;
++/// arrays are laid by it). A run's own widest window is Lanes.win_rows: 6 without the switch (the pending row and the
++/// checkpoint's five-row block), the widest one the gates checked row for row.
++pub const window_rows = draft.max_draft_block + 1;
++/// The window of the checkpoint's own block when no drafter says (a model without one).
++pub const default_window_rows = 6;
+ 
+ /// The image rows a fill_images frame carries at most.
+ pub const image_piece = 32 << 10;
+@@ -674,6 +681,10 @@ pub const Lanes = struct {
+     spec_sx: ?*SpecScratch = null, // the verify's host buffers (the first speculated round makes them)
+     spec_count: SpecCount = .{},
+     wc: [window_rows]lanes.config.Cost = undefined, // the window costs (init)
++    win_rows: usize = default_window_rows, // this run's widest window: the pending row and the drafter's most block rows (init)
++    // TF_DS_DRAFT_BLOCK_KEPT (rank 0's; default 4): the rows a stream's last round must have kept for its next pass to
++    // run more than the checkpoint's block (draftFn); 0 widens every pass
++    wide_kept: usize = 4,
+     sc: [max_rows]lanes.config.Cost = undefined, // the shared forwards' costs (init)
+     used: [max_streams]bool = @splat(false),
+     seqs: [max_streams]std.ArrayList(i32) = @splat(.empty),
+@@ -705,6 +716,8 @@ pub const Lanes = struct {
+ 
+     pub fn init(gpa: std.mem.Allocator, m: *Model) Lanes {
+         var ln: Lanes = .{ .gpa = gpa, .m = m, .peer = if (m.world > 1) m.peer() else null };
++        if (m.dr) |dr| ln.win_rows = @min(window_rows, dr.n_most + 1); // TF_DS_DRAFT_BLOCK widens it (draft.blockFromEnv)
++        if (std.c.getenv("TF_DS_DRAFT_BLOCK_KEPT")) |v| ln.wide_kept = std.fmt.parseInt(usize, std.mem.trim(u8, std.mem.span(v), " "), 10) catch ln.wide_kept;
+         ln.keep_protect = api.prompt_cache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null); // every rank alike
+         ln.accept_chain = envOne("TF_DS_DEVICE_ACCEPT"); // every rank alike; an uneven pair is still bit-identical (the follower never reads the keep)
+         if (m.triage != null and ln.accept_chain) {
+@@ -765,13 +778,13 @@ pub const Lanes = struct {
+     pub fn facts(self: *const Lanes) lanes.Model {
+         const drafting = self.m.drafting();
+         return .{
+-            .exact_width = window_rows,
++            .exact_width = @intCast(self.win_rows),
+             .gpu_tokens = false,
+             .mtp = drafting,
+             .speculate = drafting,
+             .speculate_early = false,
+-            .drafts = if (self.m.dr) |dr| @intCast(dr.n) else 1,
+-            .window_costs = self.wc[0..],
++            .drafts = if (self.m.dr) |dr| @intCast(dr.n_most) else 1,
++            .window_costs = self.wc[0..self.win_rows],
+             .mtp_step_ms = draft.draft_ms,
+             .solo_head_overhead_ms = if (drafting and self.solo_overhead) draft.draft_ms else null, // opt-in: the Python engine's fixed draft allowance
+             .allocate_learned = self.allocate_learned,
+@@ -1694,7 +1707,7 @@ fn chunkRows(start: usize, len: usize) usize {
+             if (w.parents != null) return error.TreesNotBuilt;
+             const l = self.streams.getPtr(w.stream) orelse return error.UnknownStream;
+             const rows = w.rows();
+-            if (rows > window_rows) return error.WindowTooWide;
++            if (rows > self.win_rows) return error.WindowTooWide;
+             const start: usize = @intCast(w.stream.cache_len);
+             for (w.positions, 0..) |p, r| if (p != start + 1 + r) return error.PositionMismatch;
+             if (w.held > l.nheld) return error.HeldMismatch;
+@@ -1721,7 +1734,7 @@ fn chunkRows(start: usize, len: usize) usize {
+         const m = self.m;
+         const gpa = self.gpa;
+         if (m.dr == null) return error.NoDraftHead;
+-        const block = m.dr.?.n;
++        const block = m.dr.?.n_most;
+         var tokens: [max_streams]i64 = undefined;
+         var q0: [max_streams]i64 = undefined;
+         var slots: [max_streams]i64 = undefined;
+@@ -1732,6 +1745,11 @@ fn chunkRows(start: usize, len: usize) usize {
+         var asked: [max_streams]*Lane = undefined;
+         var n: usize = 0;
+         var steps: usize = 0;
++        // TF_DS_DRAFT_BLOCK: the drafts a stream may verify when a round's rows are shared evenly by the pass's streams
++        const base = m.dr.?.n;
++        var live: usize = 0;
++        for (requests) |r| live += @intFromBool(r.depth != 0);
++        const room = (m.eng.round_rows / @max(live, 1)) -| 1;
+         for (requests) |r| {
+             if (r.lanes != null or r.early) return error.TreesNotBuilt;
+             const l = self.streams.getPtr(r.stream) orelse return error.UnknownStream;
+@@ -1752,9 +1770,15 @@ fn chunkRows(start: usize, len: usize) usize {
+                 sampled = true;
+             };
+             self.spec_ids[n] = r.stream; // TF_DS_SPEC_SAMPLE: the pass's row of this stream (read only with the switch on)
+-            depths[n] = @min(r.depth, block);
++            depths[n] = @min(r.depth, block); // the drafts the stream holds for the round loop: every one it asked
++            // TF_DS_DRAFT_BLOCK: the round loop asks every draft the head has; a stream's pass runs more than the
++            // checkpoint's block only when the wider pass can pay for its extra rows: its last round kept at least
++            // wide_kept rows (its drafts are landing) and a round has room for that many of its drafts. Any other
++            // stream's pass stays at the checkpoint's block, and a pass of such streams runs what it ran without the
++            // switch; the drafts past it are held at no chance (below), so the round loop's count stands.
++            const want = passDrafts(depths[n], base, r.follow.len, self.wide_kept, room);
+             asked[n] = l;
+-            steps = @max(steps, depths[n]);
++            steps = @max(steps, want);
+             n += 1;
+         }
+         if (n == 0) return;
+@@ -1788,11 +1812,7 @@ fn chunkRows(start: usize, len: usize) usize {
+         }
+         const d = &m.dr.?;
+         for (asked[0..n], depths[0..n], 0..) |l, k, i| {
+-            for (0..k) |j| {
+-                l.held[j] = @intCast(d.drafts[i][j]);
+-                l.confs[j] = d.confs[i][j];
+-            }
+-            l.nheld = k;
++            l.nheld = holdDrafts(&l.held, &l.confs, k, steps, &d.drafts[i], &d.confs[i]);
+             l.dgen = self.spec_gen;
+         }
+         // TF_DS_ENGRAM_SUBMIT_EARLY: the pass's rows hashed into the round's Engram stash now (each stream's pending
+@@ -2176,6 +2196,74 @@ fn chunkRows(start: usize, len: usize) usize {
+     }
+ };
+ 
++/// TF_DS_DRAFT_BLOCK: the drafts a stream's pass runs for it, of the `asked` it holds for the round loop: more than
++/// the checkpoint's block (`base`) only when its last round kept at least `wide_kept` rows (its drafts are landing)
++/// and a round has room for that many of its drafts (`room`: a round's rows shared evenly by the pass's streams, less
++/// the pending row); the checkpoint's block otherwise. A stream asked no more than the block runs what it asked.
++pub fn passDrafts(asked: usize, base: usize, kept: usize, wide_kept: usize, room: usize) usize {
++    if (asked <= base) return asked;
++    return if (kept >= wide_kept and room > base) @min(asked, room) else base;
++}
++
++/// The drafts a stream holds after a pass of `steps` drafts: every one of the `hold` the round loop asked, and the
++/// count it returns is `hold` (the round loop sizes its window by the drafts it asked: a shorter count refuses the
++/// window, HeldMismatch). Those the pass ran keep its tokens and confidences; the rest (the stream's pass stayed under
++/// its asked depth) hold the last draft's token at no_chance, a confidence whose sigmoid is 0, so the allocation never
++/// spends a row on them, and a verify of one would only reject it.
++pub fn holdDrafts(held: []u32, confs: []f32, hold: usize, steps: usize, drafts: []const i64, pass_confs: []const f32) usize {
++    for (0..hold) |j| {
++        if (j < steps) {
++            held[j] = @intCast(drafts[j]);
++            confs[j] = pass_confs[j];
++        } else {
++            held[j] = held[steps - 1];
++            confs[j] = no_chance;
++        }
++    }
++    return hold;
++}
++
++test "TF_DS_DRAFT_BLOCK: a pass widens only after a round that kept enough rows and with room in the round" {
++    const eq = std.testing.expectEqual;
++    try eq(@as(usize, 5), passDrafts(5, 5, 0, 4, 15)); // the switch unset: asked is the block
++    try eq(@as(usize, 3), passDrafts(3, 5, 9, 4, 15)); // under the block: as asked
++    try eq(@as(usize, 5), passDrafts(6, 5, 3, 4, 15)); // the last round kept 3 rows: the checkpoint's block
++    try eq(@as(usize, 6), passDrafts(6, 5, 4, 4, 15)); // it kept 4: the wider block
++    try eq(@as(usize, 7), passDrafts(7, 5, 8, 4, 7)); // two streams of a 16-row round: room for 7
++    try eq(@as(usize, 6), passDrafts(7, 5, 8, 4, 6));
++    try eq(@as(usize, 5), passDrafts(7, 5, 8, 4, 4)); // three streams: no room past the block
++    try eq(@as(usize, 5), passDrafts(6, 5, 8, 4, 3)); // four streams
++    try eq(@as(usize, 6), passDrafts(6, 5, 0, 0, 15)); // TF_DS_DRAFT_BLOCK_KEPT=0: every pass with room
++}
++
++test "TF_DS_DRAFT_BLOCK: a stream holds every draft it was asked; those its pass did not run land with no chance" {
++    const gpa = std.testing.allocator;
++    var held: [draft.max_block]u32 = @splat(0);
++    var confs: [draft.max_block]f32 = @splat(9.0); // stale confidences of an earlier, wider pass
++    const drafts = [_]i64{ 11, 12, 13, 14, 15, 99, 99, 99 };
++    const pass_confs = [_]f32{ 3.0, 3.0, 3.0, 3.0, 3.0, 9.0, 9.0, 9.0 };
++    // asked 7 (TF_DS_DRAFT_BLOCK=7), the pass narrowed to the checkpoint's 5
++    const n = holdDrafts(&held, &confs, 7, 5, &drafts, &pass_confs);
++    try std.testing.expectEqual(@as(usize, 7), n); // the round loop's count stands (a short count refused the window)
++    try std.testing.expectEqualSlices(u32, &.{ 11, 12, 13, 14, 15, 15, 15 }, held[0..7]);
++    var sv: [7]f64 = undefined;
++    survivals(confs[0..7], &sv);
++    try std.testing.expect(sv[4] > 0.7);
++    try std.testing.expectEqual(@as(f64, 0.0), sv[5]);
++    try std.testing.expectEqual(@as(f64, 0.0), sv[6]);
++    // the round loop's allocation, at the served round costs, never grants a draft the pass did not run
++    var costs: lanes.table.Table = .{};
++    defer costs.deinit(gpa);
++    for (draft.round_ms[0..16], 1..) |ms, rows| try costs.put(gpa, @intCast(rows), ms);
++    const granted = try lanes.allocate.allocate(gpa, &.{1}, &.{sv[0..]}, &costs, draft.draft_ms, 16);
++    defer gpa.free(granted);
++    try std.testing.expectEqual(@as(u32, 5), granted[0]);
++    // a pass as wide as asked holds its own drafts
++    const m = holdDrafts(&held, &confs, 6, 6, &drafts, &pass_confs);
++    try std.testing.expectEqual(@as(usize, 6), m);
++    try std.testing.expectEqual(@as(f32, 9.0), confs[5]);
++}
++
+ /// Prefix survivals: out[j] = the product of sigmoid(conf[i]) for i <= j, in float64 (libm's exp, as chooseK).
+ pub fn survivals(conf: []const f32, out: []f64) void {
+     var surv: f64 = 1.0;
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 078d74c..d0b1900 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -517,6 +517,8 @@ pub const Model = struct {
+         if (o.drafts) {
+             m.dpool = try draft.Pool.init(&m.eng, &m.arena, m.streams);
+             m.dr = try draft.Drafter.init(&m.eng, &m.arena, sp);
++            // TF_DS_DRAFT_BLOCK: every stream's widest block fits a pass's buffers (draft.max_rows)
++            if (m.streams * m.dr.?.n_most > draft.max_rows) return error.DraftBlockTooWide;
+             if (o.graphs) {
+                 m.pgraphs = draft.PassGraphs.init(gpa);
+                 m.dr.?.graphs = &m.pgraphs.?;
+@@ -671,8 +673,10 @@ pub const Model = struct {
+     /// (the follower lane has no --context). Ranks on different prompt rows refuse too (PromptRowsMismatch): they would
+     /// launch different kernels for one chunk and sum wrong partials.
+     fn agree(m: *Model, o: Options, want_mode: anyerror!shard.Mode, want_pool: anyerror!usize, want_window: anyerror!?usize) !Agreed {
+-        const n: usize = 6;
++        const n: usize = 7;
+         const bad_setting: u64 = 0xff;
++        // TF_DS_DRAFT_BLOCK (draft.blockFromEnv): ranks on different blocks would run a pass over different rows
++        const want_block: anyerror!usize = draft.blockFromEnv(m.cfg.dspark_block);
+         const mine = [n]u64{
+             if (want_mode) |x| @backingInt(x) else |_| bad_setting,
+             if (want_pool) |x| x else |_| 0,
+@@ -680,6 +684,7 @@ pub const Model = struct {
+             o.round_rows,
+             o.window_rows,
+             o.gemm_rows,
++            if (want_block) |x| x else |_| bad_setting,
+         };
+         var dev = try cuda.DeviceBuffer.alloc(m.ctx.d, (1 + o.world) * n * 8);
+         defer dev.free();
+@@ -693,7 +698,9 @@ pub const Model = struct {
+         const mode = try want_mode;
+         const pool = try want_pool;
+         const own_window = try want_window;
++        _ = try want_block;
+         for (all[0..o.world]) |r| {
++            if (r[6] == bad_setting or r[6] != all[0][6]) return error.DraftBlockMismatch;
+             if (r[0] == bad_setting or r[1] == 0 or r[2] == bad_setting) return error.KvShardMismatch;
+             if (r[0] != all[0][0] or r[1] != all[0][1] or r[3] != all[0][3]) return error.KvShardMismatch;
+             if (r[4] != all[0][4] or r[5] != all[0][5]) return error.PromptRowsMismatch;
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index a6d95ab..30e16ab 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1940,7 +1940,7 @@ fn mix(e: *const Engine, rd: *Round, h: u64, spare: *u64, pending: *?u64, params
+ pub const EngramStash = struct {
+     /// The widest window's rows (lanes.window_rows: the pending row and the drafter's block; roundWins refuses wider):
+     /// the stash hashes at most these many, and no window reads past them.
+-    pub const rows_max = 6;
++    pub const rows_max = 8;
+ 
+     pub const Entry = struct {
+         valid: bool = false,
+@@ -2130,7 +2130,7 @@ test "TF_DS_ENGRAM_SUBMIT_EARLY: a stash covers a window's rows as a prefix of t
+     // the pass hashed: the ids its n-grams reach back to [7, 8, 9], the pending 100 at 12 and three held drafts
+     var en: EngramStash.Entry = .{ .valid = true, .slot = 3, .start = 12, .n = 4, .pre_len = 3 };
+     en.pre = .{ 7, 8, 9 };
+-    en.ids = .{ 100, 101, 102, 103, 0, 0 };
++    en.ids = .{ 100, 101, 102, 103, 0, 0, 0, 0 };
+     // the superset exactly matching, and a held-trimmed window's shorter prefix: covered
+     try std.testing.expect(en.covers(3, 12, &.{ 7, 8, 9 }, &.{ 100, 101, 102, 103 }));
+     try std.testing.expect(en.covers(3, 12, &.{ 7, 8, 9 }, &.{ 100, 101 }));
+diff --git a/zig/src/families/dsv41/tri.zig b/zig/src/families/dsv41/tri.zig
+index 3ed3e27..8efb4b8 100644
+--- a/zig/src/families/dsv41/tri.zig
++++ b/zig/src/families/dsv41/tri.zig
+@@ -24,6 +24,14 @@ pub const Tri = struct {
+         try t.set.?.run(t.stream, name, grid, args, consts);
+     }
+ 
++    /// Whether a launch resolves (the set's variant, exact or by fallback; a test's kit specs; a bare log: yes): a
++    /// wrapper whose launch shape the kit may not hold asks before it launches.
++    pub fn has(t: Tri, name: []const u8, args: []const aot.Arg, consts: []const aot.Const) bool {
++        if (t.set) |set| return set.has(name, args, consts);
++        if (t.kit) |specs| return aot.specsHave(specs, name, args, consts);
++        return true;
++    }
++
+     /// The PDL constexpr a wrapper passes when its kernel takes one (_pdl() in kernels.py).
+     pub fn pdlConst(t: Tri) aot.Const {
+         return aot.ci("PDL", @intFromBool(t.pdl));
+diff --git a/zig/src/families/dsv41/tri_hc.zig b/zig/src/families/dsv41/tri_hc.zig
+index adc2088..5468495 100644
+--- a/zig/src/families/dsv41/tri_hc.zig
++++ b/zig/src/families/dsv41/tri_hc.zig
+@@ -84,14 +84,27 @@ fn finishArgs(x: u64, part: u64, base: u64, scale: u64, pre_in: u64, norm_w: u64
+ 
+ /// _hc_mix_part: the mixes' partial dots of the streams x, or with `posted` of the post of x written to its h_out.
+ fn mixPart(t: Tri, x: u64, posted: ?Posted, post: u64, comb: u64, fn_w: u64, part: u64, rows: usize, d: usize) !void {
++    // with the post, XPF: switch "hc_xpf" on in the served build
++    if (posted) |ps| {
++        const args = [_]aot.Arg{
++            p("X", "*bf16", x),       p("XO", "*bf16", ps.h_out), p("G", "*fp32", ps.gathered), aot.int("RS", @intCast(rows * d)),
++            p("POST", "*fp32", post), p("COMB", "*fp32", comb),   p("FN", "*fp32", fn_w),       p("PART", "*fp32", part),
++        };
++        // The kit's posted variants are the rows-a-program its capture ran (the drafter's five-row blocks: RB 3, 4, 8).
++        // A posted mix of rows whose tuned RB the kit lacks (six rows: RB 2; TF_DS_DRAFT_BLOCK) takes the first RB it
++        // holds: the kernel is a program over RB rows bounded by `rows` (five rows at RB 3 already end in a part tile),
++        // so any RB computes the same rows.
++        const with_rows = args ++ [_]aot.Arg{aot.int("rows", @intCast(rows))}; // runRows' launch
++        for ([_]usize{ hcRb(rows), 3, 4, 8, 2, 1 }) |rb| {
++            const consts = [_]aot.Const{ ci("WIDE", 4 * d), ci("D", d), ci("NB", hc_blocks), ci("SUB", 128), ci("MB", 8), ci("RB", rb), t.pdlConst(), ci("WORLD", ps.world), ci("POSTED", 1), ci("XPF", 1) };
++            if (!t.has("_hc_mix_part", &with_rows, &consts)) continue;
++            return runRows(t, "_hc_mix_part", .{ tri.cdiv(rows, rb), hc_blocks, 3 }, &args, &consts, rows);
++        }
++        return error.MissingTritonVariant;
++    }
+     const rb = hcRb(rows);
+     const grid: [3]u32 = .{ tri.cdiv(rows, rb), hc_blocks, 3 };
+     const consts = [_]aot.Const{ ci("WIDE", 4 * d), ci("D", d), ci("NB", hc_blocks), ci("SUB", 128), ci("MB", 8), ci("RB", rb), t.pdlConst() };
+-    // with the post, XPF: switch "hc_xpf" on in the served build
+-    if (posted) |ps| return runRows(t, "_hc_mix_part", grid, &.{
+-        p("X", "*bf16", x),       p("XO", "*bf16", ps.h_out), p("G", "*fp32", ps.gathered), aot.int("RS", @intCast(rows * d)),
+-        p("POST", "*fp32", post), p("COMB", "*fp32", comb),   p("FN", "*fp32", fn_w),       p("PART", "*fp32", part),
+-    }, &(consts ++ [_]aot.Const{ ci("WORLD", ps.world), ci("POSTED", 1), ci("XPF", 1) }), rows);
+     try runRows(t, "_hc_mix_part", grid, &.{
+         p("X", "*bf16", x),       p("XO", "*bf16", x),      p("G", "*bf16", x),     aot.int("RS", 0),
+         p("POST", "*fp32", post), p("COMB", "*fp32", comb), p("FN", "*fp32", fn_w), p("PART", "*fp32", part),
+diff --git a/zig/src/families/dsv41/tri_norm.zig b/zig/src/families/dsv41/tri_norm.zig
+index 0cd984d..0d01a28 100644
+--- a/zig/src/families/dsv41/tri_norm.zig
++++ b/zig/src/families/dsv41/tri_norm.zig
+@@ -128,6 +128,20 @@ pub fn rowmmGate(t: Tri, x: u64, xs: usize, w: u64, out: u64, rows: usize, k: us
+     return kc;
+ }
+ 
++/// Whether rowmmGate's launch of a `rows`-row gate (rows <= tri.decode_rows) resolves in the kit: rowmm2's path does
++/// for every row count, the chunk sums' only where the kit holds the _rowmm_parts variant of exactly these rows (RB is
++/// the gate's rows). The published kit holds the target's gates (N 384) at RB 1..16 and the drafter's (N 128) at the
++/// rows its capture ran: 5, 10 and 15, a five-row block a stream. A drafter pass of other rows (TF_DS_DRAFT_BLOCK)
++/// asks, and takes the wide passes' cuBLAS gate when this says no.
++pub fn rowmmGateFits(t: Tri, x: u64, xs: usize, w: u64, out: u64, rows: usize, k: usize, n: usize) bool {
++    const tile = rpTile(rows);
++    const kc = k / 256;
++    if (!(rowmm_parts_min <= rows and rows <= tri.decode_rows and k % 256 == 0 and kc % tile.cpg == 0 and n >= 32)) return true;
++    if (rows > rowmm_parts_piece) return true; // rowmmPartsPiece splits those
++    const l = partsLaunch(t, x, xs, w, out, rows, k, n);
++    return t.has("_rowmm_parts", &l.args, &l.consts);
++}
++
+ /// rowmm_gate's chunk sums as _rowmm_parts launches of at most `piece` rows over consecutive rows (rowmmGate's
+ /// launches past its checks; tf-dsv41-port --gate compares the piece sizes on a GPU).
+ pub fn rowmmGatePieces(t: Tri, x: u64, xs: usize, w: u64, out: u64, rows: usize, k: usize, n: usize, piece: usize) !void {

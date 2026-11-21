@@ -1,0 +1,308 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits 0b168fe1d2aa..c6ea93d07ba5)
+# dsv41: TF_DS_PROMPT_ENDSTATE=N (off by default, M4) keeps a prompt pass's own end state for an identical resent prompt - it resumes with zero rows to compute
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+index ddd95f57bbef08b0bcd9b1ba510e37621c4ea57d..ddc938207f812665c5f57f24ab79743eee9fc36f 100644
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -136,6 +136,14 @@ pub fn exactResume(v: ?[]const u8) bool {
+     return std.mem.eql(u8, v orelse return false, "1");
+ }
+ 
++/// TF_DS_PROMPT_ENDSTATE=N (0178, M4): keep a pass's own end state for an identical resent prompt, at most N at
++/// once (null: unset, 0 or not a count in 1..8: off).
++pub fn endState(v: ?[]const u8) ?u8 {
++    const t = std.mem.trim(u8, v orelse return null, " \t\r\n");
++    const n = std.fmt.parseInt(u8, t, 10) catch return null;
++    return if (n >= 1 and n <= 8) n else null;
++}
++
+ test exactResume {
+     try std.testing.expect(!exactResume(null) and !exactResume("0") and !exactResume("") and !exactResume("on"));
+     try std.testing.expect(exactResume("1"));
+@@ -450,10 +458,15 @@ pub const Rules = struct {
+     /// TF_DS_EXACT_RESUME=1: a pass keeps its own end as an off-grid state (dsv41: its chunk grid rounded down to even),
+     /// whose tail the family holds the window's rows in; the family's usable is then the only resume gate.
+     exact: bool = false,
++    /// TF_DS_PROMPT_ENDSTATE=N (0178, M4): a pass's own end at `at == len` is kept (the full state: the replay built
++    /// every ring), so an identical resent prompt resumes with zero rows to compute.
++    endstate: bool = false,
+ 
+     /// The native rule (Lanes.usable): 0 < at < len, on the grid, at most len - window, its lookahead inside the prompt.
++    /// With `endstate` an exact `at == len` is offered too - the family's usable then confirms it is a full end state.
+     pub fn eligible(r: Rules, at: u32, len: usize) bool {
+-        if (at == 0 or at >= len) return false;
++        if (at == 0 or at > len) return false;
++        if (@as(usize, at) == len) return r.endstate;
+         if (r.grid > 0 and at % r.grid != 0) return false;
+         return @as(usize, at) + r.window <= len and @as(usize, at) + r.lookahead <= len;
+     }
+@@ -1438,3 +1451,21 @@ test {
+     _ = @import("prompt_cache_test.zig");
+     _ = @import("prompt_cache_tier_test.zig");
+ }
++
++test "0178 (TF_DS_PROMPT_ENDSTATE): eligible offers at == len only with the flag" {
++    const r: Rules = .{ .window = 128 };
++    try std.testing.expect(!r.eligible(100, 100));
++    try std.testing.expect(r.eligible(50, 100));
++    const e: Rules = .{ .window = 128, .endstate = true };
++    try std.testing.expect(e.eligible(100, 100)); // the identical resend's full end state
++    try std.testing.expect(!e.eligible(101, 100));
++    try std.testing.expect(!e.eligible(0, 100));
++}
++
++test "TF_DS_PROMPT_ENDSTATE parses 1..8 and nothing else" {
++    try std.testing.expectEqual(@as(?u8, null), endState(null));
++    try std.testing.expectEqual(@as(?u8, null), endState("0"));
++    try std.testing.expectEqual(@as(?u8, null), endState(""));
++    try std.testing.expectEqual(@as(?u8, 2), endState("2"));
++    for ([_][]const u8{ "x", "9", "-1" }) |bad| try std.testing.expectEqual(@as(?u8, null), endState(bad));
++}
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index a7ca9dfc0e84e33c5b551ef822db6d51eb204422..d460b9cee75b3cca9f0983c56547812d25f84561 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -598,6 +598,9 @@ pub const Snap = struct {
+     shared: bool = false, // kept at a shared cut (prompt_cache's Snapshots.share): placement's last victim (TF_DS_KEEP_PROTECT=1)
+     // TF_DS_EXACT_RESUME: an off-grid state's tail, the window rows of decoder input before `at` (the ring by position)
+     tail: ?cuda.DeviceBuffer = null,
++    // 0178 (TF_DS_PROMPT_ENDSTATE): a full end state's extras - the drafter stages' rows for the slot and head_g
++    // (null: not an end state)
++    end_buf: ?cuda.DeviceBuffer = null,
+     tail_start: usize = 0, // the positions its tail holds, [tail_start, tail_end)
+     tail_end: usize = 0,
+ };
+@@ -1131,6 +1134,9 @@ pub const Lanes = struct {
+             const at: usize = done.len & ~@as(usize, 1);
+             if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) k.at(k.ptr, s, @intCast(at));
+         };
++        // 0178 (TF_DS_PROMPT_ENDSTATE): the pass's own end kept - the full state, for an identical resent prompt to
++        // resume with zero rows (the cache's hook, as the exact-resume end keep above)
++        if (self.m.endstate != null and done.len >= 2) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(done.len));
+         if (self.prof) |*p| p.prefills += 1;
+         if (!done.head) return error.NoPromptLogits;
+         // a state read back from disk: the drafter's rings were rebuilt by the replay before the first draft
+@@ -1374,6 +1380,8 @@ fn chunkRows(start: usize, len: usize) usize {
+                 try m.copyExtent(sn.base, base, sn.at);
+             }
+             try m.snapCopy(slot, sn.buf.ptr, false);
++            // 0178 (TF_DS_PROMPT_ENDSTATE): the extras and head_g back - the pass then runs no rows
++            if (sn.end_buf) |b| try m.endCopy(slot, b.ptr, true);
+             // TF_DS_EXACT_RESUME: the tail comes back with the state, and the pass resumes where the state stands
+             if (sn.tail) |tb| {
+                 try m.tailCopy(slot, tb.ptr, false);
+@@ -1387,7 +1395,7 @@ fn chunkRows(start: usize, len: usize) usize {
+         // where this pass keeps states: the cache's marks and its last chunk end before the replay (the served lane's
+         // kept prompt), each at the chunk end at or before it
+         const last_end = @min(replay, len - 1) / model.chunk_rows * model.chunk_rows;
+-        self.fill = .{ .s = s, .slot = slot, .len = len, .replay = replay, .last_end = last_end, .start = start, .base = base, .restored = if (kept) |sn| sn.restored else false, .part = if (parted) |pp| pp.id else null };
++        self.fill = .{ .s = s, .slot = slot, .len = len, .replay = replay, .last_end = last_end, .start = start, .base = base, .restored = if (kept) |sn| sn.restored else false, .head = if (kept) |sn| sn.end_buf != null else false, .part = if (parted) |pp| pp.id else null };
+     }
+ 
+     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
+@@ -1818,7 +1826,9 @@ fn chunkRows(start: usize, len: usize) usize {
+     fn usable(self: *const Lanes, sn: *const Snap, len: usize) bool {
+         if (std.mem.indexOfScalar(*Snap, self.snaps.items, @constCast(sn)) == null) return false;
+         if (self.kv) |k| if (k.planner.keptIndex(sn.id) == null) return false; // (TF_DS_KV_SHARD: its rows the planner holds)
+-        if (sn.stale or sn.loading or sn.at == 0 or sn.at >= len) return false;
++        if (sn.stale or sn.loading or sn.at == 0) return false;
++        if (sn.at == len) return sn.end_buf != null; // (0178: an identical resent prompt's full end state: zero rows)
++        if (sn.at > len) return false;
+         // TF_DS_EXACT_RESUME: an off-grid state nearer the end than the window resumes on its tail's rows
+         if (sn.tail != null) return tailPre(sn, len, self.m.cfg.window) != null;
+         return sn.at % model.chunk_rows == 0 and sn.at <= len -| self.m.cfg.window;
+@@ -1937,12 +1947,16 @@ fn chunkRows(start: usize, len: usize) usize {
+         const s: *const lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
+         const l = self.streams.getPtr(s) orelse return error.UnknownStream;
+         const window = self.m.cfg.window;
+-        const tail = keepKind(self.m.exact_resume, at, s.prompt_len, window) orelse return error.NotAChunkEnd;
++        // 0178 (TF_DS_PROMPT_ENDSTATE): the pass's own end at exactly `len` - the full state (the replay built every
++        // ring), no tail (a zero-row resume prepends nothing)
++        const end_keep = self.m.endstate != null and at == s.prompt_len;
++        const tail = if (end_keep) false else keepKind(self.m.exact_resume, at, s.prompt_len, window) orelse return error.NotAChunkEnd;
+         const sn = try self.gpa.create(Snap);
+         errdefer self.gpa.destroy(sn);
+         sn.* = .{ .id = self.next_snap, .at = at, .base = l.base, .end = l.end, .part = l.part, .buf = try cuda.DeviceBuffer.alloc(self.m.ctx.d, self.m.snapBytes()), .slot = @intCast(l.slot) };
+         errdefer sn.buf.free();
+         errdefer if (sn.tail) |*b| b.free(); // (the whole function's: a later failure would leak it)
++        errdefer if (sn.end_buf) |*b| b.free();
+         if (tail) {
+             // the pass's stash: the window rows before `at` (a keep it did not reach refuses)
+             const t = self.m.tails[l.slot];
+@@ -1952,11 +1966,34 @@ fn chunkRows(start: usize, len: usize) usize {
+             sn.tail_start = t.start;
+             sn.tail_end = t.end;
+         }
++        if (end_keep) {
++            sn.end_buf = try cuda.DeviceBuffer.alloc(self.m.ctx.d, self.m.endBytes());
++            try self.m.endCopy(l.slot, sn.end_buf.?.ptr, false);
++        }
++        // (0178: the end-state cap N - the oldest end state goes when N are live; snapDropFn frees its extras too)
++        if (end_keep) {
++            var live: usize = 0;
++            for (self.snaps.items) |o| live += @intFromBool(o.end_buf != null);
++            const cap_n: usize = self.m.endstate orelse 0;
++            while (cap_n > 0 and live >= cap_n) {
++                var old: ?*Snap = null;
++                for (self.snaps.items) |o| {
++                    if (o.end_buf != null) {
++                        old = o;
++                        break;
++                    }
++                }
++                const o = old orelse break;
++                snapDropFn(@ptrCast(self), @ptrCast(o));
++                live -= 1;
++            }
++        }
+         try self.snaps.append(self.gpa, sn);
+         self.next_snap += 1;
+         if (try self.begin(.snap_save)) {
+             try self.wire.int(self.gpa, u64, sn.id);
+             try self.wire.int(self.gpa, u32, @intCast(l.slot));
++            try self.wire.int(self.gpa, u8, @intFromBool(end_keep)); // (0178: rank 1 keeps its own extras with it)
+             try self.flush();
+         }
+         try self.m.snapCopy(l.slot, sn.buf.ptr, true);
+@@ -1993,6 +2030,7 @@ fn chunkRows(start: usize, len: usize) usize {
+         if (self.kv) |k| k.drop(sn.id) catch |err| std.log.err("dsv41: the parts' planner kept a dropped prompt state: {s}", .{@errorName(err)});
+         sn.buf.free();
+         if (sn.tail) |*b| b.free();
++        if (sn.end_buf) |*b| b.free(); // (0178's extras)
+         self.gpa.destroy(sn);
+     }
+ 
+@@ -2720,9 +2758,10 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+             .snap_save => {
+                 const id = try r.int(u64);
+                 const s: usize = try r.int(u32);
++                const end_keep = try r.int(u8) != 0; // (0178: this rank keeps its own extras with the state)
+                 if (s >= max_streams) return error.BadSlot;
+                 // TF_DS_EXACT_RESUME: a state's tail (the window rows of decoder input before its end) rides after it
+-                var b = try cuda.DeviceBuffer.alloc(m.ctx.d, m.snapBytes() + (if (m.exact_resume) m.tailBytes() else 0));
++                var b = try cuda.DeviceBuffer.alloc(m.ctx.d, m.snapBytes() + (if (m.exact_resume) m.tailBytes() else 0) + (if (end_keep) m.endBytes() else 0));
+                 m.snapCopy(s, b.ptr, true) catch |err| {
+                     b.free();
+                     refused(err);
+@@ -2732,6 +2771,14 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+                     m.tailCopy(s, b.ptr + m.snapBytes(), true) catch |err| refused(err);
+                     try kept_tail.put(gpa, id, .{ m.tails[s].start, m.tails[s].end });
+                 }
++                if (end_keep) {
++                    // (0178: this rank's drafter rows and head_g into the entry's extras)
++                    m.endCopy(s, b.ptr + b.len - m.endBytes(), false) catch |err| {
++                        b.free();
++                        refused(err);
++                        continue;
++                    };
++                }
+                 try kept.put(gpa, id, b);
+             },
+             .snap_restore => {
+@@ -2758,6 +2805,10 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+                     }
+                     m.tails[s].resume_at = at;
+                 }
++                // 0178 (TF_DS_PROMPT_ENDSTATE): the extras (the drafter stages' rows and head_g) when the state has
++                // them - the entry's size says so
++                const extra = b.len - m.snapBytes() - (if (m.exact_resume) m.tailBytes() else 0);
++                if (extra > 0) m.endCopy(s, b.ptr + b.len - extra, true) catch |err| refused(err);
+             },
+             .snap_drop => {
+                 const id = try r.int(u64);
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index b91fb530c5be757165fdae3df46aa94073a5ab65..5352951bee542f262ca984bc702f959207776160 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -322,7 +322,7 @@ pub fn main(init: std.process.Init) !u8 {
+     if (spill != null) {
+         const L = dsv41.lanes.Lanes;
+         snap_vt = .{ .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .usable = L.usableFn, .share = L.snapShareFn };
+-        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")), .keep_protect = pcache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null), .exact = pcache.exactResume(if (std.c.getenv("TF_DS_EXACT_RESUME")) |v| std.mem.span(v) else null) }, @intFromFloat(cache_gib * (1 << 30)));
++        store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")), .keep_protect = pcache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null), .exact = pcache.exactResume(if (std.c.getenv("TF_DS_EXACT_RESUME")) |v| std.mem.span(v) else null), .endstate = pcache.endState(if (std.c.getenv("TF_DS_PROMPT_ENDSTATE")) |v| std.mem.span(v) else null) != null }, @intFromFloat(cache_gib * (1 << 30)));
+         var seed: [4]u8 = undefined;
+         io.random(&seed);
+         store_v.setTier(ln.spill.?.tier(), std.mem.readInt(u32, &seed, .little));
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index d95f71fe3429c65514aa01cf274d87792f618042..0e6ecac3b1cbaa52768837c0cf30598d44f1558d 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -193,6 +193,7 @@ pub const Model = struct {
+     triage: ?f64 = null, // 0177 (TF_DS_DRAFT_TRIAGE): the conf rule's survival threshold (null: off)
+     hot_k: ?u8 = null, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot:<n>): the prefetch's hot experts a layer (null: off)
+     hot_age: u32 = 0, // rounds since the hot plan was rebuilt (32: the first round rebuilds)
++    endstate: ?u8 = null, // 0178 (TF_DS_PROMPT_ENDSTATE=N): end states kept for an identical resend (null: off)
+     draw_rows: usize = 0, // rows the round's tokens are drawn on the device (setDraw; 0: the greedy argmax)
+     accept_tab: u64 = 0, // TF_DS_DEVICE_ACCEPT: the device tab [row0 ..][wrows ..] of the round's windows (setAccept)
+     accept_rows: usize = 0, // windows the round's chain keeps are computed on the device (setAccept; 0: off)
+@@ -249,6 +250,7 @@ pub const Model = struct {
+         m.absorb_after_pick = envOnOff(envOf("TF_DS_ABSORB_AFTER_PICK")); // rank-local: an uneven pair stays bit-identical
+         m.triage = try parseTriage(envOf("TF_DS_DRAFT_TRIAGE")); // rank-local: the mask rides the verify frame
+         m.hot_k = try parseHot(envOf("TF_DS_EXPERT_HOT_CACHE")); // rank-local: prefetch is invisible to the bits
++        m.endstate = api.prompt_cache.endState(envOf("TF_DS_PROMPT_ENDSTATE")); // both ranks alike (the frames ride it)
+         m.tails = &.{};
+         m.tail_buf = null;
+         errdefer if (m.tail_buf) |*b| b.free();
+@@ -1733,6 +1735,32 @@ pub const Model = struct {
+         }
+     }
+ 
++    /// 0178 (TF_DS_PROMPT_ENDSTATE): the end state's extras' bytes - each drafter stage's rows for the slot, then the
++    /// prompt's last row's logits (the zero-row resume's first token comes from them).
++    pub fn endBytes(m: *const Model) usize {
++        const stages: usize = if (m.dpool) |*p| p.stages else 0;
++        const stage: usize = if (m.dpool) |*p| p.planeBytes() / p.slots else 0;
++        return stages * stage + m.vocab * 4;
++    }
++
++    /// 0178: the slot's end state (the drafter stages' rows and head_g) between `ptr` (an end_buf) and the live state:
++    /// `to_device` restores, else it saves. Both halves are device bytes.
++    pub fn endCopy(m: *Model, slot: usize, ptr: u64, to_device: bool) !void {
++        const d = m.ctx.d;
++        const stage: usize = if (m.dpool) |*p| p.planeBytes() / p.slots else 0;
++        if (m.dpool) |*p| {
++            for (0..p.stages) |j| {
++                const src = if (to_device) ptr + j * stage else p.view(j, slot);
++                const dst = if (to_device) p.view(j, slot) else ptr + j * stage;
++                try d.check(d.api.cuMemcpyDtoD_v2(dst, src, stage), "cuMemcpyDtoD");
++            }
++        }
++        const off = (if (m.dpool) |*p| p.stages else 0) * stage;
++        const src = if (to_device) ptr + off else m.ch.head_g;
++        const dst = if (to_device) m.ch.head_g else ptr + off;
++        try d.check(d.api.cuMemcpyDtoD_v2(dst, src, m.vocab * 4), "cuMemcpyDtoD");
++    }
++
+     /// 0177 (TF_DS_DRAFT_TRIAGE): the round's dead-row mask, u8 a row (1: the probe says its predecessor will reject
+     /// its input; the row routes nothing and the host treats it as rejected). Uploaded every round the switch is on,
+     /// so the device never keeps a stale flag; the mask is the same on both ranks (it rides the verify frame).
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 5489eb648bfffff98200f7996c98515aeade353a..03921f2c73a6d6007d983741b3a4013eadc1e57d 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -50,6 +50,11 @@
+ //!                                               does not exist in the kit, so the value refuses with
+ //!                                               error.KitKernelMissing (the contract is the patch's commit body);
+ //!                                               unset: nothing
++//!   TF_DS_PROMPT_ENDSTATE=N                      0178 (M4): a prompt pass's own end state (every ring the replay
++//!                                               built, the drafter's rows, the last row's logits) is kept for an
++//!                                               identical resent prompt, which resumes with zero rows (a retry, a
++//!                                               regenerate, n > 1); at most N (1..8) at once. Identical; not
++//!                                               spilled (process-local); unset: the engine as it was
+ //!   TF_DS_ROUND_ROWS, TF_DS_STREAMS             a round's rows at most (16; the four-node lane's 48) and the pool's
+ //!                                               streams (4; its 16): --parallel at most the streams
+ //!   TF_DS_PROMPT_WINDOW_ROWS=<rows>             a prompt chunk under these rows (64 .. 128; 64 unset) takes the MoE decode window
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index a8e131cf935e4c01f1b268b1a34864ecf845ffcc..d471ae69afbf10d5b195f9db0fada5c45dbd6469 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -480,7 +480,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+         if (want > 0) {
+             h.snap_vt = .{ .bytes = sn.bytes, .save = sn.save, .restore = sn.restore, .drop = sn.drop };
+             if (@hasField(@TypeOf(sn), "share")) h.snap_vt.share = sn.share;
+-            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")), .exact = api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")) }, want);
++            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")), .exact = api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")), .endstate = api.prompt_cache.endState(getenv("TF_DS_PROMPT_ENDSTATE")) != null }, want);
+             // TF_DS_EXACT_RESUME: the store passes its tail rule to the family's usable, wired without a tier too
+             if (h.cache.?.rules.exact) if (@hasField(@TypeOf(sn), "usable")) {
+                 h.snap_vt.usable = sn.usable;
