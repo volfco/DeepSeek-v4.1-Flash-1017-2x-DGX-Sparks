@@ -29,6 +29,20 @@ extern "C" __global__ void copy_kernel(const uint4* src, uint4* dst, long long n
     const long long stride = (long long)gridDim.x * blockDim.x;
     for (; i < n; i += stride) dst[i] = src[i];
 }
+
+// A delayed producer: every block waits `cycles` globaltimer ticks, then copies `src` to `dst` (16-byte words). The PDL
+// canary: a dependent that reads `dst` before griddepcontrol.wait sees the bytes it had before the copy.
+extern "C" __global__ void delay_copy(const uint4* src, uint4* dst, long long n, unsigned long long cycles) {
+    if (threadIdx.x == 0) {
+        unsigned long long t0, t;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
+        do { asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); } while (t - t0 < cycles);
+    }
+    __syncthreads();
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const long long stride = (long long)gridDim.x * blockDim.x;
+    for (; i < n; i += stride) dst[i] = src[i];
+}
 CUDA
 "$nvcc_bin" "${flags[@]}" -cubin floor.cu -o floor.cubin
 echo "built $out"

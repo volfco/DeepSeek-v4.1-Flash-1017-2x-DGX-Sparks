@@ -61,6 +61,8 @@ kit = {
 # driver plumbing
 
 def cu(name, *args):
+    if os.environ.get("FUSED_BENCH_TRACE"):
+        print(f"    cu {name}", flush=True)
     err = getattr(cuda, name)(*args)
     if err:
         msg = ct.c_char_p()
@@ -121,7 +123,20 @@ def function(path, name):
     return kernels[key]
 
 
-def launch(path, name, grid, threads, shared, *args):
+class LaunchAttr(ct.Structure):  # CUlaunchAttribute: id, 4 pad bytes, a 64-byte value union
+    _fields_ = [("id", ct.c_uint), ("pad", ct.c_ubyte * 4), ("value", ct.c_ubyte * 64)]
+
+
+class LaunchConfig(ct.Structure):  # CUlaunchConfig
+    _fields_ = [("grid_x", ct.c_uint), ("grid_y", ct.c_uint), ("grid_z", ct.c_uint),
+                ("block_x", ct.c_uint), ("block_y", ct.c_uint), ("block_z", ct.c_uint),
+                ("shared_bytes", ct.c_uint), ("stream", P), ("attrs", P), ("num_attrs", ct.c_uint)]
+
+
+PROGRAMMATIC_STREAM_SERIALIZATION = 6  # CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
+
+
+def launch(path, name, grid, threads, shared, *args, pdl=False, on_stream=None):
     fn = function(path, name)
     if shared > 49152:  # past 48 KiB the kernel must opt into dynamic shared memory (CU_FUNC_ATTRIBUTE 8)
         cu("cuFuncSetAttribute", fn, I(8), I(shared))
@@ -138,7 +153,14 @@ def launch(path, name, grid, threads, shared, *args):
     argv = (P * len(pack))(*(argptr(x) for x in pack))
     gx, gy = grid if isinstance(grid, tuple) else (grid, 1)
     bx, by = threads if isinstance(threads, tuple) else (threads, 1)
-    cu("cuLaunchKernel", fn, gx, gy, 1, bx, by, 1, shared, stream, argv, None)
+    st = stream if on_stream is None else on_stream
+    if not pdl:  # the engine's plain launch path
+        cu("cuLaunchKernel", fn, gx, gy, 1, bx, by, 1, shared, st, argv, None)
+        return
+    # TF_DS_PDL: the engine sets this attribute on every launch of a pdl-taking kernel (cuda/launch.zig)
+    attr = LaunchAttr(PROGRAMMATIC_STREAM_SERIALIZATION, (ct.c_ubyte * 4)(0, 0, 0, 0), (ct.c_ubyte * 64)(1, *([0] * 63)))
+    cfg = LaunchConfig(gx, gy, 1, bx, by, 1, shared, st, ct.cast(ct.pointer(attr), P), 1)
+    cu("cuLaunchKernelEx", ref(cfg), fn, argv, None)
     if os.environ.get("FUSED_BENCH_DEBUG"):
         print(f"    launch {Path(path).name}:{name} grid={gx},{gy} block={bx},{by}", flush=True)
         cu("cuStreamSynchronize", stream)
@@ -150,8 +172,8 @@ def aot(key, grid, *args):
     launch(path, name, grid, 128, smem, *args, P(), P())
 
 
-def native(mod, name, grid, block, *args, shared=0):
-    launch(mod, "tf_ds_" + name + "_kernel", grid, block, shared, *args, 0)
+def native(mod, name, grid, block, *args, shared=0, pdl=0):
+    launch(mod, "tf_ds_" + name + "_kernel", grid, block, shared, *args, pdl, pdl=bool(pdl))
 
 
 def param_count(path, name):
@@ -815,14 +837,14 @@ def case_rope(path, rows, special=False, timing=True):
                     native(mod, "fused_idx_key", rows, 128, x, L(d), weights, cos, sin, pos, codes,
                            scales, dest, d, 64, eps, 0)
                 elif query:
-                    # this tree picks the geometry on the row count (a warp a head above decode's largest window)
-                    if i == 2 and rows >= 32:
+                    # the tree's own dispatch (0241: a warp a head above decode's largest window): grid.y is the head,
+                    # so both arms launch the same geometry (a flat rows*heads grid is the pre-0241 shape and reads
+                    # past the rows on every tree from 0241 on)
+                    if rows >= 32:
                         native(mod, "fused_rope_qd_pair", (rows, heads // 8), 256, x, dq, cos, sin, pos, heads, d,
                                64, 0)
-                    elif i == 2:
-                        native(mod, "fused_rope_qd", (rows, heads), 128, x, dq, cos, sin, pos, heads, d, 64, 0)
                     else:
-                        native(mod, "fused_rope_qd", rows * heads, 128, x, dq, cos, sin, pos, heads, d, 64, 0)
+                        native(mod, "fused_rope_qd", (rows, heads), 128, x, dq, cos, sin, pos, heads, d, 64, 0)
                 elif prompt:
                     native(mod, "fused_prompt_latent", rows, min(d // 2, 256), x, cos, sin, L(base), 1, codes,
                            scales, d, 64, 0)
@@ -968,6 +990,80 @@ def case_prune(rows, dead_mode=False, special=False, timing=True):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# The unfused fallbacks WP1-WP3's switches fall back to: the new tree's own kernels, against the old tree's, so a change
+# to a fused arm cannot quietly alter the arm that runs when a gate refuses (past max_nbk, a width with no kit norm).
+
+def case_fallback_idx(rows, nb, k):
+    """nbk past idx_fused.max_nbk (16385 blocks = 131,080 columns): the engine runs block_max + topk_indices + pool_pick.
+    Both trees launch the same three kernels; this checks the new tree's bytes against the old tree's."""
+    width, ss, ms = 8 * nb - 3, 8 * nb, nb + 7
+    label = f"fallback idx R={rows} nb={nb} width={width} k={k}"
+    if not shape_ok(label):
+        return None
+    x = Buffer(rng.normal(size=(rows, ss)).astype("f4"))
+    vis = Buffer(np.linspace(0, width, rows, dtype="i8"))
+    every = Buffer(np.full(rows, 1 << 40, dtype="i8"))
+    chains, states = [], []
+    for mod in (opts.old_ops, opts.new_ops):
+        mx, ix, blocks = out((rows, nb), "u4"), out((rows, k), "i8"), out((rows, k), "i4")
+
+        def chain(mod=mod, mx=mx, ix=ix, blocks=blocks):
+            native(mod, "block_max", ((nb + 255) // 256, rows), 256, x, L(ss), width, 8, vis, mx, L(nb), nb)
+            native(mod, "topk_indices", rows, 1024, mx, L(nb), nb, k, every, ix)
+            native(mod, "pool_pick", rows, 1024, mx, L(nb), nb, ix, k, P(), 0, blocks)
+
+        chain()
+        chains.append(chain)
+        states.append([blocks])
+    diff = compare(f"{label} new_vs_old", states[1], states[0])
+    row = {"kernel": "0195-idx-fallback", "shape": label, "rows": rows, "nb": nb, "parity": {"new_vs_old": diff}}
+    row["bytes"] = rows * width * 4 + rows * nb * 4 + rows * k * 4
+    if DO_TIMING:
+        floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, 0)
+        row["timing"] = time_graphs(label, chains, ["old", "new"], floor, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
+def case_fallback_compress(rows, d):
+    """A width with no kit specialization (decodeOk takes 128 and 512): the engine runs compress2x + the kit norm. The
+    norm is the kit's own launch in both arms, so the bytes this checks are compress2x's (the pair sum) and the raw
+    ring rows the scatter writes; there is no AOT kit norm cubin at these widths to launch here."""
+    n = rows * 2
+    label = f"fallback compress-decode R={rows} D={d}"
+    if not shape_ok(label):
+        return None
+    slots = rng.permutation(n)[:rows].astype("i8")
+    pair = np.column_stack((slots, np.setdiff1d(np.arange(n), slots)))
+    pair[1::2] = pair[1::2, ::-1]
+    x, gate = map(Buffer, (rng.normal(size=(rows, d)).astype("f4"), rng.normal(size=(rows, d)).astype("f4")))
+    slot, gi = Buffer(slots), Buffer(pair)
+    ring0 = rng.normal(size=(n, d)).astype("f4")   # the same ring bytes for both arms
+    ring1 = rng.normal(size=(n, d)).astype("f4")
+    chains, states = [], []
+    for mod in (opts.old_torch, opts.new_torch):
+        rk, rg = Buffer(ring0), Buffer(ring1)
+        flag = Buffer(np.zeros(1, "u4"))
+        mid = out((rows, d), "u2")
+
+        def chain(mod=mod, rk=rk, rg=rg, flag=flag, mid=mid):
+            native(mod, "compress2x", rows, 256, x, L(d), gate, L(d), slot, rk, rg, gi, L(n), mid, L(d), rows, d, flag)
+
+        chain()
+        chains.append(chain)
+        states.append([mid, rk, rg])
+    diff = compare(f"{label} new_vs_old", states[1], states[0])
+    row = {"kernel": "0197-compress-fallback", "shape": label, "rows": rows, "d": d,
+           "parity": {"new_vs_old": diff}}
+    row["bytes"] = rows * d * 4 * 2 + 2 * n * d * 4 + rows * d * 2
+    if DO_TIMING:
+        floor = lambda: launch(opts.floor, "empty_kernel", rows, d, 0)
+        row["timing"] = time_graphs(label, chains, ["old", "new"], floor, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # kit _score_keys (the launch 0195's fold replaces; not part of this tree's fused path, priced for the baseline)
 
 
@@ -1095,7 +1191,7 @@ PRUNE_SHAPES = [1, 7, 32, 48]
 SCORE_KEYS_SHAPES = [(r, w) for r in (1, 7, 32, 128) for w in (16384, 32768, 65536)]
 
 KERNELS = ("idx", "idx-hist", "block-max", "idx-small", "fold", "compress-decode", "compress-prompt", "prompt-source",
-           "key", "latent", "query", "prompt-key", "prompt-latent", "prune", "score-keys")
+           "key", "latent", "query", "prompt-key", "prompt-latent", "prune", "score-keys", "fallback")
 
 FOLD_SHAPES = [(r, w) for r in (1, 7, 32, 48) for w in (16388, 32768, 65536)]
 
@@ -1262,6 +1358,14 @@ def main():
         if selected("score-keys"):
             for rows, w in SCORE_KEYS_SHAPES:
                 case_score_keys(rows, w)
+            free_all()
+        if selected("fallback"):
+            # the arms the switches fall back to: past idx_fused.max_nbk and at widths decodeOk does not take
+            # k <= 2048 is the unfused chain's own bound (topk_indices refuses past it: ops.topkIndices)
+            for rows, nb, k in ((7, 16385, 2048), (32, 16385, 2048)):
+                case_fallback_idx(rows, nb, k)
+            for rows, d in ((1, 256), (7, 1024), (48, 256)):
+                case_fallback_compress(rows, d)
             free_all()
     finally:
         free_all()

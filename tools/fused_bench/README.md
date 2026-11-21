@@ -39,7 +39,23 @@ python3 tools/report.py wp0.json bw.json sass.json --md BASELINE-table.md
 The same pipeline is a recipe in the recipe repo: `just fused-bench` syncs the two CUDA source trees and this
 directory to the head, builds, benches, sasses and pulls the artifacts into `runs/fused-next-20261121/wp0/`.
 Overrides are environment variables: `OLD=... NEW=... KERNEL=idx SHAPE="idx R=7 nb=8 width" JSON=one.json just
-fused-bench`.
+fused-bench`. `PARITY=1 just fused-bench` is the durable check: byte parity of every kernel below plus the unfused
+fallbacks, no timing and no idle-production wait, printing the per-case PASS/FAIL tally and exiting non-zero on any
+difference. `OUT=<dir>` moves the pulled artifacts; `JSON=<name>` names the result file.
+
+## Coverage of the fused kernels this campaign changed (WP1-WP3) and their fallbacks
+
+| kernel (switch) | reference the harness compares against | rounding points the fused arm must keep | guarded shapes |
+|---|---|---|---|
+| 0195 `idx_fused`, `idx_pick` (TF_DS_IDX_FUSED) | the unfused `block_max` + `topk_indices` + `pool_pick` chain (the old tree's bytes) | the int64 key (`scoreKey`: -0 as +0, inverted column), the block maxima's NaN rule, ties to the lower block | nbk <= 16384, k <= 2048, k <= nbk, width/bsize agreement; small-row form at rows <= 7 with nbk >= 6144 |
+| 0195 fallback (`idx_fused` off or past its bounds) | the old tree's same three launches | — | nbk > 16384 (131,080+ columns): `fallback idx` cases |
+| 0197 `compress2x_norm{128,512}` (TF_DS_FUSED_COMPRESS2_NORM) | `compress2x` + the kit `_rmsnorm` | the pair softmax in fp32, the bf16 store, torch's mean order, the kit's four-lane 512 fold | d == 128 or 512 (decodeOk), any rows |
+| 0197 `compress2_norm` prompt half (same switch) | `compress2` + `rms_norm` | torch's reduce order and mean factor, the raw-ring tail writes | pow2 d in [128, 2048] |
+| 0197 fallback (no kit norm for the width) | the old tree's `compress2x` (the norm is the kit's in both) | — | d not 128/512: `fallback compress-decode` cases |
+| 0198 `fused_idx_key`, `fused_rope_store`, `fused_rope_qd{,_pair}`, `fused_prompt_idx_key`, `fused_prompt_latent` (TF_DS_FUSED_ROPE_STORE) | the kit `_rmsnorm` + `_rope_heads` + `_fp4_store` / `_fp4qd_p2` | the kit's RoPE contraction (fma forms), E2M1 ties to even, the E8M0/E4M3 scale bytes, the 65,536-value bf16 sweep for the latent | d == 128 for the key, pow2 head dims in [128, 512], pow2 rope dims <= d, warp-aligned shapes; pair geometry at rows >= 32 |
+| 0199 `prune_six` (TF_DS_FUSED_ROUTE) | `expert_prune` | the pick/weight/counter bytes, ties to the lower id | six slots, topk <= slots; else `expert_prune` runs (the reference arm) |
+
+`just fused-bench` with the default `KERNEL=all` runs every row above.
 
 `--kernel` accepts `all` or a comma list of `idx, idx-hist, idx-small, block-max, fold, compress-decode,
 compress-prompt, prompt-source, key, latent, query, prompt-key, prompt-latent, prune, score-keys`. `--reps` (default 20) graphs and `--batch` (default 100) replays per graph.

@@ -127,11 +127,15 @@ export-second-pass dry="":
 
 # Fused-kernel parity + CUDA-graph timing + SASS bench (tools/fused_bench). Syncs the two CUDA source trees and the
 # harness to the head, builds both trees with the engine's flags, runs the byte-parity + timing matrix against the
-# pinned kit cubins, then the SASS evidence, and pulls the artifacts into runs/fused-next-20261121/wp0/.
-# Defaults: OLD = NEW = ~/Workspace/tfref-fused-next (the fused-next branch), every kernel, json wp0.json.
+# pinned kit cubins (every kernel WP1-WP3 changed plus the unfused fallbacks their switches fall back to), then the
+# SASS evidence, and pulls the artifacts into $OUT.
+# Defaults: OLD = NEW = ~/Workspace/tfref-fused-next (the fused-next branch), every kernel, json wp0.json, OUT
+# runs/fused-next-20261121/wp0.
 # Override with environment variables (the recipe inherits them):
 #   OLD=~/Workspace/tfref-prune-six-tip NEW=~/Workspace/tfref-fused-next KERNEL=idx just fused-bench
 #   KERNEL=idx SHAPE="idx R=7 nb=8 width" JSON=one.json just fused-bench
+#   PARITY=1 just fused-bench            # byte parity only (no timing, no idle-production wait): the durable check
+#   OUT=runs/fused-next-20261121/wp4 PARITY=1 JSON=wp4-parity.json just fused-bench
 fused-bench:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -140,12 +144,15 @@ fused-bench:
     k=${KERNEL:-all}
     s=${SHAPE:-}
     j=${JSON:-wp0.json}
+    out=${OUT:-runs/fused-next-20261121/wp0}
+    pflag=""
+    if [[ ${PARITY:-0} == 1 ]]; then pflag=--parity-only; fi
     rsync -a tools/fused_bench/ {{head}}:tf-bench/fused-next/tools/
     rsync -a --include='dsv41_ops.cu' --include='dsv41_torch.cu' --exclude='*' "$o/zig/kernels/cuda/" {{head}}:tf-bench/fused-next/src-old/
     rsync -a --include='dsv41_ops.cu' --include='dsv41_torch.cu' --exclude='*' "$n/zig/kernels/cuda/" {{head}}:tf-bench/fused-next/src-new/
     ssh -o BatchMode=yes {{head}} "cd ~/tf-bench/fused-next && bash tools/build.sh src-old src-new bin && \
-      python3 tools/bench.py bin bin /nfs1/tensorfold-dsv41/kit-abe07c7d/kit/aot/cubins --kernel '$k' ${s:+--shape \"$s\"} --json '$j' 2>&1 | tee bench.log && \
+      python3 tools/bench.py bin bin /nfs1/tensorfold-dsv41/kit-abe07c7d/kit/aot/cubins --kernel '$k' ${s:+--shape \"$s\"} $pflag --json '$j' 2>&1 | tee bench.log && \
       bash tools/sass.sh bin --json sass.json 2>&1 | tee sass.log"
-    mkdir -p runs/fused-next-20261121/wp0
+    mkdir -p "$out"
     rsync -a {{head}}:tf-bench/fused-next/bench.log {{head}}:tf-bench/fused-next/sass.log \
-      "{{head}}:tf-bench/fused-next/$j" {{head}}:tf-bench/fused-next/sass.json runs/fused-next-20261121/wp0/
+      "{{head}}:tf-bench/fused-next/$j" {{head}}:tf-bench/fused-next/sass.json "$out/"

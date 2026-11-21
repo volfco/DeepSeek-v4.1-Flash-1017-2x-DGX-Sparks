@@ -1,0 +1,12 @@
+WP4 is done. Summary:
+
+**Item 1 — decode chain launch floor (research item, no code):** measured a decode layer's six fused nodes in serving order in one graph at 7 served shapes: 7.93–24.0 µs with PDL on (empty-node floor 2.32–2.50 µs, 11–29% of the chain; PDL already removes 1.5–1.9 µs). At nb≥4096 the layer *is* 0195's body; at nb=8 the five small kernels are each 1.0–1.5 µs above their own floor. Nothing left to fuse at those boundaries.
+
+**Item 2 — landed `0250`** (`f013282`): `pdl_launch` → read the fixed norm weight → `pdl_wait` in the decode compressor (PDL path only; the non-PDL path keeps its old body as a second instantiation) and the indexer key; every other kernel keeps wait-then-launch. Chain 0.17–0.35 µs faster per layer at every decode shape, non-PDL unchanged, SASS shows PREEXIT → weight `LDG.E.U16` → ACQBULK → dependent loads, delayed-producer canaries exact with sensitive negative controls (2042–317,690 differing bytes), chain graph/stream parity 0 bytes, kit parity 30/30. Candidates A (launch-first everywhere, +0.6 µs) and D (L2 prefetch only) were measured and dropped.
+
+**Item 3 — landed `0251`** (`59e71a8`): opt-in `TF_DS_FUSED_TRACE` arm trace at the launch sites plus a host test that walks the served matrix and asserts the arm per row count/width/PDL; printed table in `engagement-trace.txt`. Host suite 625/627, same two pre-existing failures.
+
+**Item 4 — harness only:** `--kernel fallback` (unfused arms past `max_nbk` and at non-kit widths), `PARITY=1/OUT=/JSON=` on `just fused-bench`, coverage table in the README, and a fix for the query case's stale pre-0241 grid that faulted against the WP3 tip. Three sequential full parity runs vs `9d4232a`: **150/150 PASS, 0 fail, each**.
+
+Skipped/risk: no `ncu` counters (requests written to `NCU_REQUESTS.md`); the trace was never exercised on a live round (production holds the head's memory); the prompt-side `compress2_norm` could take the same split but is bandwidth-bound, so it was left alone and noted in `todo.md`.
+pi exit 0
