@@ -124,3 +124,28 @@ export-second-pass dry="":
     args=(--engine /home/colum/Workspace/tfref-next --branch second-pass-int --base 432d800 --first 0191 --keep-generated)
     [[ '{{dry}}' == "" ]] || args+=(--dry-run)
     ./scripts/port-patches.sh "${args[@]}"
+
+# Fused-kernel parity + CUDA-graph timing + SASS bench (tools/fused_bench). Syncs the two CUDA source trees and the
+# harness to the head, builds both trees with the engine's flags, runs the byte-parity + timing matrix against the
+# pinned kit cubins, then the SASS evidence, and pulls the artifacts into runs/fused-next-20261121/wp0/.
+# Defaults: OLD = NEW = ~/Workspace/tfref-fused-next (the fused-next branch), every kernel, json wp0.json.
+# Override with environment variables (the recipe inherits them):
+#   OLD=~/Workspace/tfref-prune-six-tip NEW=~/Workspace/tfref-fused-next KERNEL=idx just fused-bench
+#   KERNEL=idx SHAPE="idx R=7 nb=8 width" JSON=one.json just fused-bench
+fused-bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    o=${OLD:-/home/colum/Workspace/tfref-fused-next}
+    n=${NEW:-$o}
+    k=${KERNEL:-all}
+    s=${SHAPE:-}
+    j=${JSON:-wp0.json}
+    rsync -a tools/fused_bench/ {{head}}:tf-bench/fused-next/tools/
+    rsync -a --include='dsv41_ops.cu' --include='dsv41_torch.cu' --exclude='*' "$o/zig/kernels/cuda/" {{head}}:tf-bench/fused-next/src-old/
+    rsync -a --include='dsv41_ops.cu' --include='dsv41_torch.cu' --exclude='*' "$n/zig/kernels/cuda/" {{head}}:tf-bench/fused-next/src-new/
+    ssh -o BatchMode=yes {{head}} "cd ~/tf-bench/fused-next && bash tools/build.sh src-old src-new bin && \
+      python3 tools/bench.py bin bin /nfs1/tensorfold-dsv41/kit-abe07c7d/kit/aot/cubins --kernel '$k' ${s:+--shape \"$s\"} --json '$j' 2>&1 | tee bench.log && \
+      bash tools/sass.sh bin --json sass.json 2>&1 | tee sass.log"
+    mkdir -p runs/fused-next-20261121/wp0
+    rsync -a {{head}}:tf-bench/fused-next/bench.log {{head}}:tf-bench/fused-next/sass.log \
+      "{{head}}:tf-bench/fused-next/$j" {{head}}:tf-bench/fused-next/sass.json runs/fused-next-20261121/wp0/

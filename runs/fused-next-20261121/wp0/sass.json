@@ -1,0 +1,682 @@
+{
+ "limits": {
+  "max_threads_per_sm": 1536,
+  "regs_per_sm": 65536,
+  "smem_per_sm": 102400,
+  "smem_per_block_optin": 1,
+  "sm_count": 48,
+  "warp_size": 32
+ },
+ "kernels": {
+  "old": {
+   "tf_ds_idx_fused_kernel": {
+    "insn": 632,
+    "counts": {
+     "LDG": 3,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 0,
+     "STG": 2,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 12,
+     "STS": 14,
+     "SHFL": 20,
+     "BAR": 8,
+     "ATOM": 1,
+     "MUFU": 4,
+     "BRA": 33,
+     "FFMA": 0,
+     "FMUL": 0,
+     "FADD": 0
+    },
+    "usage": {
+     "REG": 38,
+     "STACK": 0,
+     "SHARED": 2208,
+     "LOCAL": 0
+    },
+    "block": [
+     1024,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 1,
+     "warps_per_sm": 32,
+     "theoretical_pct": 66.7
+    }
+   },
+   "tf_ds_compress2_norm_kernel": {
+    "insn": 5136,
+    "counts": {
+     "LDG": 172,
+     "LDG.128": 0,
+     "LDG.64": 0,
+     "LDG.U16": 36,
+     "STG": 36,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 121,
+     "STS": 52,
+     "SHFL": 6,
+     "BAR": 24,
+     "ATOM": 0,
+     "MUFU": 152,
+     "BRA": 190,
+     "FFMA": 624,
+     "FMUL": 330,
+     "FADD": 516
+    },
+    "usage": {
+     "REG": 66,
+     "STACK": 0,
+     "SHARED": 7184,
+     "LOCAL": 0
+    },
+    "block": [
+     32,
+     8
+    ],
+    "occupancy": {
+     "blocks_per_sm": 3,
+     "warps_per_sm": 24,
+     "theoretical_pct": 50.0
+    }
+   },
+   "tf_ds_compress2x_norm_kernel": {
+    "insn": 552,
+    "counts": {
+     "LDG": 16,
+     "LDG.128": 0,
+     "LDG.64": 4,
+     "LDG.U16": 2,
+     "STG": 4,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 6,
+     "STS": 3,
+     "SHFL": 20,
+     "BAR": 3,
+     "ATOM": 0,
+     "MUFU": 10,
+     "BRA": 35,
+     "FFMA": 35,
+     "FMUL": 14,
+     "FADD": 37
+    },
+    "usage": {
+     "REG": 34,
+     "STACK": 0,
+     "SHARED": 3104,
+     "LOCAL": 0
+    },
+    "block": [
+     512,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 3,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_idx_key_kernel": {
+    "insn": 496,
+    "counts": {
+     "LDG": 8,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 2,
+     "STG": 3,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 4,
+     "STS": 3,
+     "SHFL": 21,
+     "BAR": 3,
+     "ATOM": 0,
+     "MUFU": 6,
+     "BRA": 30,
+     "FFMA": 33,
+     "FMUL": 9,
+     "FADD": 10
+    },
+    "usage": {
+     "REG": 30,
+     "STACK": 0,
+     "SHARED": 2080,
+     "LOCAL": 0
+    },
+    "block": [
+     128,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 12,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_rope_store_kernel": {
+    "insn": 488,
+    "counts": {
+     "LDG": 8,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 2,
+     "STG": 3,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 0,
+     "STS": 0,
+     "SHFL": 20,
+     "BAR": 0,
+     "ATOM": 0,
+     "MUFU": 2,
+     "BRA": 31,
+     "FFMA": 26,
+     "FMUL": 20,
+     "FADD": 2
+    },
+    "usage": {
+     "REG": 34,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "block": [
+     256,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 6,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_rope_qd_kernel": {
+    "insn": 368,
+    "counts": {
+     "LDG": 4,
+     "LDG.128": 0,
+     "LDG.64": 1,
+     "LDG.U16": 1,
+     "STG": 1,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 0,
+     "STS": 0,
+     "SHFL": 12,
+     "BAR": 0,
+     "ATOM": 0,
+     "MUFU": 4,
+     "BRA": 33,
+     "FFMA": 22,
+     "FMUL": 3,
+     "FADD": 2
+    },
+    "usage": {
+     "REG": 26,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "block": [
+     128,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 12,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_prompt_idx_key_kernel": {
+    "insn": 632,
+    "counts": {
+     "LDG": 20,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 14,
+     "STG": 3,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 4,
+     "STS": 8,
+     "SHFL": 13,
+     "BAR": 4,
+     "ATOM": 0,
+     "MUFU": 6,
+     "BRA": 39,
+     "FFMA": 30,
+     "FMUL": 19,
+     "FADD": 14
+    },
+    "usage": {
+     "REG": 34,
+     "STACK": 0,
+     "SHARED": 4112,
+     "LOCAL": 0
+    },
+    "block": [
+     32,
+     2
+    ],
+    "occupancy": {
+     "blocks_per_sm": 24,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_prompt_latent_kernel": {
+    "insn": 488,
+    "counts": {
+     "LDG": 8,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 2,
+     "STG": 3,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 0,
+     "STS": 0,
+     "SHFL": 20,
+     "BAR": 0,
+     "ATOM": 0,
+     "MUFU": 2,
+     "BRA": 31,
+     "FFMA": 24,
+     "FMUL": 18,
+     "FADD": 4
+    },
+    "usage": {
+     "REG": 34,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "block": [
+     256,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 6,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_prune_six_kernel": {
+    "insn": 1344,
+    "counts": {
+     "LDG": 26,
+     "LDG.128": 0,
+     "LDG.64": 0,
+     "LDG.U16": 0,
+     "STG": 64,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 5,
+     "STS": 4,
+     "SHFL": 0,
+     "BAR": 2,
+     "ATOM": 6,
+     "MUFU": 16,
+     "BRA": 137,
+     "FFMA": 82,
+     "FMUL": 13,
+     "FADD": 43
+    },
+    "usage": {
+     "REG": 48,
+     "STACK": 0,
+     "SHARED": 1168,
+     "LOCAL": 0
+    },
+    "block": [
+     64,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 21,
+     "warps_per_sm": 42,
+     "theoretical_pct": 87.5
+    }
+   }
+  },
+  "new": {
+   "tf_ds_idx_fused_kernel": {
+    "insn": 632,
+    "counts": {
+     "LDG": 3,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 0,
+     "STG": 2,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 12,
+     "STS": 14,
+     "SHFL": 20,
+     "BAR": 8,
+     "ATOM": 1,
+     "MUFU": 4,
+     "BRA": 33,
+     "FFMA": 0,
+     "FMUL": 0,
+     "FADD": 0
+    },
+    "usage": {
+     "REG": 38,
+     "STACK": 0,
+     "SHARED": 2208,
+     "LOCAL": 0
+    },
+    "block": [
+     1024,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 1,
+     "warps_per_sm": 32,
+     "theoretical_pct": 66.7
+    }
+   },
+   "tf_ds_compress2_norm_kernel": {
+    "insn": 5136,
+    "counts": {
+     "LDG": 172,
+     "LDG.128": 0,
+     "LDG.64": 0,
+     "LDG.U16": 36,
+     "STG": 36,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 121,
+     "STS": 52,
+     "SHFL": 6,
+     "BAR": 24,
+     "ATOM": 0,
+     "MUFU": 152,
+     "BRA": 190,
+     "FFMA": 624,
+     "FMUL": 330,
+     "FADD": 516
+    },
+    "usage": {
+     "REG": 66,
+     "STACK": 0,
+     "SHARED": 7184,
+     "LOCAL": 0
+    },
+    "block": [
+     32,
+     8
+    ],
+    "occupancy": {
+     "blocks_per_sm": 3,
+     "warps_per_sm": 24,
+     "theoretical_pct": 50.0
+    }
+   },
+   "tf_ds_compress2x_norm_kernel": {
+    "insn": 552,
+    "counts": {
+     "LDG": 16,
+     "LDG.128": 0,
+     "LDG.64": 4,
+     "LDG.U16": 2,
+     "STG": 4,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 6,
+     "STS": 3,
+     "SHFL": 20,
+     "BAR": 3,
+     "ATOM": 0,
+     "MUFU": 10,
+     "BRA": 35,
+     "FFMA": 35,
+     "FMUL": 14,
+     "FADD": 37
+    },
+    "usage": {
+     "REG": 34,
+     "STACK": 0,
+     "SHARED": 3104,
+     "LOCAL": 0
+    },
+    "block": [
+     512,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 3,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_idx_key_kernel": {
+    "insn": 496,
+    "counts": {
+     "LDG": 8,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 2,
+     "STG": 3,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 4,
+     "STS": 3,
+     "SHFL": 21,
+     "BAR": 3,
+     "ATOM": 0,
+     "MUFU": 6,
+     "BRA": 30,
+     "FFMA": 33,
+     "FMUL": 9,
+     "FADD": 10
+    },
+    "usage": {
+     "REG": 30,
+     "STACK": 0,
+     "SHARED": 2080,
+     "LOCAL": 0
+    },
+    "block": [
+     128,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 12,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_rope_store_kernel": {
+    "insn": 488,
+    "counts": {
+     "LDG": 8,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 2,
+     "STG": 3,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 0,
+     "STS": 0,
+     "SHFL": 20,
+     "BAR": 0,
+     "ATOM": 0,
+     "MUFU": 2,
+     "BRA": 31,
+     "FFMA": 26,
+     "FMUL": 20,
+     "FADD": 2
+    },
+    "usage": {
+     "REG": 34,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "block": [
+     256,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 6,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_rope_qd_kernel": {
+    "insn": 368,
+    "counts": {
+     "LDG": 4,
+     "LDG.128": 0,
+     "LDG.64": 1,
+     "LDG.U16": 1,
+     "STG": 1,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 0,
+     "STS": 0,
+     "SHFL": 12,
+     "BAR": 0,
+     "ATOM": 0,
+     "MUFU": 4,
+     "BRA": 33,
+     "FFMA": 22,
+     "FMUL": 3,
+     "FADD": 2
+    },
+    "usage": {
+     "REG": 26,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "block": [
+     128,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 12,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_prompt_idx_key_kernel": {
+    "insn": 632,
+    "counts": {
+     "LDG": 20,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 14,
+     "STG": 3,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 4,
+     "STS": 8,
+     "SHFL": 13,
+     "BAR": 4,
+     "ATOM": 0,
+     "MUFU": 6,
+     "BRA": 39,
+     "FFMA": 30,
+     "FMUL": 19,
+     "FADD": 14
+    },
+    "usage": {
+     "REG": 34,
+     "STACK": 0,
+     "SHARED": 4112,
+     "LOCAL": 0
+    },
+    "block": [
+     32,
+     2
+    ],
+    "occupancy": {
+     "blocks_per_sm": 24,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_fused_prompt_latent_kernel": {
+    "insn": 488,
+    "counts": {
+     "LDG": 8,
+     "LDG.128": 0,
+     "LDG.64": 2,
+     "LDG.U16": 2,
+     "STG": 3,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 0,
+     "STS": 0,
+     "SHFL": 20,
+     "BAR": 0,
+     "ATOM": 0,
+     "MUFU": 2,
+     "BRA": 31,
+     "FFMA": 24,
+     "FMUL": 18,
+     "FADD": 4
+    },
+    "usage": {
+     "REG": 34,
+     "STACK": 0,
+     "SHARED": 1024,
+     "LOCAL": 0
+    },
+    "block": [
+     256,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 6,
+     "warps_per_sm": 48,
+     "theoretical_pct": 100.0
+    }
+   },
+   "tf_ds_prune_six_kernel": {
+    "insn": 1344,
+    "counts": {
+     "LDG": 26,
+     "LDG.128": 0,
+     "LDG.64": 0,
+     "LDG.U16": 0,
+     "STG": 64,
+     "STG.128": 0,
+     "STG.64": 0,
+     "LDS": 5,
+     "STS": 4,
+     "SHFL": 0,
+     "BAR": 2,
+     "ATOM": 6,
+     "MUFU": 16,
+     "BRA": 137,
+     "FFMA": 82,
+     "FMUL": 13,
+     "FADD": 43
+    },
+    "usage": {
+     "REG": 48,
+     "STACK": 0,
+     "SHARED": 1168,
+     "LOCAL": 0
+    },
+    "block": [
+     64,
+     1
+    ],
+    "occupancy": {
+     "blocks_per_sm": 21,
+     "warps_per_sm": 42,
+     "theoretical_pct": 87.5
+    }
+   }
+  }
+ }
+}

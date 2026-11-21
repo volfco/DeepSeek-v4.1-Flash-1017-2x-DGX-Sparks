@@ -1,0 +1,21 @@
+WP0 is complete. No engine commits (nothing in the engine changed).
+
+## What was delivered
+
+**Harness** (uncommitted in the recipe repo, for you to commit): `tools/fused_bench/{build.sh,bench.py,sass.sh,sass.py,bw.py,report.py,README.md}` plus a `just fused-bench` recipe that syncs both CUDA trees to the head, builds, benches, sasses and pulls the artifacts into `runs/fused-next-20261121/wp0/`. `bench.py` covers 0195, both 0197 compressors, all five 0198 kernels and 0199, with `--kernel`/`--shape` filters, JSON output, MemAvailable/health/flock guards, and a per-block idle-window guard (it waits for `connections: 0`, then verifies the served-token counters did not move during the block).
+
+**Proof of the harness**
+- OLD = NEW: cubins are md5-identical; 88/88 parity rows report **0 differing bytes**; old-vs-new median delta **0.001 µs** (max 0.35–1.0 % on the two largest DRAM-bound shapes, pure allocation placement). Final run: `timing_retries: 0`, identical before/after token counters — every timing block verified idle.
+- Unfused/kit references: 0195 vs `block_max`+`topk_indices`+`pool_pick`; 0197 vs `compress2x`+kit `_rmsnorm` and `compress2`+`rms_norm`; 0198 vs the kit's `_rmsnorm`/`_rope_heads`/`_fp4_store`/`_fp4qd_p2` (including all 65,536 bf16 encodings); 0199 vs `expert_prune` (pick, weights, all six counters). All 0 bytes.
+- Seeded one-bit change (drop `^ 0x8000…` in `tf_ds_score_key`): caught, **11,384 / 11,698 differing bytes**, attributed to the new arm only, exit 1.
+
+**Baselines** (`wp0/BASELINE.md`, ranked by headroom over max(launch floor, roofline); copy rooflines 224 GB/s DRAM / 954 GB/s cache): the only large recoverable block is **0195 at mid/small rows and on tie-heavy input** (18.4 µs at R=128 nb=4096 ties, 17.3 µs R=7 nb=8192 flat, 11.4 µs R=32 nb=8192; one CTA per row, `BAR=8`, no `LDG.128`). 0195 at R≥1024 is DRAM-bound at 240–247 GB/s (at the roofline). The 0197 prompt compressors are at the bandwidth roofline. Decode compressor, 0198 decode key/latent and 0199 prune are launch/latency-bound 1.0–1.8 µs above the floor. 0198 prompt-latent R=1024 has 5.1 µs over roofline. The kit's `_score_keys` is priced at 216–220 GB/s (231.6 µs at R=128/32,768; 471.9 µs at 65,536).
+
+## Left open
+- The fused 0198 query is **slower** than the unfused two-launch kit chain at R=32/48 (2.98 vs 2.73 µs; 4.02 vs 3.02 µs) — a geometry regression for a later item to decide.
+- `_score_keys` is only priced here (this tree has no 0206 fold); the pricing matches the prior campaign's fold cost.
+- No `NCU_REQUESTS.md` was needed; the exact `ncu` line is recorded in `RESULTS.md` in case a later item needs counters.
+- `todo.md` shows as modified in the recipe repo, but that predates WP0; I only appended the `fused-bench` recipe to `Justfile`.
+
+Skipped: host suite (no engine change); 100K+ contexts and PDL (later items). Risk to know: the cache-resident copy rate varied 954–1510 GB/s between runs, so cache-basis headroom figures are conservative by up to ~35 %.
+pi exit 0
