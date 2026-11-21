@@ -1,0 +1,20 @@
+Response was truncated: the model reached its output token limit.
+pi exit 1
+Response was truncated: the model reached its output token limit.
+pi exit 1
+WP1 complete. All seven items have a verdict backed by parity, interleaved timings with the launch floor, and SASS/resource evidence; evidence and reproduction commands are in `runs/fused-next-20261121/wp1/RESULTS.md` (336 lines, written incrementally) with the JSON/SASS artifacts alongside.
+
+| item | verdict | commit |
+|---|---|---|
+| 1 — 0195 key fold (0206) + high-word cache (0208) | **closed, no change.** Measured the kit `_score_keys` bytes from its cubin: keys are `scoreKey ^ 0x8000…` (sign bit clear, signed order), tile maxima the signed max. The parked fold's encoding was wrong; with it fixed the fold is byte-identical to the kit at 16,388/32,768/65,532/65,536 columns incl. partial tiles, NaN/inf/±0, but slower at every served shape (the one-launch pool can't out-write a 224-CTA kit stream from 1 CTA/row; only R=48 w=65,536 is 1.9% faster, inside the IQR). 0208 not re-landed. | — |
+| 2 — bsize==8 template + vectorized loads | **landed.** Byte-identical everywhere; −13% to −20% at R=7/32 nb=2049/4096/8192, −6% to −9% at R=128; SASS shows 2×`LDG.E.128` and the fully unrolled 8-wide body, no spills. | 0213 |
+| 3 — warp-aggregated histogram | **closed, no change.** 2.9–4.4 µs slower at the served 1024-thread CTA on random and ties; 256/512-thread CTAs are 25–45% worse. | — |
+| 4 — mask-only skip + cutoff ties in compaction | **landed.** Mask arm −10% to −13% vs 0213 (−30% on flat), decode arm at parity, byte-identical on all tie/flat/NaN cases. | 0214 |
+| 5 — small-row parallelism | **landed with a shape dispatch.** Two-phase (block_max grid + `idx_pick`) is −13%/−5% at the 8192-block pool (R=1/R=7), 9.6–33% vs 3c54a9d; below 6144 blocks the single launch stays, so nothing regresses. | 0215 |
+| 6 — prompt bypass / retained-block scoring | **bypass landed** (six launches a layer a short chunk removed; same picks, same ascending order as the engine's own `topk_indices`); **retained-block scoring closed, no change** (no `HAS_CAND` scores variant in the kit; compacted picks need a mapping kernel). | 0216 |
+| 7 — 100K+ contexts | **landed.** 16,384 blocks / 131,072 columns through the measured 101,376-byte opt-in shared limit; 2.5–3.4× faster than the unfused chain at 100K–260K tokens, byte-identical at 8193/16384/16385 blocks; unfused fallback beyond. | 0217 |
+
+Open: item 6b as a follow-up (4× dot reduction at long prompts vs a compacted-key mapping kernel); the supervisor's 39-case gate is the arbiter for 6's bypass (its pick order is provably identical but the harness can't byte-check the host path). Host tests: 794/796, the two pre-existing failures only. No `ncu` requests were needed.
+
+Skipped/not checked: no `ncu` counters (SASS + timing decided every item); the 39-case serving gate was not run here (it is the supervisor's step).
+pi exit 0

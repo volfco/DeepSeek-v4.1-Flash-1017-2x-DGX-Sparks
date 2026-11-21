@@ -6,6 +6,9 @@ scale (the earlier audit did 8,257,536 pairs; do at least that).
 
 Items (todo.md text is the spec):
 
+0. **The fused decode query regresses at R=32/48** (WP0: 2.98 vs 2.73 µs and 4.02 vs 3.02 µs against the unfused
+   two-launch kit chain). Fix its geometry so it is no slower than the kit chain at every served R, or dispatch per
+   shape.
 1. **Skip RoPE partner shuffles on wholly unrotated warps** (item 1): read SASS first; guard only whole unrotated warps,
    full-mask shuffles stay for mixed/rotated warps; the warp-alignment invariant (0204's `warpShapesOk`) must hold.
 2. **E8M0 scale from BF16 bits** (no FP32 division by six), **exact reciprocal multiply** instead of per-element

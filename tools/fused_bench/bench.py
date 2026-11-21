@@ -123,6 +123,8 @@ def function(path, name):
 
 def launch(path, name, grid, threads, shared, *args):
     fn = function(path, name)
+    if shared > 49152:  # past 48 KiB the kernel must opt into dynamic shared memory (CU_FUNC_ATTRIBUTE 8)
+        cu("cuFuncSetAttribute", fn, I(8), I(shared))
     pack = []
     for a in args:
         if isinstance(a, Buffer):
@@ -286,9 +288,9 @@ def score_key_host(x, j):
     return key ^ np.uint64(0x8000000000000000)
 
 
-def case_idx(rows, nb, k, mask_on, dist="ties", special=False, timing=True):
-    width, ss, ms = 8 * nb - 3, 8 * nb, nb + 7
-    label = f"idx R={rows} nb={nb} width={width} k={k} {'mask' if mask_on else 'list'} {dist}{' special' if special else ''}"
+def case_idx(rows, nb, k, mask_on, dist="ties", special=False, timing=True, pad=0):
+    width, ss, ms = 8 * nb - 3, 8 * nb + pad, nb + 7
+    label = f"idx R={rows} nb={nb} width={width} k={k} {'mask' if mask_on else 'list'} {dist}{' special' if special else ''}" + (f" pad={pad}" if pad else "")
     if not shape_ok(label):
         return None
     scores = rng.integers(-10, 10, (rows, ss)).astype("f4")
@@ -296,6 +298,8 @@ def case_idx(rows, nb, k, mask_on, dist="ties", special=False, timing=True):
         scores = rng.normal(size=(rows, ss)).astype("f4")
     elif dist == "flat":
         scores.fill(-np.inf)
+    elif dist == "same":
+        scores.fill(1.0)
     if special:
         scores[:, 8:16], scores[:, 24:32], scores[:, 32:40], scores[:, 40:48] = np.nan, -np.inf, -0.0, np.inf
         scores[0, 0] = 0.0
@@ -312,6 +316,10 @@ def case_idx(rows, nb, k, mask_on, dist="ties", special=False, timing=True):
 
         def chain(i=i, mod=mod, mx=mx, ix=ix, m=m, c=c):
             if i == 0:
+                if k >= nb:
+                    # out of the unfused chain's contract (topk_indices faults at k == nb; the engine pools only when
+                    # nbk > candidate_blocks, prompt.zig `pooled`), so these cases compare new against old only
+                    return
                 native(mod, "block_max", ((nb + 255) // 256, rows), 256, x, L(ss), width, 8, vis, mx, L(nb), nb)
                 native(mod, "topk_indices", rows, 1024, mx, L(nb), nb, k, every, ix)
                 native(mod, "pool_pick", rows, 1024, mx, L(nb), nb, ix, k, m, L(ms), c)
@@ -322,7 +330,7 @@ def case_idx(rows, nb, k, mask_on, dist="ties", special=False, timing=True):
         chain()
         chains.append(chain)
         states.append([mask] if mask_on else [blocks])
-    ref_state = states[0]
+    ref_state = states[0] if k < nb else states[1]   # k >= nb: no unfused reference (see chain)
     diff_old = compare(f"idx old R={rows} nb={nb}", states[1], ref_state)
     diff_new = compare(f"idx new R={rows} nb={nb}", states[2], ref_state)
     diff_cross = compare(f"idx new-vs-old R={rows} nb={nb}", states[2], states[1])
@@ -330,10 +338,218 @@ def case_idx(rows, nb, k, mask_on, dist="ties", special=False, timing=True):
            "parity": {"new_vs_ref": diff_new, "old_vs_ref": diff_old, "new_vs_old": diff_cross}}
     # bytes: score row read (width floats) + vis/every + the one output the launch writes
     row["bytes"] = rows * width * 4 + rows * 16 + (rows * nb if mask_on else rows * k * 4)
-    if timing and DO_TIMING and not special:
+    if k >= nb:
+        row["note"] = "k >= nb: no unfused reference; new compared with old"
+    if timing and DO_TIMING and not special and k < nb:
         shared = nb * 4
         floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, shared)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new"], floor, opts.batch, opts.reps)
+        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# 0195 small-row form (block_max's 2D grid + the selection from global maxima) against the one-launch fused form
+
+def case_idx_small(rows, nb, k, dist="random"):
+    width, ss, ms = 8 * nb - 3, 8 * nb, nb + 7
+    label = f"idx-small R={rows} nb={nb} k={k} {dist}"
+    if not shape_ok(label):
+        return None
+    scores = rng.normal(size=(rows, ss)).astype("f4") if dist == "random" else rng.integers(-10, 10, (rows, ss)).astype("f4")
+    x = Buffer(scores)
+    vis = Buffer(np.linspace(0, width, rows, dtype="i8"))
+    every = Buffer(np.full(rows, 1 << 40, dtype="i8"))
+    chains, states = [], []
+    for i, mod in enumerate((opts.old_ops, opts.old_ops, opts.new_ops, opts.new_ops)):
+        mx, ix = out((rows, nb), "u4"), out((rows, k), "i8")
+        blocks = out((rows, k), "i4")
+        bmax = out((rows, nb), "f4")
+
+        def chain(i=i, mod=mod, mx=mx, ix=ix, blocks=blocks, bmax=bmax):
+            if i == 0:
+                native(mod, "block_max", ((nb + 255) // 256, rows), 256, x, L(ss), width, 8, vis, mx, L(nb), nb)
+                native(mod, "topk_indices", rows, 1024, mx, L(nb), nb, k, every, ix)
+                native(mod, "pool_pick", rows, 1024, mx, L(nb), nb, ix, k, P(), 0, blocks)
+            elif i == 1:
+                native(mod, "idx_fused", rows, 1024, x, L(ss), width, 8, vis, every, k, P(), 0, blocks, shared=nb * 4)
+            elif i == 2:  # the one-launch fused form of the same tree (the current kernel)
+                native(mod, "idx_fused", rows, 1024, x, L(ss), width, 8, vis, every, k, P(), 0, blocks, shared=nb * 4)
+            else:
+                native(mod, "block_max", ((nb + 255) // 256, rows), 256, x, L(ss), width, 8, vis, bmax, L(nb), nb)
+                native(mod, "idx_pick", rows, 1024, bmax, L(nb), nb, k, every, blocks, shared=nb * 4)
+
+        chain()
+        chains.append(chain)
+        states.append([blocks])
+    diff_old = compare(f"idx-small old R={rows} nb={nb}", states[1], states[0])
+    diff_fused = compare(f"idx-small fused R={rows} nb={nb}", states[2], states[0])
+    diff_new = compare(f"idx-small new R={rows} nb={nb}", states[3], states[0])
+    row = {"kernel": "0195-idx-small", "shape": label, "rows": rows, "nb": nb, "k": k,
+           "parity": {"new_vs_ref": diff_new, "fused_vs_ref": diff_fused, "old_vs_ref": diff_old}}
+    row["bytes"] = rows * width * 4 + rows * nb * 4 + rows * k * 4
+    if DO_TIMING:
+        floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, nb * 4)
+        row["timing"] = time_graphs(label, chains, ["ref", "old", "fused", "small"], floor, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# 0195 phase-1 cost alone (the unfused block_max kernel's 2D grid, for the small-row item)
+
+def case_blockmax(rows, nb):
+    width, ss = 8 * nb - 3, 8 * nb
+    label = f"block_max R={rows} nb={nb} width={width}"
+    if not shape_ok(label):
+        return None
+    x = Buffer(rng.normal(size=(rows, ss)).astype("f4"))
+    vis = Buffer(np.full(rows, width, dtype="i8"))
+    mx = out((rows, nb), "u4")
+
+    def chain():
+        native(opts.old_ops, "block_max", ((nb + 255) // 256, rows), 256, x, L(ss), width, 8, vis, mx, L(nb), nb)
+
+    chain()
+    cu("cuStreamSynchronize", stream)
+    row = {"kernel": "0195-block-max", "shape": label, "rows": rows, "nb": nb, "parity": {"new_vs_ref": 0}}
+    row["bytes"] = rows * width * 4 + rows * nb * 4
+    if DO_TIMING:
+        floor = lambda: launch(opts.floor, "empty_kernel", ((nb + 255) // 256, rows), 256, 0)
+        row["timing"] = time_graphs(label, [chain], ["kit"], floor, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# 0195 histogram sweep (the warp-aggregated histogram at 256/512/1024-thread CTAs; the new kernel only)
+
+def case_idx_hist(rows, nb, k, dist, block):
+    width, ss, ms = 8 * nb - 3, 8 * nb, nb + 7
+    label = f"idx-hist R={rows} nb={nb} block={block} {dist}"
+    if not shape_ok(label):
+        return None
+    scores = rng.integers(-10, 10, (rows, ss)).astype("f4")
+    if dist == "random":
+        scores = rng.normal(size=(rows, ss)).astype("f4")
+    elif dist == "flat":
+        scores.fill(-np.inf)
+    x = Buffer(scores)
+    vis = Buffer(np.linspace(0, width, rows, dtype="i8"))
+    every = Buffer(np.full(rows, 1 << 40, dtype="i8"))
+    mx, ix = out((rows, nb), "u4"), out((rows, k), "i8")
+    ref = out((rows, k), "i4")
+    native(opts.old_ops, "block_max", ((nb + 255) // 256, rows), 256, x, L(ss), width, 8, vis, mx, L(nb), nb)
+    native(opts.old_ops, "topk_indices", rows, 1024, mx, L(nb), nb, k, every, ix)
+    native(opts.old_ops, "pool_pick", rows, 1024, mx, L(nb), nb, ix, k, P(), 0, ref)
+    new = out((rows, k), "i4")
+
+    def chain():
+        native(opts.new_ops, "idx_fused", rows, block, x, L(ss), width, 8, vis, every, k, P(), 0, new, shared=nb * 4)
+
+    chain()
+    diff = compare(f"idx-hist R={rows} nb={nb} block={block} {dist}", [new], [ref])
+    row = {"kernel": "0195-idx-hist", "shape": label, "rows": rows, "nb": nb, "block": block,
+           "parity": {"new_vs_ref": diff}}
+    row["bytes"] = rows * width * 4 + rows * 16 + rows * k * 4
+    if DO_TIMING:
+        floor = lambda: launch(opts.floor, "empty_kernel", rows, block, nb * 4)
+        row["timing"] = time_graphs(label, [chain], ["new"], floor, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# 0195 key fold (queries.py _score_keys' outputs written by the fused pool launch; the kit cubin is the byte reference)
+
+def case_idx_fold(rows, width, dist="mixed", special=False, timing=True):
+    """The fold's keys/tmax against the kit's _score_keys bytes, and the fused pool's cblk against the unfused chain.
+
+    Widths are %4 == 0 (the kit faults otherwise) and inside the fused pool's regime: width > candidate_blocks * 8
+    (16,384 columns) and nbk = ceil(width/8) <= 8192. Arms: ref = block_max+topk_indices+pool_pick + kit _score_keys,
+    old = the fused pool without the fold + kit _score_keys, new = the fused pool with the fold. Timing is old vs new
+    (the launch the fold removes is inside old), with the kit launch priced separately and the empty-kernel floor.
+    """
+    nbk = 1 + (width - 1) // 8
+    nt = (width + 63) // 64
+    k = min(2048, nbk)
+    assert width % 4 == 0 and 16384 < width <= 65536, (width, nbk)
+    label = f"idx-fold R={rows} width={width} nbk={nbk} k={k} {dist}{' special' if special else ''}"
+    if not shape_ok(label):
+        return None
+    scores = rng.integers(-10, 10, (rows, width)).astype("f4")
+    if dist == "random":
+        scores = rng.normal(size=(rows, width)).astype("f4")
+    elif dist == "flat":
+        scores.fill(-np.inf)
+    elif dist == "mixed":
+        scores = rng.normal(size=(rows, width)).astype("f4")  # both signs: where the old encoding's order flips
+    if special:
+        bits = np.array([0, 0x80000000, 1, 0x7f800000, 0xff800000, 0x7fc01234, 0x7f7fffff, 0x00800000], "u4")
+        scores[:, ::7] = np.resize(bits.view("f4"), scores[:, ::7].shape)
+        scores[0, 0], scores[-1, width - 1] = 0.0, np.inf
+    x = Buffer(scores)
+    vis = Buffer(np.full(rows, width, dtype="i8"))
+    every = Buffer(np.full(rows, 1 << 40, dtype="i8"))
+    chains, states = [], []
+    for i, mod in enumerate((opts.old_ops, opts.old_ops, opts.new_ops, opts.new_ops)):
+        mx, ix = out((rows, nbk), "u4"), out((rows, k), "i8")
+        blocks = out((rows, k), "i4")
+        keys, tmax = out((rows, width), "u8"), out((rows, nt), "u8")
+
+        def chain(i=i, mod=mod, mx=mx, ix=ix, blocks=blocks, keys=keys, tmax=tmax):
+            if i == 0:
+                native(mod, "block_max", ((nbk + 255) // 256, rows), 256, x, L(width), width, 8, vis, mx, L(nbk), nbk)
+                native(mod, "topk_indices", rows, 1024, mx, L(nbk), nbk, k, every, ix)
+                native(mod, "pool_pick", rows, 1024, mx, L(nbk), nbk, ix, k, P(), 0, blocks)
+            elif i == 1:
+                native(mod, "idx_fused", rows, 1024, x, L(width), width, 8, vis, every, k, P(), 0, blocks, shared=nbk * 4)
+            elif i == 2:
+                native(mod, "idx_fused", rows, 1024, x, L(width), width, 8, vis, every, k, P(), 0, blocks, keys, tmax,
+                       shared=nbk * 4)
+            else:  # the same new kernel without the fold: the fold's marginal cost
+                native(mod, "idx_fused", rows, 1024, x, L(width), width, 8, vis, every, k, P(), 0, blocks, P(), P(),
+                       shared=nbk * 4)
+            if i != 2:  # the kit's bytes are the reference for keys/tmax; the fold arm's are the fold's
+                aot("scorekeys", (rows, (width + 1023) // 1024), x, keys, width, tmax, nt)
+
+        chain()
+        chains.append(chain)
+        states.append([blocks, keys, tmax])
+    ref_state = states[0]
+    diff_old = compare(f"idx-fold old R={rows} width={width}", states[1], ref_state)
+    diff_new = compare(f"idx-fold new R={rows} width={width}", states[2], ref_state)
+    diff_cross = compare(f"idx-fold new-vs-old R={rows} width={width}", states[2], states[1])
+    # the kit wrote keys/tmax into the same buffers on every arm: the reference is the kit's own bytes
+    row = {"kernel": "0195-idx-fold", "shape": label, "rows": rows, "width": width, "nbk": nbk, "k": k,
+           "parity": {"new_vs_ref": diff_new, "old_vs_ref": diff_old, "new_vs_old": diff_cross}}
+    row["bytes"] = rows * width * 4 + rows * width * 8 + rows * nt * 8 + rows * k * 4
+    if timing and DO_TIMING and not special:
+        floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, nbk * 4)
+        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
+def case_score_keys_only(rows, width):
+    """The kit _score_keys launch alone at a fold width: the launch the fold removes."""
+    label = f"kit _score_keys R={rows} width={width}"
+    if not shape_ok(label):
+        return None
+    scores = rng.normal(size=(rows, width)).astype("f4")
+    x = Buffer(scores)
+    keys, tmax = out((rows, width), "u8"), out((rows, (width + 63) // 64), "u8")
+    nt = (width + 63) // 64
+
+    def chain():
+        aot("scorekeys", (rows, (width + 1023) // 1024), x, keys, width, tmax, nt)
+
+    chain()
+    cu("cuStreamSynchronize", stream)
+    row = {"kernel": "kit-scorekeys", "shape": label, "rows": rows, "width": width, "parity": {"new_vs_ref": 0}}
+    row["bytes"] = rows * width * 4 + rows * width * 8 + rows * nt * 8
+    if DO_TIMING:
+        row["timing"] = time_graphs(label, [chain], ["kit"], None, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -396,7 +612,7 @@ def case_compress_decode(rows, d, layout="mixed", timing=True, special=False):
     row["bytes"] = rows * d * 4 * 4 + rows * 2 * d * 4 + rows * (d + 16) * 2 + 2 * n * d * 4
     if timing and DO_TIMING and not special and layout == "mixed":
         floor = lambda: launch(opts.floor, "empty_kernel", rows, d, 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new"], floor, opts.batch, opts.reps)
+        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -441,7 +657,7 @@ def case_compress_prompt(rows, d, timing=True, special=False):
     if timing and DO_TIMING and not special:
         groups = max(1, min(d, prompt_target(rows)) // lanes)
         floor = lambda: launch(opts.floor, "empty_kernel", rows, (lanes, groups), 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new"], floor, opts.batch, opts.reps)
+        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -540,7 +756,7 @@ def case_rope(path, rows, special=False, timing=True):
             block = min(d // 2, 256)
         grid = rows * heads if query else rows
         floor = lambda: launch(opts.floor, "empty_kernel", grid, block, 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new"], floor, opts.batch, opts.reps)
+        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -598,7 +814,7 @@ def case_prune(rows, dead_mode=False, special=False, timing=True):
         dead[::3] = 1
     args = TfDsPrune(0.85, 3, 1, 1, topk, slots, rows, 0, 0)
     chains, states = [], []
-    for i, mod in enumerate((opts.old_ops, opts.old_ops, opts.new_ops)):
+    for i, mod in enumerate((opts.old_ops, opts.old_ops, opts.new_ops, opts.new_ops)):
         pk, wt = Buffer(p0.copy()), Buffer(w0.copy())
         stats = Buffer(np.zeros(6, "u8"))
         dh = Buffer(dead)
@@ -621,7 +837,7 @@ def case_prune(rows, dead_mode=False, special=False, timing=True):
     row["bytes"] = rows * slots * 8
     if timing and DO_TIMING and not special:
         floor = lambda: launch(opts.floor, "empty_kernel", 1, 32 if rows <= 32 else 64, 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new"], floor, opts.batch, opts.reps)
+        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -648,7 +864,8 @@ def case_score_keys(rows, width):
     row = {"kernel": "kit-scorekeys", "shape": label, "rows": rows, "width": width,
            "parity": {"new_vs_ref": 0}}
     row["bytes"] = rows * width * 4 + rows * width * 8 + rows * nt * 8
-    row["timing"] = time_graphs(label, [chain], ["kit"], None, opts.batch, opts.reps)
+    if DO_TIMING:
+        row["timing"] = time_graphs(label, [chain], ["kit"], None, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -673,8 +890,10 @@ ROPE_SHAPES = [("key", r) for r in (1, 7, 32, 48)] + \
 PRUNE_SHAPES = [1, 7, 32, 48]
 SCORE_KEYS_SHAPES = [(r, w) for r in (1, 7, 32, 128) for w in (16384, 32768, 65536)]
 
-KERNELS = ("idx", "compress-decode", "compress-prompt", "key", "latent", "query", "prompt-key",
+KERNELS = ("idx", "idx-hist", "block-max", "idx-small", "fold", "compress-decode", "compress-prompt", "key", "latent", "query", "prompt-key",
            "prompt-latent", "prune", "score-keys")
+
+FOLD_SHAPES = [(r, w) for r in (1, 7, 32, 48) for w in (16388, 32768, 65536)]
 
 
 def selected(kernel):
@@ -743,6 +962,53 @@ def main():
             run(case_idx, 7, 8, 8, False, "flat", False, True)
             run(case_idx, 128, 4096, 2048, True, "random", False, True)
             run(case_idx, 7, 4096, 2048, False, "random", True, False)
+            # the 100K+/200K buckets: nbk 8193 (past the old cap), 16384 (the new cap) and 16385 (the unfused fallback)
+            run(case_idx, 7, 8193, 2048, False, "random")
+            run(case_idx, 32, 8193, 2048, True, "ties")
+            run(case_idx, 7, 16384, 2048, False, "random")
+            run(case_idx, 32, 16384, 2048, True, "ties")
+            run(case_idx, 7, 16385, 2048, False, "random")
+            run(case_idx, 7, 4096, 4096, False, "random")   # k == nb: no radix select, compaction only
+            run(case_idx, 7, 4096, 4096, True, "random")    # k == nb, mask only: phase 1 alone
+            run(case_idx, 7, 8192, 8192, True, "random")
+            run(case_idx, 32, 8192, 2048, False, "flat", False, False)
+            run(case_idx, 128, 4096, 2048, True, "flat", False, False)
+            run(case_idx, 32, 8192, 2048, False, "same", False, False)
+            run(case_idx, 128, 4096, 2048, True, "same", False, False)
+            run(case_idx, 7, 4096, 2048, False, "random", False, False, 1)   # ss % 4 != 0: the scalar fallback
+            run(case_idx, 32, 8192, 2048, True, "ties", False, False, 3)
+            free_all()
+        if selected("idx-small"):
+            for rows in (1, 7):
+                for nb in (2049, 4096, 8192):
+                    run(case_idx_small, rows, nb, 2048)
+            run(case_idx_small, 7, 4096, 2048, "ties")
+            free_all()
+        if selected("block-max"):
+            for rows, nb in ((1, 4096), (7, 4096), (7, 8192), (32, 8192)):
+                case_blockmax(rows, nb)
+            free_all()
+        if selected("idx-hist"):
+            for dist in ("random", "ties", "flat"):
+                for block in (256, 512, 1024):
+                    run(case_idx_hist, 7, 4096, 2048, dist, block)
+            for block in (256, 512, 1024):
+                run(case_idx_hist, 32, 8192, 2048, "ties", block)
+            free_all()
+        # the key fold (old 0206) was closed without landing: its cases need a tree that has the fold variant, so they
+        # run only when asked for by name (--kernel fold), never under `all`
+        if "fold" in opts.kernel.split(","):
+            for rows, w in FOLD_SHAPES:
+                run(case_idx_fold, rows, w)
+            for rows, w in ((7, 16388), (7, 32768), (32, 65536)):
+                run(case_idx_fold, rows, w, "random", False, False)
+                run(case_idx_fold, rows, w, "ties", False, False)
+                run(case_idx_fold, rows, w, "flat", False, False)
+            for rows, w in ((1, 16388), (7, 65536), (32, 16388), (48, 65532)):
+                run(case_idx_fold, rows, w, "mixed", True, False)
+            run(case_idx_fold, 7, 65532, "mixed", False, False)  # a partial last tile (60 keys)
+            for rows, w in FOLD_SHAPES:
+                case_score_keys_only(rows, w)
             free_all()
         if selected("compress-decode"):
             for rows, d in DECODE_SHAPES:

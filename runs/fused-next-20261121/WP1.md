@@ -11,7 +11,7 @@ Items, in this order (todo.md text is the spec; read each item there in full):
    size the fused pool launch can also write `_score_keys`' outputs (every column's key and each 64-key tile's max) and
    skip that kit launch. It changed 4 of 39 long-prompt replies on the pair because it wrote `idx_fused.zig:scoreKey`'s
    encoding (top bit XORed) where the kit's `topk_select_pruned` reads `_score_keys`' encoding. Measure the kit's bytes
-   (`_score_keys` cubin) as the reference, pin the width window in which the fold engages (why does `len_100000` still
+   (`_score_keys` cubin; the harness has a `score-keys` case) as the byte reference for keys and tile maxima, pin the width window in which the fold engages (why does `len_100000` still
    match?), write the kit's encoding, and prove byte identity of keys and tile maxima against the kit cubin at every
    width in the window including partial tiles. Then decide with timings whether the fold pays: it costs key writes
    (316.6 µs vs 38.5 at R=128 width 32,768 in the gate); price the kit launch it removes (WP0's number). Re-land the high-word
