@@ -140,6 +140,7 @@ def launch(path, name, grid, threads, shared, *args):
     bx, by = threads if isinstance(threads, tuple) else (threads, 1)
     cu("cuLaunchKernel", fn, gx, gy, 1, bx, by, 1, shared, stream, argv, None)
     if os.environ.get("FUSED_BENCH_DEBUG"):
+        print(f"    launch {Path(path).name}:{name} grid={gx},{gy} block={bx},{by}", flush=True)
         cu("cuStreamSynchronize", stream)
 
 
@@ -589,7 +590,9 @@ def case_compress_decode(rows, d, layout="mixed", timing=True, special=False):
     slot, gi = Buffer(slots), Buffer(pair)
     w = Buffer(bf(d))
     chains, states = [], []
-    for i, mod in enumerate((opts.old_torch, opts.old_torch, opts.new_torch)):
+    # newdup (4th arm): the new chain again into fresh buffers, so a nonzero new-vs-newdup isolates a nondeterministic
+    # kernel (a cross-block ring read) from a parity difference.
+    for i, mod in enumerate((opts.old_torch, opts.old_torch, opts.new_torch, opts.new_torch)):
         rk, rg = map(Buffer, rings)
         flag = Buffer(np.zeros(1, "u4"))
         mid, dst = out((rows, d), "u2"), out((rows, d + 16), "u2")
@@ -600,19 +603,24 @@ def case_compress_decode(rows, d, layout="mixed", timing=True, special=False):
                 native(mod, "compress2x", rows, 256, *prefix, mid, L(d), rows, d, flag)
                 aot(f"norm{d}", rows, mid, d, w, dst, d + 16, eps)
             else:
-                native(mod, "compress2x_norm", rows, d, *prefix, w, dst, L(d + 16), rows, d, eps, flag)
+                if i >= 2:  # this tree exports one kernel per served width
+                    native(mod, "compress2x_norm128" if d == 128 else "compress2x_norm512", rows, d, *prefix, w,
+                           dst, L(d + 16), rows, d, eps, flag)
+                else:
+                    native(mod, "compress2x_norm", rows, d, *prefix, w, dst, L(d + 16), rows, d, eps, flag)
 
         chain()
         chains.append(chain)
         states.append([dst, rk, rg, flag])
     diff_new = compare(f"decode compressor new D={d} R={rows}", states[2], states[0])
     diff_old = compare(f"decode compressor old D={d} R={rows}", states[1], states[0])
+    diff_dup = compare(f"decode compressor new-vs-newdup D={d} R={rows}", states[3], states[2])
     row = {"kernel": "0197-compress-decode", "shape": label, "rows": rows, "d": d,
-           "parity": {"new_vs_ref": diff_new, "old_vs_ref": diff_old}}
+           "parity": {"new_vs_ref": diff_new, "old_vs_ref": diff_old, "new_vs_newdup": diff_dup}}
     row["bytes"] = rows * d * 4 * 4 + rows * 2 * d * 4 + rows * (d + 16) * 2 + 2 * n * d * 4
     if timing and DO_TIMING and not special and layout == "mixed":
         floor = lambda: launch(opts.floor, "empty_kernel", rows, d, 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newdup"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -641,6 +649,10 @@ def case_compress_prompt(rows, d, timing=True, special=False):
                 height = min(512 // lanes, 64)
                 native(mod, "rms_norm", (rows + height - 1) // height, (lanes, height), mid, L(d), w, dst,
                        L(d + 16), rows, d, factor, eps, shared=lanes * height * 4 if lanes > 32 else 0)
+            elif i == 2:  # this tree's kernel also takes the raw-ring window (0: the caller scatters them)
+                groups = max(1, min(d, prompt_target(rows)) // lanes)
+                native(mod, "compress2_norm", rows, (lanes, groups), x, s, w, dst, L(d + 16), rows, d,
+                       factor, eps, 0, 0, 0, 0, L(0), 2 * rows, 2 * rows)
             else:
                 groups = max(1, min(d, prompt_target(rows)) // lanes)
                 native(mod, "compress2_norm", rows, (lanes, groups), x, s, w, dst, L(d + 16), rows, d,
@@ -679,32 +691,59 @@ def case_rope(path, rows, special=False, timing=True):
         src[..., :8] = [0x7FC1, 0x7F80, 0xFF80, 0x8000, 0, 1, 0x7F7F, 0x8001]
         src[..., 32:64] = 0x7FC1
     weights = Buffer(bf(d))
-    pos = Buffer(rng.permutation(rows).astype("i8"))
-    dest = Buffer(rng.permutation(rows).astype("i8"))
-    angle = rng.uniform(-np.pi, np.pi, (rows, 32))
+    if prompt:  # the fused stores derive pos/group as base + r; the unfused chain reads the same contiguous run
+        base = int(rng.integers(0, 256))
+        run = np.arange(base, base + rows, dtype="i8")   # kept alive: the upload below is asynchronous
+        pos = Buffer(run)
+        dest = Buffer(run)
+    else:
+        pos = Buffer(rng.permutation(rows).astype("i8"))
+        dest = Buffer(rng.permutation(rows).astype("i8"))
+    # the rotation tables are indexed by absolute position, so a prompt case with a nonzero group base needs rows
+    angle = rng.uniform(-np.pi, np.pi, ((base + rows) if prompt else rows, 32))
     cos, sin = Buffer(np.cos(angle).astype("f4")), Buffer(np.sin(angle).astype("f4"))
+    if os.environ.get("FUSED_BENCH_DEBUG"):
+        print(f"  {label}: base={base if prompt else None} rows={rows} angle={angle.shape} src={src.shape}",
+              flush=True)
     chains, states = [], []
     for i, mod in enumerate((opts.old_torch, opts.old_torch, opts.new_torch)):
         x, rotated, dequant = Buffer(src), out(src.shape, "u2"), out(src.shape, "u2")
-        codes, scales = out((rows, d // 2), "u1"), out((rows, d // (32 if key else 16)), "u1")
+        # a prompt store writes row base + r (the group's slot in the ring), so the packed caches are indexed from 0
+        packed_rows = base + rows if prompt else rows
+        codes, scales = out((packed_rows, d // 2), "u1"), out((packed_rows, d // (32 if key else 16)), "u1")
 
         def chain(i=i, mod=mod, x=x, rot=rotated, dq=dequant, codes=codes, scales=scales):
+            if prompt and i < 2:
+                # prompt.zig stages the group ids and rotation positions as arrays for every path of the old tree;
+                # this tree's fused stores derive them from the chunk, so only the old arms carry the two uploads.
+                cu("cuMemcpyHtoDAsync_v2", pos.addr, P(run.ctypes.data), ct.c_size_t(rows * 8), stream,
+                   ct.c_uint(0))
+                cu("cuMemcpyHtoDAsync_v2", dest.addr, P(run.ctypes.data), ct.c_size_t(rows * 8), stream,
+                   ct.c_uint(0))
             if path == "prompt latent" and i == 0:
                 native(opts.old_ops, "copy_rows16", (1, rows), 256, x, L(d // 8), rot, L(d // 8), L(d // 8))
             if i:
                 if key and prompt:
                     lanes = rms_lanes(d, rows)
                     y = pack_lanes(lanes, d // 2)
-                    native(mod, "fused_prompt_idx_key", rows, (lanes, y), x, L(d), weights, eps, F(1 / d),
-                           cos, sin, pos, codes, scales, dest, d, 64)
+                    if i == 2:  # this tree derives the group id and rotation position from the chunk
+                        native(mod, "fused_prompt_idx_key", rows, (lanes, y), x, L(d), weights, eps, F(1 / d),
+                               cos, sin, L(base), 1, codes, scales, d, 64)
+                    else:
+                        native(mod, "fused_prompt_idx_key", rows, (lanes, y), x, L(d), weights, eps, F(1 / d),
+                               cos, sin, pos, codes, scales, dest, d, 64)
                 elif key:
                     native(mod, "fused_idx_key", rows, 128, x, L(d), weights, cos, sin, pos, codes,
                            scales, dest, d, 64, eps)
                 elif query:
                     native(mod, "fused_rope_qd", rows * heads, 128, x, dq, cos, sin, pos, heads, d, 64)
                 elif prompt:
-                    native(mod, "fused_prompt_latent", rows, min(d // 2, 256), x, cos, sin, pos, codes,
-                           scales, dest, d, 64)
+                    if i == 2:
+                        native(mod, "fused_prompt_latent", rows, min(d // 2, 256), x, cos, sin, L(base), 1, codes,
+                               scales, d, 64)
+                    else:
+                        native(mod, "fused_prompt_latent", rows, min(d // 2, 256), x, cos, sin, pos, codes,
+                               scales, dest, d, 64)
                 else:
                     native(mod, "fused_rope_store", rows, min(d // 2, 256), x, cos, sin, pos, codes, scales,
                            dest, d, 64)
@@ -845,6 +884,79 @@ def case_prune(rows, dead_mode=False, special=False, timing=True):
 # ---------------------------------------------------------------------------------------------------------------------
 # kit _score_keys (the launch 0195's fold replaces; not part of this tree's fused path, priced for the baseline)
 
+
+def case_prompt_source(rows, d, special=False, timing=True, odd=False):
+    """The ratio-2 KV-source step of a prompt chunk: the old chain (index upload + two raw-ring scatters +
+    compress2 + rms_norm) against this tree's fused launch, which writes both raw tails and the normalized latent.
+    Live outputs: both raw-ring buffers and the compressed latent row."""
+    label = f"prompt-source R={rows} D={d}{' odd' if odd else ''}{' special' if special else ''}"
+    if not shape_ok(label):
+        return None
+    n = 2 * rows + int(odd)      # chunk rows at ratio 2 (odd: a trailing row with no pair)
+    ring_rows = 64               # prompt.zig's raw_rows
+    keep = min(n, ring_rows)
+    first = n - keep
+    start = 128                  # chunk start (a group boundary)
+    hx = rng.normal(size=(n, d)).astype("f4")
+    hs = rng.normal(size=(n, d)).astype("f4")
+    if special:
+        bits = np.array([0, 0x80000000, 1, 0x7f800000, 0xff800000, 0x7fc01234, 0x7f7fffff, 0x00800000], "u4")
+        for a in (hx, hs):
+            a[:, ::7] = np.resize(bits.view("f4"), a[:, ::7].shape)
+    x, sc = Buffer(hx), Buffer(hs)
+    tail_x, tail_s = Buffer(hx[first:]), Buffer(hs[first:])
+    w = Buffer(bf(d))
+    idx = np.array([(start + first + j) % ring_rows for j in range(keep)], "i8")
+    idxb = Buffer(idx)
+    lanes = rms_lanes(d, rows) if rows else 32   # rows == 0: a one-row chunk, no fused launch
+    groups = max(1, min(d, prompt_target(rows)) // lanes)
+    factor = F(np.float32(rows) / np.float32(rows * d)) if rows else F(1.0)
+    raw_pos0 = (start + first) % ring_rows
+    chains, states = [], []
+    for i, mod in enumerate((opts.old_torch, opts.old_torch, opts.new_torch)):
+        rk = Buffer(np.zeros((ring_rows, d), "f4"))
+        rg = Buffer(np.zeros((ring_rows, d), "f4"))
+        lat = out((max(rows, 1), d + 16), "u2")
+        mid = out((max(rows, 1), d), "u2")
+
+        def chain(i=i, mod=mod, rk=rk, rg=rg, lat=lat, mid=mid):
+            if i < 2:
+                cu("cuMemcpyHtoDAsync_v2", idxb.addr, P(idx.ctypes.data), ct.c_size_t(idx.nbytes), stream,
+                   ct.c_uint(0))
+                native(opts.old_ops, "scatter_rows", keep, 256, tail_x, L(d * 4), idxb, rk, L(d * 4), L(d * 4), keep)
+                native(opts.old_ops, "scatter_rows", keep, 256, tail_s, L(d * 4), idxb, rg, L(d * 4), L(d * 4), keep)
+            if i == 0 and rows:  # the unfused chain: compress2 + the norm (no pair at rows == 0)
+                native(mod, "compress2", (rows * d + 255) // 256, 256, x, sc, mid, rows, d)
+                height = min(512 // lanes, 64)
+                native(mod, "rms_norm", (rows + height - 1) // height, (lanes, height), mid, L(d), w, lat,
+                       L(d + 16), rows, d, factor, eps, shared=lanes * height * 4 if lanes > 32 else 0)
+            elif i == 1 and rows:  # the WP1 tree's fused compressor (the launch this item replaces)
+                native(mod, "compress2_norm", rows, (lanes, groups), x, sc, w, lat, L(d + 16), rows, d,
+                       factor, eps)
+            elif rows == 0:  # prompt.zig keeps the upload + scatters when the chunk has no complete pair
+                cu("cuMemcpyHtoDAsync_v2", idxb.addr, P(idx.ctypes.data), ct.c_size_t(idx.nbytes), stream,
+                   ct.c_uint(0))
+                native(opts.old_ops, "scatter_rows", keep, 256, tail_x, L(d * 4), idxb, rk, L(d * 4), L(d * 4), keep)
+                native(opts.old_ops, "scatter_rows", keep, 256, tail_s, L(d * 4), idxb, rg, L(d * 4), L(d * 4), keep)
+            else:  # this tree: one launch, raw tails included
+                native(mod, "compress2_norm", (n + 1) // 2, (lanes, groups), x, sc, w, lat, L(d + 16), rows, d,
+                       factor, eps, 0, rk, rg, ring_rows, L(raw_pos0), first, n)
+
+        chain()
+        chains.append(chain)
+        states.append([rk, rg, lat])
+    diff_new = compare(f"prompt source new R={rows} D={d}", states[2], states[0])
+    diff_old = compare(f"prompt source old R={rows} D={d}", states[1], states[0])
+    row = {"kernel": "0197-compress-prompt", "shape": label, "rows": rows, "d": d,
+           "parity": {"new_vs_ref": diff_new, "old_vs_ref": diff_old}}
+    row["bytes"] = 2 * n * d * 4 + 2 * keep * d * 4 + rows * (d + 16) * 2
+    if timing and DO_TIMING and not special:
+        floor = lambda: launch(opts.floor, "empty_kernel", (n + 1) // 2, (lanes, groups), 0)
+        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
 def case_score_keys(rows, width):
     label = f"kit _score_keys R={rows} width={width}"
     if not shape_ok(label):
@@ -890,8 +1002,8 @@ ROPE_SHAPES = [("key", r) for r in (1, 7, 32, 48)] + \
 PRUNE_SHAPES = [1, 7, 32, 48]
 SCORE_KEYS_SHAPES = [(r, w) for r in (1, 7, 32, 128) for w in (16384, 32768, 65536)]
 
-KERNELS = ("idx", "idx-hist", "block-max", "idx-small", "fold", "compress-decode", "compress-prompt", "key", "latent", "query", "prompt-key",
-           "prompt-latent", "prune", "score-keys")
+KERNELS = ("idx", "idx-hist", "block-max", "idx-small", "fold", "compress-decode", "compress-prompt", "prompt-source",
+           "key", "latent", "query", "prompt-key", "prompt-latent", "prune", "score-keys")
 
 FOLD_SHAPES = [(r, w) for r in (1, 7, 32, 48) for w in (16388, 32768, 65536)]
 
@@ -1023,6 +1135,15 @@ def main():
                 run(case_compress_prompt, rows, d)
             run(case_compress_prompt, 128, 512, False, True)
             run(case_compress_prompt, 1024, 2048, False, True)
+        if selected("prompt-source"):
+            for rows, d in ((1, 512), (7, 512), (48, 512), (128, 512), (1024, 512), (128, 2048)):
+                run(case_prompt_source, rows, d)
+            run(case_prompt_source, 7, 512, True, False)      # NaN/+-inf/+-0 in both inputs
+            run(case_prompt_source, 1, 128, False, False)
+            run(case_prompt_source, 0, 128, False, False, True)  # a one-row chunk (n = 1): no pair, the scatter path
+            for rows, d in ((1, 512), (7, 512), (32, 512), (64, 512), (128, 512)):
+                run(case_prompt_source, rows, d, False, True, True)   # odd trailing row (+ ring wrap at 32/64)
+            free_all()
             free_all()
         for name, tag in (("key", "key"), ("latent", "latent"), ("query", "query"),
                           ("prompt-key", "prompt key"), ("prompt-latent", "prompt latent")):

@@ -1,0 +1,14 @@
+WP2 done. Summary:
+
+**Landed (engine `fused-next`, not pushed; host tests 622/624, the two failures are the documented pre-existing ones):**
+
+1. **Item 1 — `90052a0` (0230):** the 0197 decode compressor is now one dedicated kernel per served width, with the partner slots read ahead of the current row. Measured, byte-exact against the kit chain (R=1/7/32/48, D=128/512, all layouts + stress): D=128 1.52→1.32 µs at R=1 and 1.93→1.75 at R=48 (13%/9%); D=512 1.73→1.52 and 2.22→2.14 (11%/4%). The 128-thread/4-channel and 256-thread/2-channel forms were re-tested and rejected (4-7% slower / neutral at D=512) — the per-thread chain, not the barrier count, is what binds.
+
+2. **Item 5 — `b28310e` (0231):** the prompt source step folds both raw-ring tails (modular positions, ring wrap, odd trailing row, and the one-row chunk kept on the scatter fallback) and the group/position setup into the fused launches. Byte-exact on 16 source-step cases and the prompt key/latent cases; source step 2.8-3.0× faster at R=1-128, 1.36× at R=1024, 2.0× at R=128 D=2048; the two metadata uploads removed (2.2-2.5× on the prompt stores).
+
+**Closed, no change, with measurements:** item 2 (the duplicate `expf` was already CSE'd — `MUFU.EX2 = 2`; the branchless one-exp form is bit-exact over 4.26 M probe rows but not faster), item 3 (block-level partner resolution is 0.03-0.06 µs slower at 16 warps, 0.16-0.18 at 4 warps), item 4 (dedupe saves exactly the ablated 0.04-0.06 µs but its window geometry costs 0.57 µs), item 6 (registers bind the prompt kernel, the 48-warp/SM ceiling binds the decode kernels; shared never limits residency).
+
+**Full harness parity, OLD = `d01975d`, NEW = `b28310e`, `--parity-only`, all kernels: 140 pass / 0 fail, twice** (plus three earlier 139/139 runs before the one-row case was added; one still earlier run flaked on one 0195 and one 0197 case, both passing on rerun — the decode cases now also carry a `new-vs-newdup` determinism arm that stayed 0).
+
+Evidence in `runs/fused-next-20261121/wp2/` (`RESULTS.md`, the JSONs/logs, `vbench.py` + `variants.cu`, `sassone.py`, `occ.py`); harness updates in `tools/fused_bench/` (`bench.py` per-tree dispatch, new `prompt-source` case, `sass.py` names, README) are staged for the supervisor to commit. Not done: no `decisions.md`/`todo.md` edits in the recipe repo (left to the supervisor), and no `ncu` was needed.
+pi exit 0

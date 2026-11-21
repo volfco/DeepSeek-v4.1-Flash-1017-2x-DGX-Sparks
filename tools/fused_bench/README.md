@@ -41,8 +41,8 @@ directory to the head, builds, benches, sasses and pulls the artifacts into `run
 Overrides are environment variables: `OLD=... NEW=... KERNEL=idx SHAPE="idx R=7 nb=8 width" JSON=one.json just
 fused-bench`.
 
-`--kernel` accepts `all` or a comma list of `idx, compress-decode, compress-prompt, key, latent, query, prompt-key,
-prompt-latent, prune, score-keys`. `--reps` (default 20) graphs and `--batch` (default 100) replays per graph.
+`--kernel` accepts `all` or a comma list of `idx, idx-hist, idx-small, block-max, fold, compress-decode,
+compress-prompt, prompt-source, key, latent, query, prompt-key, prompt-latent, prune, score-keys`. `--reps` (default 20) graphs and `--batch` (default 100) replays per graph.
 
 ## What each case checks
 
@@ -52,6 +52,10 @@ prompt-latent, prune, score-keys`. `--reps` (default 20) graphs and `--batch` (d
 - **0197 decode compressor**: fused `compress2x_norm` vs `compress2x`+kit `_rmsnorm`, D=128/512, R=1/7/32/48, mixed,
   unaligned, cached, cross, invalid and stress layouts (rings, stride padding and the invalid flag included).
 - **0197 prompt compressor**: fused `compress2_norm` vs `compress2`+`rms_norm`, D=512/2048, R=128/1024.
+- **0197 prompt source step** (`--kernel prompt-source`): the whole ratio-2 KV-source step — index upload, two
+  `scatter_rows` launches, `compress2` and `rms_norm` for the old trees against this tree's single folded launch —
+  with both raw-ring buffers and the latent compared byte for byte, at R=1/7/48/128/1024 D=512, R=128 D=2048, the
+  odd-trailing-row shapes, a one-row chunk with no pair, and NaN/±inf/±0 inputs.
 - **0198 five kernels**: fused key / latent / query / prompt key / prompt latent vs the kit's `_rmsnorm`,
   `_rope_heads`, `_fp4_store`, `_fp4qd_p2`; codes/scales (or dequantized query) only, because the rotated intermediates
   have no reader; plus every one of the 65,536 bf16 encodings through the latent store.

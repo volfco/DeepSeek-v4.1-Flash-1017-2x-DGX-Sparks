@@ -19,7 +19,8 @@ CUOBJDUMP = "/usr/local/cuda/bin/cuobjdump"
 BLOCKS = {
     "tf_ds_idx_fused_kernel": (1024, 1),
     "tf_ds_compress2_norm_kernel": (32, 8),    # d=512, R=128: rmsLanes=32, groups=8
-    "tf_ds_compress2x_norm_kernel": (512, 1),  # d=512
+    "tf_ds_compress2x_norm128_kernel": (128, 1),  # d=128, one channel a thread
+    "tf_ds_compress2x_norm512_kernel": (512, 1),  # d=512
     "tf_ds_fused_idx_key_kernel": (128, 1),
     "tf_ds_fused_rope_store_kernel": (256, 1),
     "tf_ds_fused_rope_qd_kernel": (128, 1),
