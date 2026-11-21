@@ -1,0 +1,30 @@
+2026-11-18T13:00:02.600401+00:00 restart bench
+2026-11-18T13:02:51.189676+00:00 restart production
+2026-11-18T13:04:54.855895+00:00 production start rc=1, smoke retry passed
+Traceback (most recent call last):
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/screen.py", line 284, in <module>
+    with (driver.here/".pair.lock").open("a") as lock:
+        ^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/screen.py", line 213, in run
+    elif args.mode=="decode":
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/screen.py", line 122, in resume
+    client.cell(depth,"chat-prime",[prompt],[4872],budget=args.budget,temperature=0,rep=rep,
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/engine-followup/client/sample.py", line 178, in cell
+    out = [f.result() for f in futures]
+           ^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/screen.py", line 108, in <lambda>
+    client.request=lambda *a,**kw:raw_request(client,*a,**kw)
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/screen.py", line 93, in raw_request
+    if "error" in item:raise ValueError(str(item["error"]))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: {'message': 'the native DeepSeek-V4.1 engine runs tensor parallel over two GPUs or the four nodes of the 2D split: set TF_TP_WORLD=2 or 4', 'type': 'server_error'}

@@ -1,0 +1,34 @@
+baseline .env: 32 of 42 lines; dropped: PARALLEL TF_DS_RDMA_CPUS TF_DS_T13_EXPERT_PRUNE TF_DS_T26_KEYED_DRAFT TF_DS_T27_DEVICE_DRAW TF_DS_PREFILL_SLICE KV_SHARD TENSORFOLD_TOKEN_CACHE_MB TF_DS_DRAFT_BLOCK TF_DS_ENGRAM_LEAD 
+15:58:53 waiting for 120 s idle
+16:00:53 idle
+smoke ok: OK
+rank0 tensorfold-dsv41:exl3-tp2-ea522d353626 sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee
+TF_DS_GRAPHS=1 TF_DS_GRAPH_CAP=128 TF_DS_L2_PREFETCH=1 TF_DS_RECIPE_PATCHES=ea522d353626 TF_DS_SPILL_GIB=180 TF_DS_STREAMS=4 
+spill /home/colum/.cache/dsv41-draftblock-dq-baseline
+rank1 tensorfold-dsv41:exl3-tp2-ea522d353626 sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee
+TF_DS_RECIPE_PATCHES=ea522d353626 TF_DS_SPILL_GIB=180 TF_DS_STREAMS=4 
+spill /home/colum/.cache/dsv41-draftblock-dq-baseline
+16:03:00 .env restored
+lead banners (want 0): 0
+rank0 TF env:
+TF_DS_ENGRAM=/engram TF_DS_ENGRAM_AIO=1 TF_DS_GRAPHS=1 TF_DS_GRAPH_CAP=128 TF_DS_HC_SIDE=1 TF_DS_L2_PREFETCH=1 TF_DS_PREFILL_INTERLEAVE_MS=250 TF_DS_RECIPE_PATCHES=ea522d353626 TF_DS_REPLAY_FLOOR=1 TF_DS_SPILL_DIR=/spill TF_DS_SPILL_GIB=180 TF_DS_SPILL_MIN_FREE_GIB=50 TF_DS_SPILL_MIN_TOKENS=2048 TF_DS_SPILL_QUOTA=0 TF_DS_SPILL_STAGING_MIB=128 TF_DS_STREAMS=4 
+baseline    4000 cold   prompt=4265 cached=0 out=726 sha=9277fe325544 codes=8/8 order=True sum=True finish=stop wall=10s
+baseline   64000 cold   prompt=64538 cached=0 out=660 sha=8ac095d6d33d codes=8/8 order=True sum=True finish=stop wall=39s
+baseline  256000 cold   prompt=256412 cached=0 out=4096 sha=daf8d3f8e3a6 codes=0/8 order=False sum=False finish=length wall=175s
+baseline  530000 cold   prompt=530489 cached=0 out=4096 sha=60901dea3a69 codes=0/8 order=False sum=False finish=length wall=332s
+baseline  530000 resume prompt=530489 cached=528384 out=4096 sha=60901dea3a69 codes=0/8 order=False sum=False finish=length wall=50s
+16:13:07 waiting for 120 s idle
+16:15:17 idle
+smoke ok: OK
+rank0 tensorfold-dsv41:exl3-tp2-ea522d353626 sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee
+TENSORFOLD_TOKEN_CACHE_MB=32 TF_DS_DRAFT_BLOCK=6 TF_DS_ENGRAM_LEAD=1 TF_DS_GRAPHS=1 TF_DS_GRAPH_CAP=128 TF_DS_KV_SHARD=1 TF_DS_L2_PREFETCH=1 TF_DS_POOL=2101248 TF_DS_PREFILL_SLICE=5 TF_DS_RECIPE_PATCHES=ea522d353626 TF_DS_SPILL_GIB=180 TF_DS_STREAMS=8 TF_DS_T13_EXPERT_PRUNE=1 TF_DS_T26_KEYED_DRAFT=1 TF_DS_T27_DEVICE_DRAW=1 
+spill /home/colum/.cache/dsv41-spill
+rank1 tensorfold-dsv41:exl3-tp2-ea522d353626 sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee
+TENSORFOLD_TOKEN_CACHE_MB=32 TF_DS_DRAFT_BLOCK=6 TF_DS_ENGRAM_LEAD=1 TF_DS_KV_SHARD=1 TF_DS_POOL=2101248 TF_DS_PREFILL_SLICE=5 TF_DS_RECIPE_PATCHES=ea522d353626 TF_DS_SPILL_GIB=180 TF_DS_STREAMS=8 TF_DS_T13_EXPERT_PRUNE=1 TF_DS_T26_KEYED_DRAFT=1 TF_DS_T27_DEVICE_DRAW=1 
+spill /home/colum/.cache/dsv41-spill
+info: dsv41: TF_DS_DRAFT_BLOCK=6 (rank 0): a pass asked for more than 5 drafts runs as many block rows as drafts
+restore validate rc=0
+
+all passed
+== 16:17:41 baseline done
+16:17:41 .env restored

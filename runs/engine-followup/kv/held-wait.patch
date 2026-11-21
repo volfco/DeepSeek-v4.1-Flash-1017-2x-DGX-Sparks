@@ -1,0 +1,57 @@
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -690,4 +690,5 @@
+     next: u64 = 0,
+     snaps: std.ArrayList(*Snap) = .empty, // kept prompt states, oldest first
++    bench_held_wait_ms: ?u32 = null,
+     keep_protect: bool = false, // TF_DS_KEEP_PROTECT=1: a placement takes a snap a longer one covers first, then the oldest non-shared (placeKept)
+     accept_chain: bool = false, // TF_DS_DEVICE_ACCEPT=1: chain windows' keep counts from the device (bit-identical; rank 0's host rule stands when off)
+@@ -706,4 +707,11 @@
+     pub fn init(gpa: std.mem.Allocator, m: *Model) Lanes {
+         var ln: Lanes = .{ .gpa = gpa, .m = m, .peer = if (m.world > 1) m.peer() else null };
++        if (std.c.getenv("TF_DS_KV_HELD_WAIT_MS")) |raw_wait_ms| {
++            const ms = std.fmt.parseInt(u32, std.mem.span(raw_wait_ms), 10) catch 10000;
++            if (ms == 10000 or ms == 500) {
++                ln.bench_held_wait_ms = ms;
++                std.log.info("kv held trial configured ms={d}", .{ms});
++            }
++        }
+         ln.keep_protect = api.prompt_cache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null); // every rank alike
+         ln.accept_chain = envOne("TF_DS_DEVICE_ACCEPT"); // every rank alike; an uneven pair is still bit-identical (the follower never reads the keep)
+@@ -969,8 +977,13 @@
+         // (lanes owns the clock, held_wait_ns from the first wait: the planner waits on it for a live stream that holds
+         // the state, as placeKept does, and for the streams over a hit's tail, planRoom)
+-        const waits = if (src) |sn| self.patient(sn) else false;
++        const timeout_ns = if (self.bench_held_wait_ms) |ms| @as(u64, ms) * std.time.ns_per_ms else held_wait_ns;
++        const waits = if (src) |sn| self.patientFor(sn, timeout_ns) else false;
+         self.kvPending();
+-        const a = try k.admit(@intFromPtr(s), std.hash.Wyhash.hash(0, s.id), @intCast(slot), size, if (src) |sn| sn.id else null, waits);
++        const a = k.admit(@intFromPtr(s), std.hash.Wyhash.hash(0, s.id), @intCast(slot), size, if (src) |sn| sn.id else null, waits) catch |err| {
++            if (err == error.ContextFull) self.noteHeld(src, waits, "full");
++            return err;
++        };
+         if (src) |sn| {
++            self.noteHeld(src, waits, if (a.resumed) "resumed" else "dropped");
+             sn.wanted = 0;
+             if (!a.resumed) {
+@@ -1914,7 +1927,19 @@
+     /// Whether a request still waits for the live stream that holds `sn` (held_wait_ns from its first wait).
+     fn patient(self: *const Lanes, sn: *Snap) bool {
++        return self.patientFor(sn, held_wait_ns);
++    }
++
++    fn patientFor(self: *const Lanes, sn: *Snap, timeout_ns: u64) bool {
+         const t = self.m.now();
+         if (sn.wanted == 0) sn.wanted = t;
+-        return t - sn.wanted < held_wait_ns;
++        return t - sn.wanted < timeout_ns;
++    }
++
++    fn noteHeld(self: *const Lanes, source: ?*Snap, patient_: bool, outcome: []const u8) void {
++        const ms = self.bench_held_wait_ms orelse return;
++        const sn = source orelse return;
++        if (sn.at < 250000) return;
++        const elapsed = (self.m.now() -| sn.wanted) / std.time.ns_per_ms;
++        std.log.info("kv held trial ms={d} elapsed_ms={d} part={d} at={d} patient={} outcome={s}", .{ ms, elapsed, sn.part, sn.at, patient_, outcome });
+     }
+ 

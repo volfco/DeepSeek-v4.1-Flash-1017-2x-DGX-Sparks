@@ -1,0 +1,144 @@
+1/143 engine_api.test.the done line's Engram host time appends last, or nothing when the backend keeps none...OK
+2/143 engine_api.test_0...OK
+3/143 lane_host.test.a lane host serves the core's own tokens, in order, and cancels between rounds...OK
+4/143 lane_host.test.prefill interleave: a decoding stream keeps getting tokens and its cancel lands during another's prompt pass...OK
+5/143 lane_host.test.prefill interleave: inside a chunk's layer slices the host runs one round a park and no chunk-boundary work...OK
+6/143 lane_host.test.the service fence: never inside a round, a prompt pass's chunk or a graph capture; skipped and counted when not panicking...OK
+7/143 lane_host.test.TF_DS_CACHE_METRICS: 0 and off turn the cache metrics off, everything else leaves them on...OK
+8/143 lane_host.test_0...OK
+9/143 lane_host_reuse_test.test.a lane host resumes a conversation from its kept prompt state and reports the cached tokens...OK
+10/143 lane_host_reuse_test.test.a turn's mark evicting the state it resumed from: the hit is reported first and the entry freed once...OK
+11/143 lane_host_reuse_test.test.a prompt with an image resumes when its image is the same, and not past the image when it differs...OK
+12/143 lane_host_reuse_test.test.a turn resuming its kept state cuts in when the tokens it computes fit cut_in, although its prompt is longer...OK
+13/143 lane_host_reuse_test.test.TF_DS_SHARED_PLAN: the kept hook flags a shared cut's state from the marks plan, and leaves an unshared keep without it...OK
+14/143 prompt_cache.decltest.imageCacheOn...OK
+15/143 prompt_cache.decltest.editMark...OK
+16/143 prompt_cache.decltest.exactResume...OK
+17/143 prompt_cache.decltest.keepProtect...OK
+18/143 prompt_cache.test_0...OK
+19/143 prompt_cache.test.0178 (TF_DS_PROMPT_ENDSTATE): eligible offers at == len only with the flag...OK
+20/143 prompt_cache.test.TF_DS_PROMPT_ENDSTATE parses 1..8 and nothing else...OK
+21/143 lane_host_tier_test.test.a turn whose state left memory waits parked for its restore, resumes it exactly, and writes its own keeps forked from it...OK
+22/143 lane_host_tier_test.test.two requests on one point share its restore; it stops once, when the last of them is cancelled...OK
+23/143 lane_host_tier_test.test.a restore that fails on any rank prefills from the start, exactly...OK
+24/143 lane_host_tier_test.test.restores progress between another request's prompt chunks with the interleave off, then their request resumes...OK
+25/143 lane_host_tier_test.test.restores are serviced between a prompt pass's pieces (TF_FILL_CHUNKS): the service fence lets the run loop in there...OK
+26/143 lane_host_tier_test.test.shutdown with requests parked on a restore that never ends: they are cancelled, the restore stops once, the tier flushes...OK
+27/143 lane_host_tier_test.test.without a tier and the cache metrics off, nothing is parked and status carries no cache counters...OK
+28/143 lane_host_tier_test.test.a request parked on a restore past TF_SPILL_LOAD_WAIT_MS is admitted without it, and the restore stops...OK
+29/143 lane_host_tier_test.test.restores are serviced between decode rounds while another stream decodes...OK
+30/143 lane_host_tier_test.test.with the cache metrics on the memory cache's counters publish without a tier...OK
+31/143 lane_host_tier_test.test.spill switches a backend never bound are refused, not ignored...OK
+32/143 lane_host_tier_test.test.the lane thread runs its enter hook before the tier's first restore: a restore that is the first device work finds the context current...OK
+33/143 prompt_cache_media_test.test.mediaKeys: every picture id named by a span and made from its digest, nothing else...OK
+34/143 prompt_cache_media_test.test.a prompt with pictures: its lookups carry the pictures' identities, its keeps their identities and model ids; a disk hit resumes it...OK
+35/143 prompt_cache_media_test.test.tierMedia: the tier gets a request's media only when they name exactly the spans the engine runs...OK
+36/143 prompt_cache_media_test.test.a prompt whose cache_media name other spans than its images: no disk hit, nothing kept with pictures...OK
+37/143 prompt_cache_media_test.test.a prompt with pictures and no content key (TF_DS_IMAGE_CACHE=0): the tier is never asked, nothing is kept...OK
+38/143 prompt_cache_media_test.test.a text prompt's lookups and keeps carry no pictures...OK
+39/143 prompt_imprint.test_0...OK
+40/143 keepalive.test.the ticker commits while idle and holds while a request runs...OK
+41/143 keepalive.test.ticks stop once the keep-warm window has passed and resume when a request ends...OK
+42/143 keepalive.test.the window decides due without a thread...OK
+43/143 energy.test.TF_DS_ENERGY: 1 and on turn it on, everything else leaves it off...OK
+44/143 energy.test.the off path reads no counter and allocates nothing...OK
+45/143 energy.test.a request's delta and the equal idle window before it, labelled apart...OK
+46/143 energy.test.a gap shorter than the request is no idle window...OK
+47/143 energy.test.a driver without the energy read degrades to - and still opens...OK
+48/143 prompt_imprint_test.test.learned states survive a reopen; the longest usable prefix wins...OK
+49/143 prompt_imprint_test.test.the least recently used state goes first, and a removed one stays gone after a reopen...OK
+50/143 prompt_imprint_test.test.other identities are swept, least recently opened first, until the cap fits...OK
+51/143 prompt_cache_test.test.a growing conversation resumes each turn where the last one's history ended, and equals a fresh pass...OK
+52/143 prompt_cache_test.test.an entry keys its lookahead tokens: a prompt that differs right after the state does not resume it...OK
+53/143 prompt_cache_test.test.a state within the tail of a prompt's end is passed over for an earlier one, and stays for the conversation that kept it...OK
+54/143 prompt_cache_test.test.planned families resume and keep only at the request's chunk starts...OK
+55/143 prompt_cache_test.test.eviction frees a conversation's superseded state first, then the oldest; a state past the budget is refused...OK
+56/143 prompt_cache_test.test.TF_DS_KEEP_PROTECT=1: a branch point's own conversation moving on frees it first...OK
+57/143 prompt_cache_test.test.TF_DS_KEEP_PROTECT=1: a cross-conversation fork's longer state leaves its branch point alone...OK
+58/143 prompt_cache_test.test.TF_DS_KEEP_PROTECT unset: any longer descendant makes its parent the first victim...OK
+59/143 prompt_cache_test.test.TF_DS_KEEP_PROTECT=1: the lineage link supersedes within one computation, and claims nothing without one...OK
+60/143 prompt_cache_test.test.a failed copy keeps nothing and a failed restore prefills from the start...OK
+61/143 prompt_cache_test.test.marks: the stable prefix with the last prompt and shared blocks, past the resume point, before the end...OK
+62/143 prompt_cache_test.test.TF_DS_EDIT_MARK: an early history edit keeps its stable mark on and drops it off...OK
+63/143 prompt_cache_test.test.TF_DS_EDIT_MARK: a late edit keeps its stable mark in both modes...OK
+64/143 prompt_cache_test.test.TF_DS_EDIT_MARK: the stable mark keeps min_gap from the resume point and from its neighbours...OK
+65/143 prompt_cache_test.test.TF_DS_SHARED_PLAN: only 1 turns it on...OK
+66/143 prompt_cache_test.test.TF_DS_SHARED_PLAN: a state kept at a shared cut's chunk end is shared even when the ring never notes it...OK
+67/143 prompt_cache_test.test.TF_DS_SHARED_PLAN: a shared keep is flagged with the switch on as the ring flags it with the switch off...OK
+68/143 prompt_cache_test.test.TF_DS_SHARED_PLAN: a shared cut stays flagged after interleaved lookups rotate the note ring...OK
+69/143 prompt_cache_test.test.prompts under min_prompt keep nothing (their extra prompt call would cost more than reuse saves), longer ones keep as before...OK
+70/143 prompt_cache_test.test.kept states charge their real storage, a save takes spare storage first, and spare stays inside the budget...OK
+71/143 prompt_cache_test.test.a shared system cut outlives its own conversation's turns: a second conversation resumes it after cold prompts fill the budget...OK
+72/143 prompt_cache_test.test.a pass makes room for every state it keeps before it starts, so a peer told of the evictions with the request stays inside the budget...OK
+73/143 prompt_cache_test.test.a state a peer cannot resume is forgotten: the next prompt misses instead of asking again...OK
+74/143 prompt_cache_test.test.a learned harness state outlives its store: a fresh session on a new one resumes it from disk, equal to a fresh pass...OK
+75/143 prompt_cache_test.test.past the learned-state cap the least recently used state is forgotten, and a file that no longer reads is too...OK
+76/143 prompt_cache_test.test.TF_DS_CACHE_METRICS: the misses split into no prefix, tail-window and stale...OK
+77/143 prompt_cache_test.test.a miss's cause comes only from a matching entry: one longer than the prompt never raises tail_window...OK
+78/143 prompt_cache_test.test.TF_DS_CACHE_METRICS: evictions split into superseded and least recently used...OK
+79/143 prompt_cache_test.test.TF_DS_CACHE_METRICS: failures split into save and restore...OK
+80/143 prompt_cache_test.test.TF_DS_CACHE_METRICS: the resume depth buckets each finished pass by the fraction it resumed...OK
+81/143 prompt_cache_test.test.TF_DS_CACHE_METRICS=0: the cause splits and the resume depth count nothing...OK
+82/143 prompt_cache_test.test.TF_DS_EXACT_RESUME: an off-grid end state is live on a store built with a grid, and only with the switch on...OK
+83/143 prompt_cache_test.test.full ends displace through the cache, match identical IDs and release memory at capacity...OK
+84/143 prompt_cache_tier_test.test.a restored shared state's family copy is marked shared at adopt (placeKept's victim order)...OK
+85/143 prompt_cache_tier_test.test.without a tier the store asks nothing and counts nothing new...OK
+86/143 prompt_cache_tier_test.test.a keep enqueues its write with conversation and lineage; a state that left memory restores, equal to a fresh pass...OK
+87/143 prompt_cache_tier_test.test.a stale long memory state never shadows a durable point; ineligible points are not offered...OK
+88/143 prompt_cache_tier_test.test.one restore per point: a second request joins it, and it is cancelled once...OK
+89/143 prompt_cache_tier_test.test.a restore that fails anywhere leaves nothing; one memory already holds is dropped, its copy freed...OK
+90/143 prompt_cache_tier_test.test.a stale memory twin of a durable point is replaced by its restore; an evicted state restores too...OK
+91/143 prompt_cache_tier_test.test.a write still queued is staged before its memory state is dropped; a new shared prefix is marked on disk...OK
+92/143 prompt_cache_tier_test.test.flush stops restores, drains writes, and reports what its deadline left unpublished...OK
+93/143 prompt_cache_tier_test.test.forgetting a point drops it on disk and unlinks its memory twin...OK
+94/143 prompt_cache_tier_test.test.common prefix...OK
+95/143 prompt_cache_tier_test.test.continued conversations: a rewind continues, another conversation or an edit starts its own, the newest match wins...OK
+96/143 prompt_cache_tier_test.test.continued conversations skip shared, pictured, restored and forgotten conversations' states...OK
+97/143 prompt_cache_tier_test.test.join: an own turn keeps its conversation, a continuation names it, anything else starts one...OK
+98/143 prompt_cache_tier_test.test.a continued request is counted with its prefill; a large one's line says where it resumed and why...OK
+99/143 prompt_cache_tier_test.test.the log threshold: a continued request's prefill of chat_log_tokens or more...OK
+100/143 prompt_cache_tier_test.test.join: a hit on another conversation's state inside the shared system prompt is no evidence of that conversation...OK
+101/143 prompt_cache_tier_test.test.with a grid an off-grid shared cut marks the state the family keeps on the grid as shared, on disk too...OK
+102/143 prompt_cache_tier_test.test.a restore's destination is charged to the budget while it runs; spare storage in its way is trimmed, not every state...OK
+103/143 prompt_cache_tier_test.test.lineage: a fresh pass starts its own, a resumed one forks its state's at the resume point, kept states carry it to disk and back...OK
+104/143 prompt_cache_tier_test.test.a restore refused for room or capacity: the shorter memory state stays when it can, a restore that can start wins...OK
+105/143 prompt_cache_tier_test.test.a NoRoom is worth waiting for only when the restores in flight hold the rest of the budget...OK
+106/143 prompt_cache_tier_test.test.TF_DS_CACHE_METRICS: a keep refused for the restores in flight splits from one past the budget...OK
+107/143 lane_host_test.test.a lane host reports its backend's memory counts, and none without them...OK
+108/143 lane_host_test.test.a request the backend refuses fails alone, in the backend's words...OK
+109/143 lane_host_test.test.a request refused for room while another stream runs is tried again within a second...OK
+110/143 lane_host_test.test.after a long prompt pass, a stream near its max_tokens ends before the next request's pass...OK
+111/143 lane_host_test.test.a prompt pass in pieces: a decoding stream keeps its rounds between them, and the reply is the whole pass's...OK
+112/143 lane_host_test.test.a prompt within the first piece runs whole: the decoding stream waits for it as before...OK
+113/143 lane_host_test.test.a short prompt cuts in: its whole pass runs between a long pass's pieces, and both replies are unchanged...OK
+114/143 lane_host_test.test.a prompt longer than cut_in waits for the pass in pieces, as before...OK
+115/143 lane_host_test.test.a short prompt refused for room as it cuts in waits in the queue and then runs, as it does without cut_in...OK
+116/143 lane_host_test.test.a cut-in its backend refuses as its pass opens (its kept state gone) waits for the pass in pieces, not tried again...OK
+117/143 lane_host_robust_test.test.a restore the tier refuses for capacity is asked again shortly, then resumes exactly...OK
+118/143 lane_host_robust_test.test.a full tier refuses before any room is made: the request asks again, the refusal counted once...OK
+119/143 lane_host_robust_test.test.a restore still refused past its deferral bound resumes the shorter memory state, never a prefill from 0...OK
+120/143 lane_host_robust_test.test.with the deferral off a refused restore resumes what memory holds at once...OK
+121/143 lane_host_robust_test.test.a restore the pool has no room for while a stream decodes waits as a prompt pass does, then resumes its point exactly...OK
+122/143 lane_host_robust_test.test.a restore the pool has no room for while a stream decodes waits as a prompt pass does, then resumes its point exactly (prompt pass in pieces, cut-ins)...OK
+123/143 lane_host_robust_test.test.with no stream active a restore the pool has no room for resumes what memory holds at once, as before...OK
+124/143 lane_host_robust_test.test.with no stream active a restore the pool has no room for resumes what memory holds at once, as before (prompt pass in pieces, cut-ins)...OK
+125/143 lane_host_robust_test.test.a request waiting for room for its restore is cancelled from the queue; the stream that held the room goes on...OK
+126/143 lane_host_robust_test.test.a request waiting for room for its restore is cancelled from the queue; the stream that held the room goes on (prompt pass in pieces, cut-ins)...OK
+127/143 lane_host_robust_test.test.a restore waiting for room stops at TF_SPILL_LOAD_WAIT_MS: it prefills, and the request behind it is served while the stream decodes...OK
+128/143 lane_host_robust_test.test.a restore waiting for room stops at TF_SPILL_LOAD_WAIT_MS: it prefills, and the request behind it is served while the stream decodes (prompt pass in pieces, cut-ins)...OK
+129/143 lane_host_robust_test.test.a refusal that waiting cannot cure is not deferred; a deferred request cancelled leaves every list once...OK
+130/143 lane_host_robust_test.test.shutdown with a deferred request cancels it once...OK
+131/143 lane_host_robust_test.test.a broken pair: what waits fails at once, a decoding stream drains, then one abort and one exit with the policy's status...OK
+132/143 lane_host_robust_test.test.a broken pair with room to drain lets a short stream finish normally before the exit...OK
+133/143 lane_host_robust_test.test.a round failing with a fatal error breaks the pair: every stream fails at once, no drain...OK
+134/143 lane_host_robust_test.test.a prompt pass failing with a fatal error breaks the pair; another error fails its request alone...OK
+135/143 lane_host_robust_test.test.a round blocked on the dead peer: the deadline thread aborts, the engine thread then fails its streams, one exit...OK
+136/143 lane_host_robust_test.test.without a pair policy a break is nothing and a fatal-looking error fails its request alone...OK
+137/143 lane_host_robust_test.test.a break reported after the host stopped (a tier's teardown) changes nothing and starts no deadline...OK
+138/143 lane_host_robust_test.test.a peer that hangs without erroring: the stall monitor breaks the pair, nothing after the abort is delivered...OK
+139/143 lane_host_robust_test.test.status during a hang: past the stall bound it is not healthy (stalled, then broken); no policy, no pair status...OK
+140/143 lane_host_robust_test.test.an idle host with the monitor on never breaks; it leaves with the host...OK
+141/143 lane_host_robust_test.test.a break during a clean shutdown ends the streams and lets the shutdown finish: no restart exit...OK
+142/143 lane_host_robust_test.test.a long prompt pass that keeps making progress is never a stall: each chunk restarts the clock...OK
+143/143 lane_host_robust_test.test.a break during a prompt pass stops it at its next chunk and fails it with the pair's message...OK
+All 143 tests passed.

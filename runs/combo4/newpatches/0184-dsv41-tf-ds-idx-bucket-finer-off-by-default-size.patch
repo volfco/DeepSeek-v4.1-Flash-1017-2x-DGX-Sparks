@@ -1,0 +1,91 @@
+# port-patches.sh: second-pass-int @ bcad456fbd42 over bdd92fc @ bdd92fc3b655 (commits bdd92fc3b655..bcad456fbd42)
+# dsv41: TF_DS_IDX_BUCKET_FINER (off by default) sizes a round's indexer work to the context (a multiple of 1024 keys) instead of the next power of two
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 9034a6f03362919ec70ecccee252480dbf826184..65fd88a11c3a0317df3df87bc1a1f5f9165cc062 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -86,6 +86,13 @@
+ //!                                               is in flight; the same all-gather on the same ranks, so bits identical
+ //!                                               (set alike on both ranks; no frame, no bytes, no fingerprint bit). A lone
+ //!                                               rank or the four-node 2D split keeps the main stream. Off: nothing changes
++//!   TF_DS_IDX_BUCKET_FINER=1                   the round's context bucket is the deepest row's position rounded up to a
++//!                                               multiple of 1024, not to the next power of two (70K positions: 70656 keys
++//!                                               instead of 131072), so the indexer's scoring and select size to the context;
++//!                                               a bucket that is not a power of two takes the non-fused select (topk_i64 +
++//!                                               _topk_finish, the same keys in the same order) instead of the fused
++//!                                               _topk_sel, and the graph cache keys on the bucket either way; bits
++//!                                               identical, both ranks by convention; off: the served powers of two
+ //!   TF_DS_TOPK_FAST=1                          the indexer's top-k (tf_ds_topk_indices_kernel) runs as
+ //!                                               tf_ds_topk_indices_fast_kernel: a systematic sample of the row (every
+ //!                                               n/4096-th key) estimates the k-th largest, one pass compacts the keys at
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index a6d95abb76010b9dbb14efd6d22329c5143fc68f..9539089f54738b527bd10166b4babfa3936fba09 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -55,6 +55,20 @@ pub fn bucketFor(n: usize, cap: usize) usize {
+     return @min(b, @max(cap, bucket_min));
+ }
+ 
++/// TF_DS_IDX_BUCKET_FINER: the round's bucket, rounded up to a multiple of `gran` instead of to the next power of two,
++/// so the indexer's work sizes to the context (70K positions are 69 blocks of 1024, not 131072 keys).
++pub const bucket_finer_env = "TF_DS_IDX_BUCKET_FINER";
++/// Finer buckets' granularity: bucket_min (1024 keys), which keeps the bucket a whole number of the indexer's 64-key
++/// tiles and of the candidate pool's blocks (indexKeys, candFast, blockMax) at every ratio.
++pub const bucket_gran = bucket_min;
++
++/// TF_DS_IDX_BUCKET_FINER's bucket: `n` rounded up to a multiple of `gran` (at least bucket_min), never past bucketFor's
++/// own bucket - every buffer is sized for that one, and the finer bucket is always at or under it.
++pub fn bucketFiner(n: usize, cap: usize, gran: usize) usize {
++    const b = std.mem.alignForward(usize, @max(n, bucket_min), gran);
++    return @min(b, bucketFor(n, cap));
++}
++
+ /// The points a round exchanges or ends with, in the order the served build's recorder sees them (a checker's hook).
+ pub const Point = enum { engram_proj, engram_gather, attn_in, attn_out, attn_gather, moe_in, moe_out, moe_gather, head_cols, head_gather, logits, taps };
+ 
+@@ -190,6 +204,7 @@ pub const ExpertBytes = struct {
+ pub const Round = struct {
+     r: usize = 0,
+     bucket: usize = 0,
++    finer: bool = false, // TF_DS_IDX_BUCKET_FINER: bucketFiner's bucket instead of the next power of two
+     glue: u64, // int64 [glue_n, max_rows]
+     // RoundDecoder.inputs: one int64 [5, R] buffer (ids, positions, slots, the extent's base and end), so a round's
+     // positions sit R * 8 bytes in: the alignment its kernels were specialized for (16-byte at even R only)
+@@ -366,6 +381,7 @@ pub const Round = struct {
+         rd.cur_ratio = 0;
+         rd.clk = 0;
+         rd.bucket = 0;
++        rd.finer = ops_mod.onValue(if (std.c.getenv(bucket_finer_env)) |v| std.mem.span(v) else null);
+         rd.has_cand = false;
+         rd.kk = 0;
+         rd.sglue = 0;
+@@ -1757,7 +1773,8 @@ pub fn forward(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches
+     defer tri.decode_rows = bound;
+     var deepest: usize = 0;
+     for (rows.pos) |p| deepest = @max(deepest, @as(usize, @intCast(p)) + 1);
+-    rd.bucket = bucketFor(deepest, pool_cap);
++    // TF_DS_IDX_BUCKET_FINER: the context's own size rounded up, not its next power of two (see the switch's note)
++    rd.bucket = if (rd.finer) bucketFiner(deepest, pool_cap, bucket_gran) else bucketFor(deepest, pool_cap);
+     rd.has_cand = false;
+     rd.has_cblk = false;
+     rd.kk = 0;
+@@ -2115,6 +2132,18 @@ test "context buckets as graph.py makes them" {
+     try std.testing.expectEqual(@as(usize, 4096), bucketFor(2230, 1 << 20));
+     try std.testing.expectEqual(@as(usize, 4096), bucketFor(4096, 1 << 20));
+     try std.testing.expectEqual(@as(usize, 8192), bucketFor(4097, 1 << 20));
++    // TF_DS_IDX_BUCKET_FINER: multiples of 1024, never over the power of two, never under the context
++    try std.testing.expectEqual(@as(usize, 1024), bucketFiner(1, 1 << 20, bucket_gran));
++    try std.testing.expectEqual(@as(usize, 1024), bucketFiner(1024, 1 << 20, bucket_gran));
++    try std.testing.expectEqual(@as(usize, 2048), bucketFiner(1025, 1 << 20, bucket_gran));
++    try std.testing.expectEqual(@as(usize, 3072), bucketFiner(2230, 1 << 20, bucket_gran));
++    try std.testing.expectEqual(@as(usize, 70656), bucketFiner(70000, 1 << 20, bucket_gran)); // against 131072
++    try std.testing.expectEqual(@as(usize, 4096), bucketFiner(4096, 1 << 20, bucket_gran));
++    try std.testing.expectEqual(@as(usize, 1024), bucketFiner(2230, 672, bucket_gran)); // the cap (floored at bucket_min) is the ceiling
++    for ([_]usize{ 1, 1023, 1024, 4097, 65537, 70000, 1 << 18 }) |n| {
++        const f = bucketFiner(n, 1 << 20, bucket_gran);
++        try std.testing.expect(f % bucket_gran == 0 and f >= @min(n, 1 << 20) and f <= bucketFor(n, 1 << 20));
++    }
+     try std.testing.expectEqual(@as(usize, 4096), bucketFor(5000, 4096));
+ }
+ 

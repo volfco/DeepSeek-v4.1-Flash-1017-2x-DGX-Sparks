@@ -1,0 +1,221 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits c71526c2a1f5..acbcf7caafeb)
+# tokenizer: TF_DS_TOKEN_ALIGN_MB (off by default) keeps each reply's generated spelling and gives it back to a resent prompt - re-tokenising a reply's text need not reproduce the ids it was generated with (docs/baseten-ultrafast-plan.md, second pass, section 5.6)
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/core/tokenizer/tokenizer.zig b/zig/src/core/tokenizer/tokenizer.zig
+index 2f90b853c4122fd7a8b86f5153f62b3f92c5db86..d9f611cc4e11af79206ac11f8d808ed83119a414 100644
+--- a/zig/src/core/tokenizer/tokenizer.zig
++++ b/zig/src/core/tokenizer/tokenizer.zig
+@@ -202,8 +202,9 @@ pub const Tokenizer = struct {
+     }
+ 
+     /// How encode works: where its scratch comes from, whether pre-tokenization walks depth first (tests compare the
+-    /// two walks and count the scratch), and the piece cache to consult (null: none).
+-    pub const EncodeOptions = struct { scratch: Allocator = std.heap.page_allocator, depth_first: bool = true, cache: ?*PieceCache = null };
++    /// two walks and count the scratch), the piece cache to consult (null: none), and a recorded generated spelling
++    /// cache that wins over the re-encode (0176, TF_DS_TOKEN_ALIGN_MB; null: none).
++    pub const EncodeOptions = struct { scratch: Allocator = std.heap.page_allocator, depth_first: bool = true, cache: ?*PieceCache = null, generated: ?*PieceCache = null };
+ 
+     pub fn encodeWith(t: *const Tokenizer, a: Allocator, text: []const u8, o: EncodeOptions) Error![]u32 {
+         var arena = std.heap.ArenaAllocator.init(o.scratch);
+@@ -231,6 +232,13 @@ pub const Tokenizer = struct {
+             // over, and pre-tokenization walks one piece at a time (Walk). So the text's first piece is the only
+             // context-dependent one; every other piece is cached on the bytes it is given, marks included.
+             const cacheable = o.cache != null and seg.start > 0;
++            // 0176 (TF_DS_TOKEN_ALIGN_MB): a recorded generated spelling wins over the re-encode for a piece after
++            // an added token (opt-in LOSSY: the ids are the ones the model emitted, which re-tokenising their text
++            // need not reproduce). The keys carry maskAdded's marks, as a resent prompt's piece does (0028).
++            if (seg.start > 0) if (o.generated) |g| if (try g.get(ctx.a, piece)) |hit| {
++                try ids.appendSlice(ctx.a, hit);
++                continue;
++            };
+             if (cacheable) if (try o.cache.?.get(ctx.a, piece)) |hit| {
+                 try ids.appendSlice(ctx.a, hit);
+                 continue;
+@@ -300,6 +308,22 @@ pub const Tokenizer = struct {
+         return out.items;
+     }
+ 
++    /// 0176 (TF_DS_TOKEN_ALIGN_MB): a reply's generated spelling into `cache`, for its next appearance in a resent
++    /// prompt: `ids` decoded (their own spellings) and maskAdded's marks written into the key, as a resent piece
++    /// carries them (0028). One entry - a reply's block is one plain piece between the template's added tokens; a
++    /// block that does not come back byte for byte simply misses. The ids are stored whole: the spliced spelling is
++    /// the model's own, which re-tokenising its text need not reproduce (LOSSY, opt-in). Scratch is the page
++    /// allocator's (decode's own rule); a failure drops the record, never the reply.
++    pub fn recordGenerated(t: *const Tokenizer, cache: *PieceCache, ids: []const u32) void {
++        if (ids.len == 0) return;
++        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
++        defer arena.deinit();
++        const a = arena.allocator();
++        const raw = t.decode(a, ids, false) catch return;
++        const marked = t.maskAdded(a, raw) catch return;
++        cache.put(marked orelse raw, ids);
++    }
++
+     /// Text for `ids` through the decoder chain; unknown ids are skipped. Caller frees with `a`.
+     pub fn decode(t: *const Tokenizer, a: Allocator, ids: []const u32, skip_special_tokens: bool) Error![]u8 {
+         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator); // (scratch never kept in `a`: see encode)
+@@ -735,6 +759,49 @@ test "a text's first piece is not cached; a piece after an added token is" {
+     try std.testing.expect(cache.used > 0);
+ }
+ 
++test "TF_DS_TOKEN_ALIGN_MB: a recorded generated spelling wins over the re-encode" {
++    const gpa = std.testing.allocator;
++    var t = try deepseekLike(gpa, &test_words);
++    defer t.deinit();
++    var g = PieceCache.init(std.testing.io, gpa, 1 << 20);
++    defer g.deinit();
++    const generated = try t.encode(gpa, "a long prompt of many tokens");
++    defer gpa.free(generated);
++    t.recordGenerated(&g, generated);
++    // a resent prompt: the piece after the added token carries the reply's bytes and takes the recorded ids
++    const resent = try t.encodeWith(gpa, "<｜User｜>a long prompt of many tokens", .{ .generated = &g });
++    defer gpa.free(resent);
++    try std.testing.expect(g.hits > 0);
++    try std.testing.expectEqualSlices(u32, generated, resent[1..]); // the added token's id, then the record
++    // text that carries none of it encodes as before
++    const other = try t.encodeWith(gpa, "<｜User｜>a short prompt", .{ .generated = &g });
++    defer gpa.free(other);
++    const cold = try t.encode(gpa, "<｜User｜>a short prompt");
++    defer gpa.free(cold);
++    try std.testing.expectEqualSlices(u32, cold, other);
++}
++
++test "a recorded spelling's key carries the plain mark, as a resent prompt's piece does" {
++    const gpa = std.testing.allocator;
++    var t = try deepseekLike(gpa, &test_words);
++    defer t.deinit();
++    var g = PieceCache.init(std.testing.io, gpa, 1 << 20);
++    defer g.deinit();
++    // the model emitted the added token's spelling mid-reply; the record's key is maskAdded's, and the resent
++    // piece carries the same marks (0028 masks a client's text before the render)
++    const generated = try t.encode(gpa, "say<｜User｜>now");
++    defer gpa.free(generated);
++    t.recordGenerated(&g, generated);
++    const marked = (try t.maskAdded(gpa, "say<｜User｜>now")).?;
++    defer gpa.free(marked);
++    const whole = try std.mem.concat(gpa, u8, &.{ "<｜User｜>", marked });
++    defer gpa.free(whole);
++    const resent = try t.encodeWith(gpa, whole, .{ .generated = &g });
++    defer gpa.free(resent);
++    try std.testing.expect(g.hits > 0);
++    try std.testing.expectEqualSlices(u32, generated, resent[1..]);
++}
++
+ test "eviction holds the bound and cached results stay the plain ones" {
+     const gpa = std.testing.allocator;
+     var t = try deepseekLike(gpa, &test_words);
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index 038616c1be69d28c42cc86be24add7d3c9422796..9d52adc78eb0306cfd1f3310a8e7fef1bb2373e0 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -622,6 +622,8 @@ const Generation = struct {
+         const a = g.a;
+         const m = g.box;
+         if (!g.engine_done) g.drain();
++        // 0176: the reply's own spelling recorded for its next appearance (TF_DS_TOKEN_ALIGN_MB; off: a no-op)
++        g.srv.text.recordGenerated(g.collected.items);
+         const reason: []const u8 = g.reason orelse switch (m.reason) {
+             .stop => "stop",
+             .length => "length",
+diff --git a/zig/src/server/hf_text.zig b/zig/src/server/hf_text.zig
+index 2409fc2c93ad580b3c6a89afb03a8079678c6be8..1c7e0af4a24309124a33077afc2766d47f6864ab 100644
+--- a/zig/src/server/hf_text.zig
++++ b/zig/src/server/hf_text.zig
+@@ -22,6 +22,8 @@ pub const HfText = struct {
+     /// TENSORFOLD_TOKEN_CACHE_MB: the encode's piece cache (null: off, the encoder as before). This struct is rank 0's
+     /// server only, so the switch is read here and nowhere else.
+     cache: ?*tokenizer.PieceCache = null,
++    /// TF_DS_TOKEN_ALIGN_MB (0176): recorded generated spellings, which win over the re-encode (null: off).
++    generated: ?*tokenizer.PieceCache = null,
+ 
+     /// Loads ``dir``'s tokenizer.json, chat template, special tokens and end-of-sequence ids; a failure's reason in `problem` (from `pa`).
+     pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, pa: Allocator, problem: *[]const u8) !*HfText {
+@@ -53,6 +55,11 @@ pub const HfText = struct {
+             c.* = tokenizer.PieceCache.init(io, gpa, mb <<| 20);
+             t.cache = c;
+         }
++        if (tokenizer.cacheMb(if (std.c.getenv("TF_DS_TOKEN_ALIGN_MB")) |p| std.mem.span(p) else null)) |mb| {
++            const c = try gpa.create(tokenizer.PieceCache);
++            c.* = tokenizer.PieceCache.init(io, gpa, mb <<| 20);
++            t.generated = c;
++        }
+         return t;
+     }
+ 
+@@ -61,6 +68,10 @@ pub const HfText = struct {
+             c.deinit();
+             t.gpa.destroy(c);
+         }
++        if (t.generated) |c| {
++            c.deinit();
++            t.gpa.destroy(c);
++        }
+         if (t.compiled) |*c| c.deinit();
+         if (t.tool_compiled) |*c| c.deinit();
+         t.tok.deinit();
+@@ -214,6 +225,7 @@ pub const HfText = struct {
+             .template_source = sourceFn,
+             .special = specialFn,
+             .mask = maskFn,
++            .record_generated = recordGeneratedFn,
+         } };
+     }
+ 
+@@ -221,6 +233,16 @@ pub const HfText = struct {
+         return self(ctx).tok.maskAdded(a, s);
+     }
+ 
++    /// 0176: the reply's own tokens recorded for their next appearance (TF_DS_TOKEN_ALIGN_MB; off: a no-op), up to
++    /// the first eos - the resent content carries none.
++    fn recordGeneratedFn(ctx: *anyopaque, ids: []const u32) void {
++        const t = self(ctx);
++        const g = t.generated orelse return;
++        var n: usize = 0;
++        while (n < ids.len and std.mem.indexOfScalar(u32, t.eos, ids[n]) == null) : (n += 1) {}
++        t.tok.recordGenerated(g, ids[0..n]);
++    }
++
+     fn specialFn(ctx: *anyopaque, id: u32) bool {
+         const t = self(ctx);
+         const piece = t.tok.id_to_token.get(id) orelse return false;
+@@ -233,7 +255,7 @@ pub const HfText = struct {
+ 
+     fn encodeFn(ctx: *anyopaque, a: Allocator, s: []const u8, add_special: bool) model_text.Error![]u32 {
+         const t = self(ctx);
+-        const encoded = if (t.cache) |c| t.tok.encodeWith(a, s, .{ .cache = c }) else t.tok.encode(a, s);
++        const encoded = if (t.cache != null or t.generated != null) t.tok.encodeWith(a, s, .{ .cache = t.cache, .generated = t.generated }) else t.tok.encode(a, s);
+         const ids = encoded catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
+         if (!add_special or (t.prefix.len == 0 and t.suffix.len == 0)) return ids;
+         return std.mem.concat(a, u32, &.{ t.prefix, ids, t.suffix });
+diff --git a/zig/src/server/model_text.zig b/zig/src/server/model_text.zig
+index dc8ae7bbcbc83ce99f4568072cc9d383ac935c33..8c7d51efc709194d3979c051ff2564da3ffd13bc 100644
+--- a/zig/src/server/model_text.zig
++++ b/zig/src/server/model_text.zig
+@@ -40,6 +40,8 @@ pub const Text = struct {
+         special: ?*const fn (ctx: *anyopaque, id: u32) bool = null,
+         /// A client's text with every added token written in it made plain (null: none in it, or no such tokenizer).
+         mask: ?*const fn (ctx: *anyopaque, a: Allocator, s: []const u8) Allocator.Error!?[]u8 = null,
++        /// 0176 (TF_DS_TOKEN_ALIGN_MB): a reply's generated ids recorded for their next appearance (null: none).
++        record_generated: ?*const fn (ctx: *anyopaque, ids: []const u32) void = null,
+     };
+ 
+     pub fn encode(t: Text, a: Allocator, text: []const u8, add_special: bool) Error![]u32 {
+@@ -83,6 +85,12 @@ pub const Text = struct {
+         return f(t.ctx, a, s);
+     }
+ 
++    /// 0176 (TF_DS_TOKEN_ALIGN_MB): record a reply's generated spelling, so a resent prompt's piece carrying it byte
++    /// for byte takes these ids instead of a re-tokenisation (opt-in LOSSY).
++    pub fn recordGenerated(t: Text, ids: []const u32) void {
++        if (t.vtable.record_generated) |f| f(t.ctx, ids);
++    }
++
+     pub fn templateSource(t: Text) []const u8 {
+         return t.vtable.template_source(t.ctx);
+     }
+@@ -91,5 +99,4 @@ pub const Text = struct {
+         const f = t.vtable.special orelse return false;
+         return f(t.ctx, id);
+     }
+-
+ };

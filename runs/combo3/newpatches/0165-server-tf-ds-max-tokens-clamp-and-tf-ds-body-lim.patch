@@ -1,0 +1,130 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits 4da089585bd0..c71526c2a1f5)
+# server: TF_DS_MAX_TOKENS_CLAMP and TF_DS_BODY_LIMIT_MB (both off / at the default) - clamp an explicit max_tokens past the room like the implicit one, and size the body limit (docs/baseten-ultrafast-plan.md, second pass, section 5.5)
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index cd162518cca7832e9079eb163e4696077c403171..5ac44b4e9813c42107b8a90554a9f62993814d72 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -29,6 +29,9 @@
+ //!   TF_DS_PROMPT_CACHE_AUTO=1                     the kept prompt states' budget is what 70% of RAM leaves past the loaded
+ //!                                               server (native/cuda.zig cache_fit), read after the weights land, at least
+ //!                                               0.5 GiB (0170; unset: 0.5 GiB; --prompt-cache-gib still overrides)
++//!   TF_DS_MAX_TOKENS_CLAMP=1                      an explicit max_tokens past the context room is clamped like the implicit
++//!                                               default instead of refused (0171; unset: the OpenAI-worded refusal)
++//!   TF_DS_BODY_LIMIT_MB=<MiB>                    the request body limit (0171; unset, 0 or invalid: 32 MiB; 64 matches Baseten)
+ //!   TF_DS_ROUND_ROWS, TF_DS_STREAMS             a round's rows at most (16; the four-node lane's 48) and the pool's
+ //!                                               streams (4; its 16): --parallel at most the streams
+ //!   TF_DS_PROMPT_WINDOW_ROWS=<rows>             a prompt chunk under these rows (64 .. 128; 64 unset) takes the MoE decode window
+diff --git a/zig/src/server/anthropic.zig b/zig/src/server/anthropic.zig
+index 6fc62239f2a5333c8056eac564a26e8c9cfedfbd..ca1006fbc3070b93b01d6aea11694ed6af96f2af 100644
+--- a/zig/src/server/anthropic.zig
++++ b/zig/src/server/anthropic.zig
+@@ -64,7 +64,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
+     const count = std.mem.endsWith(u8, auth.routePath(conn.path), "/count_tokens");
+     var cx: Cx = .{ .a = a };
+     const prepared = blk: {
+-        const raw = switch (http_body.read(conn, a, http_body.limit) catch return) {
++        const raw = switch (http_body.read(conn, a, http_body.limit()) catch return) {
+             .ok => |b| b,
+             .refused => |m| return sendError(conn, a, m, 400),
+         };
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index 88f295ce22f72c26b4498ba9bfcfb818dbc23be5..038616c1be69d28c42cc86be24add7d3c9422796 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -196,7 +196,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+     if (window > 0) {
+         const room = window - n;
+         if (room < 1) return cx.fail(.context_length, "{s} {d} tokens{s}, but the rendered prompt has {d} tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.", .{ errors.context_limit, window, if (srv.info.context_fitted) ", the most this server's memory budget fits" else "", n });
+-        if (input.max_tokens != null and limit > room) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and requests {d} reply tokens, which exceeds the context window. Reduce the prompt to at most {d} prompt tokens or request at most {d} reply tokens, including chat template and thinking tokens.", .{ errors.context_limit, window, n, limit, @max(0, window - limit), room });
++        // TF_DS_MAX_TOKENS_CLAMP (0171): an explicit max_tokens past the room is clamped like the default one below,
++        // not refused (Baseten clamps, server/src/api.rs:310-316); unset: the OpenAI-worded refusal, as always
++        if (!maxTokensClampOn() and input.max_tokens != null and limit > room) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and requests {d} reply tokens, which exceeds the context window. Reduce the prompt to at most {d} prompt tokens or request at most {d} reply tokens, including chat template and thinking tokens.", .{ errors.context_limit, window, n, limit, @max(0, window - limit), room });
+         limit = @min(limit, room);
+     }
+     const system_len: usize = if (input.prompt != null) 0 else prompt_mod.systemPrefixLen(srv, cx, input.messages, input.tools, rendered.ids, thinking, effort);
+@@ -298,6 +300,13 @@ fn scanSuffixOn() bool {
+     return std.mem.eql(u8, std.mem.span(v), "1") or std.mem.eql(u8, std.mem.span(v), "on");
+ }
+ 
++/// TF_DS_MAX_TOKENS_CLAMP ("1" or "on"; unset or anything else: off) - an explicit max_tokens past the context
++/// room is clamped like the implicit default, not refused (0171).
++fn maxTokensClampOn() bool {
++    const v = std.c.getenv("TF_DS_MAX_TOKENS_CLAMP") orelse return false;
++    return std.mem.eql(u8, std.mem.span(v), "1") or std.mem.eql(u8, std.mem.span(v), "on");
++}
++
+ /// The ``ended`` line of a submitted reply that ends without one: its client left, or it failed.
+ fn logEnded(id: []const u8, e: Failure, message: []const u8, prompt: usize, tokens: usize, after: f64) void {
+     const why: ?[]const u8 = switch (e) {
+diff --git a/zig/src/server/http_body.zig b/zig/src/server/http_body.zig
+index ad2951ebcca7997a540a5a475be1c0626f25a56e..ae680162782822a37a1a7c0aa0cec932988bcc53 100644
+--- a/zig/src/server/http_body.zig
++++ b/zig/src/server/http_body.zig
+@@ -5,7 +5,19 @@ const errors = @import("errors.zig");
+ const Conn = @import("http_conn.zig").Conn;
+ const Allocator = std.mem.Allocator;
+ 
+-pub const limit = 32 * 1024 * 1024;
++pub fn limit() usize {
++    return limitOf(std.c.getenv("TF_DS_BODY_LIMIT_MB"));
++}
++
++/// The body limit: ``TF_DS_BODY_LIMIT_MB`` (a positive MiB count; unset, non-numeric or 0: the served 32) - 64 MiB
++/// matches Baseten (docs/baseten-ultrafast-plan.md, second pass, section 5.5). Saturating at usize's top.
++pub fn limitOf(mb: ?[:0]const u8) usize {
++    const base = 32 * 1024 * 1024;
++    const v = mb orelse return base;
++    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return base;
++    return if (n >= 1) n *| (1024 * 1024) else base;
++}
++
+ const metadata_limit = 65536;
+ 
+ /// A body, or the refusal a RequestError carries (the connection then closes).
+@@ -138,7 +150,7 @@ fn trailerName(line: []const u8) bool {
+ 
+ /// The body as JSON (an empty body reads as ``{}``): a framing refusal, or the decoder's message as another exception.
+ pub fn readJson(conn: *Conn, cx: *errors.Cx) errors.Refused!json.Value {
+-    const raw = switch (try read(conn, cx.a, limit)) {
++    const raw = switch (try read(conn, cx.a, limit())) {
+         .ok => |b| b,
+         .refused => |message| return cx.refuse(message),
+     };
+@@ -147,3 +159,10 @@ pub fn readJson(conn: *Conn, cx: *errors.Cx) errors.Refused!json.Value {
+         .err => |message| cx.other(message),
+     };
+ }
++
++test "TF_DS_BODY_LIMIT_MB: a positive MiB count, the served 32 otherwise" {
++    try std.testing.expectEqual(@as(usize, 32 * 1024 * 1024), limitOf(null));
++    try std.testing.expectEqual(@as(usize, 64 * 1024 * 1024), limitOf("64"));
++    for ([_]?[:0]const u8{ "0", "-1", "x", "", "4.5" }) |bad| try std.testing.expectEqual(@as(usize, 32 * 1024 * 1024), limitOf(bad));
++    try std.testing.expectEqual(@as(usize, std.math.maxInt(usize)), limitOf("99999999999999999")); // saturating
++}
+diff --git a/zig/src/server/responses.zig b/zig/src/server/responses.zig
+index 6e6fc8ec2ecd42ea1bb7cf5cd2d0f5ea661ace0c..a6705a2bf7786397806bdccbf1e22930d30bf044 100644
+--- a/zig/src/server/responses.zig
++++ b/zig/src/server/responses.zig
+@@ -162,7 +162,7 @@ pub fn delete(srv: *Server, conn: *Conn, a: Allocator, rid: ?[]const u8) void {
+ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
+     var cx: Cx = .{ .a = a };
+     const request = blk: {
+-        const raw = switch (http_body.read(conn, a, http_body.limit) catch return) {
++        const raw = switch (http_body.read(conn, a, http_body.limit()) catch return) {
+             .ok => |b| b,
+             .refused => |m| return refuse(conn, a, m, 400, null),
+         };
+diff --git a/zig/src/server/routes.zig b/zig/src/server/routes.zig
+index 276fd5f336563ed798fa0d6fe6f7b43cc8b40ed1..8ba7942f49e8a7ed9c6327345ec8d396d1f60879 100644
+--- a/zig/src/server/routes.zig
++++ b/zig/src/server/routes.zig
+@@ -55,7 +55,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
+ 
+ /// A refused route's body is read and dropped, so it cannot reach the next request on this connection.
+ fn discardBody(conn: *Conn, a: Allocator) void {
+-    _ = http_body.read(conn, a, http_body.limit) catch {};
++    _ = http_body.read(conn, a, http_body.limit()) catch {};
+ }
+ 
+ fn post(srv: *Server, conn: *Conn, a: Allocator) void {

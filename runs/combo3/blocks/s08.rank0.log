@@ -1,0 +1,436 @@
+2026-11-17T01:32:58.464029466Z 
+2026-11-17T01:32:58.464063626Z =============
+2026-11-17T01:32:58.464065306Z == PyTorch ==
+2026-11-17T01:32:58.464117946Z =============
+2026-11-17T01:32:58.469416122Z 
+2026-11-17T01:32:58.469434282Z NVIDIA Release 26.07 (build 373437299)
+2026-11-17T01:32:58.469435722Z PyTorch Version 2.13.0a0+9186a08
+2026-11-17T01:32:58.470631086Z Container image Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+2026-11-17T01:32:58.472065282Z Copyright (c) 2014-2024 Facebook Inc.
+2026-11-17T01:32:58.472083682Z Copyright (c) 2011-2014 Idiap Research Institute (Ronan Collobert)
+2026-11-17T01:32:58.472085186Z Copyright (c) 2012-2014 Deepmind Technologies    (Koray Kavukcuoglu)
+2026-11-17T01:32:58.472086402Z Copyright (c) 2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+2026-11-17T01:32:58.472087554Z Copyright (c) 2011-2013 NYU                      (Clement Farabet)
+2026-11-17T01:32:58.472088642Z Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+2026-11-17T01:32:58.472089826Z Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
+2026-11-17T01:32:58.472091026Z Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+2026-11-17T01:32:58.472092178Z Copyright (c) 2015      Google Inc.
+2026-11-17T01:32:58.472093266Z Copyright (c) 2015      Yangqing Jia
+2026-11-17T01:32:58.472094274Z Copyright (c) 2013-2016 The Caffe contributors
+2026-11-17T01:32:58.472095954Z All rights reserved.
+2026-11-17T01:32:58.473163781Z 
+2026-11-17T01:32:58.473179733Z Various files include modifications (c) NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+2026-11-17T01:32:58.473181541Z 
+2026-11-17T01:32:58.473182725Z GOVERNING TERMS: The software and materials are governed by the NVIDIA Software License Agreement
+2026-11-17T01:32:58.473183861Z (found at https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
+2026-11-17T01:32:58.473187157Z and the Product-Specific Terms for NVIDIA AI Products
+2026-11-17T01:32:58.473188213Z (found at https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+2026-11-17T01:32:58.650751452Z 
+2026-11-17T01:32:58.650782924Z NOTE: CUDA Forward Compatibility mode ENABLED.
+2026-11-17T01:32:58.650785612Z   Using CUDA 13.3 driver version 610.43.02 with kernel driver version 580.159.03.
+2026-11-17T01:32:58.650787676Z   See https://docs.nvidia.com/deploy/cuda-compatibility/ for details.
+2026-11-17T01:32:58.662196127Z 
+2026-11-17T01:34:33.352530390Z info: rank cache: 95.1 GiB of expert entries read whole in 86.1 s
+2026-11-17T01:34:35.131118675Z RDMA rank 0 peer 1 rail 0: gid_index=3 path_mtu=5
+2026-11-17T01:34:35.132486167Z RDMA rank 0 peer 1 rail 1: gid_index=3 path_mtu=5
+2026-11-17T01:34:36.456160986Z info: engram-lead: on (rank 0): each Engram layer's prompt rows read a chunk ahead
+2026-11-17T01:34:36.463880241Z info: dsv41: pool 2101248 positions, fetch 1050624 a part; a conversation may use up to 1048576 tokens; compressed planes 1062 MiB a rank (1783 MiB replicated); arena 4540 MiB used
+2026-11-17T01:34:36.914208382Z info: dsv41 spill: rank 0's store under /spill (180.0 GiB, staging 128 MiB); the ranks agreed
+2026-11-17T01:34:38.196617620Z {"vision": "Pillow 12.3.0 decodes the formats other than PNG"}
+2026-11-17T01:34:38.197514711Z info: dsv41: a broken rank pair ends this server with status 75 for a restart of both ranks (TF_DS_PAIR_BROKEN=degrade: requests fail one by one instead)
+2026-11-17T01:34:38.198359641Z [tensorfold] warning: non-loopback server has no API key; requests are open
+2026-11-17T01:34:38.198592490Z [tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 105.21 GiB; 8 streams at once, 0.00 GiB each at a 1048576-token window, of 0.0 GiB left after a 12.2 GiB reserve; prompts in 2048-row chunks
+2026-11-17T01:34:38.198602954Z [tensorfold] serving DeepSeek-V4.1-Flash-1017 at http://0.0.0.0:8000/v1 (sampling: temperature 1.0, top_p 0.95, top_k 20; drafts: on; context: 1048576; loaded in 99.5s)
+2026-11-17T01:34:38.198604522Z [tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {"enable_thinking": false}
+2026-11-17T01:34:40.188754212Z [tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+2026-11-17T01:34:40.236730661Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:34:40.572339927Z info: prompt cache: 8 tokens, resumed at 0, kept 1; 1 states, 6 MiB and 0 MiB spare of 512 MiB (hits 0, misses 1, evicted 0, refused 0, failed 0)
+2026-11-17T01:34:40.642695067Z [tensorfold] done chatcmpl-42a4338ec0e5f446b4903cddb91d6201 prompt=8 cached=0 thinking=False effort=none tokens=2 sha=207398c96af1 finish=stop rounds=1 accepted=1/5 prefill_s=0.376 ttft_s=0.377 decode_s=0.1 s_per_token=0.0698 tok_per_s=14.3 accept=20.0% tokens_per_round=2.0 render_s=0.000 encode_s=0.000 engram_host_ms=2.282 queue_s=0.000 restore_s=0.000
+2026-11-17T01:34:40.642954572Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:34:41.746274231Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:41.747198746Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:41.748265309Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:41.862518325Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:34:46.696648837Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:34:46.766449319Z info: prompt cache: 2072 tokens, resumed at 0, kept 1; 2 states, 12 MiB and 0 MiB spare of 512 MiB (hits 0, misses 2, evicted 0, refused 0, failed 0)
+2026-11-17T01:34:46.766643656Z [tensorfold] done chatcmpl-0b22e430e61a74cd32c6e20a3934f76a prompt=2072 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=4.904 ttft_s=5.013 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.107 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:34:46.767642811Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:46.768935855Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:46.769903618Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:46.803530439Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:34:48.869501333Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:54.183964187Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:34:54.489465204Z info: prompt cache: 8081 tokens, resumed at 0, kept 2; 4 states, 25 MiB and 0 MiB spare of 512 MiB (hits 0, misses 3, evicted 0, refused 0, failed 0)
+2026-11-17T01:34:54.490164806Z [tensorfold] done chatcmpl-148d8d7e60fe660e478674ac33318dda prompt=8081 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=7.682 ttft_s=7.698 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.012 engram_host_ms=0.000 queue_s=0.004 restore_s=0.000
+2026-11-17T01:34:54.490988072Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:54.492029819Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:54.492970398Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:34:54.645998859Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:35:09.716518153Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:35:10.001327395Z info: prompt cache: 32226 tokens, resumed at 0, kept 2; 6 states, 38 MiB and 0 MiB spare of 512 MiB (hits 0, misses 4, evicted 0, refused 0, failed 0)
+2026-11-17T01:35:10.001514803Z [tensorfold] done chatcmpl-c0621bb8130f18b7b17af601b2785f64 prompt=32226 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=15.355 ttft_s=15.398 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.042 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:35:10.002300950Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:35:10.003347865Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:35:10.004302076Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:35:10.321544023Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:35:18.868736966Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:35:48.868391672Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:35:59.318756043Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:35:59.322787911Z info: prompt cache: 100654 tokens, resumed at 0, kept 2; 8 states, 51 MiB and 0 MiB spare of 512 MiB (hits 0, misses 5, evicted 0, refused 0, failed 0)
+2026-11-17T01:35:59.322867639Z [tensorfold] done chatcmpl-5a9a741fde712e7ad0f454d7424b9125 prompt=100654 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=49.001 ttft_s=49.103 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.100 engram_host_ms=0.000 queue_s=0.001 restore_s=0.000
+2026-11-17T01:35:59.323702506Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:35:59.325091566Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:35:59.500980671Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:35:59.507768756Z info: prompt cache: 14 tokens, resumed at 0, kept 1; 9 states, 57 MiB and 0 MiB spare of 512 MiB (hits 0, misses 6, evicted 0, refused 0, failed 0)
+2026-11-17T01:35:59.562067303Z [tensorfold] done chatcmpl-d8570e266717be81bd2ee5a26d169012 prompt=14 cached=0 thinking=False effort=none tokens=2 sha=cc1d3cf2fa08 finish=stop rounds=1 accepted=1/5 prefill_s=0.086 ttft_s=0.087 decode_s=0.1 s_per_token=0.0539 tok_per_s=18.6 accept=20.0% tokens_per_round=2.0 render_s=0.000 encode_s=0.000 engram_host_ms=11.891 queue_s=0.000 restore_s=0.000
+2026-11-17T01:35:59.562077255Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:35:59.734003405Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:35:59.738086250Z info: prompt cache: 43 tokens, resumed at 0, kept 1; 10 states, 63 MiB and 0 MiB spare of 512 MiB (hits 0, misses 7, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:00.037954641Z [tensorfold] done chatcmpl-d06bc070762fac81697cc8b24cdde8ab prompt=43 cached=0 thinking=True effort=none tokens=19 sha=ed320debc48f finish=stop rounds=6 accepted=13/27 prefill_s=0.174 ttft_s=0.175 decode_s=0.3 s_per_token=0.0165 tok_per_s=60.5 accept=48.1% tokens_per_round=3.2 render_s=0.000 encode_s=0.000 engram_host_ms=53.948 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:00.037973841Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:00.470601000Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:00.475320966Z info: prompt cache: 274 tokens, resumed at 0, kept 1; 11 states, 70 MiB and 0 MiB spare of 512 MiB (hits 0, misses 8, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:00.864196761Z [tensorfold] done chatcmpl-97a12665b519dfd52b505ca9a877df76 prompt=274 cached=0 thinking=False effort=none tokens=48 sha=b2494a5c444c finish=stop rounds=9 accepted=39/44 prefill_s=0.435 ttft_s=0.437 decode_s=0.4 s_per_token=0.0082 tok_per_s=122.1 accept=88.6% tokens_per_round=5.3 render_s=0.000 encode_s=0.000 engram_host_ms=10.624 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:00.864222873Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:01.324752436Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:01.328668016Z info: prompt cache: 337 tokens, resumed at 0, kept 1; 12 states, 76 MiB and 0 MiB spare of 512 MiB (hits 0, misses 9, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:01.539045482Z [tensorfold] done chatcmpl-e0e4e90f53b1ea37b7f112fd05edf457 prompt=337 cached=0 thinking=False effort=none tokens=17 sha=6f8d85bb2638 finish=stop rounds=5 accepted=12/21 prefill_s=0.461 ttft_s=0.463 decode_s=0.2 s_per_token=0.0131 tok_per_s=76.2 accept=57.1% tokens_per_round=3.4 render_s=0.001 encode_s=0.001 engram_host_ms=3.815 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:01.539079034Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:02.287382872Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:02.291513428Z info: prompt cache: 201 tokens, resumed at 0, kept 1; 13 states, 82 MiB and 0 MiB spare of 512 MiB (hits 0, misses 10, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:02.332210143Z [tensorfold] done chatcmpl-662fbf201cab35029db98d0a460249a0 prompt=201 cached=0 thinking=False effort=none tokens=3 sha=332759de4129 finish=stop rounds=1 accepted=2/4 prefill_s=0.745 ttft_s=0.751 decode_s=0.0 s_per_token=0.0200 tok_per_s=50.0 accept=50.0% tokens_per_round=3.0 render_s=0.000 encode_s=0.001 engram_host_ms=0.867 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:02.332230815Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:02.389577483Z info: prompt cache: restored 20480 tokens from disk
+2026-11-17T01:36:03.367947502Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:03.375324612Z info: prompt cache: 21875 tokens, resumed at 20480, kept 1; 15 states, 95 MiB and 0 MiB spare of 512 MiB (hits 1, misses 10, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:03.424407848Z [tensorfold] done chatcmpl-0e37e3158d9e035811e41b613bc6b484 prompt=21875 cached=20480 thinking=False effort=none tokens=3 sha=37de1121a202 finish=stop rounds=1 accepted=2/5 prefill_s=0.986 ttft_s=1.042 decode_s=0.0 s_per_token=0.0244 tok_per_s=41.0 accept=40.0% tokens_per_round=3.0 render_s=0.000 encode_s=0.024 engram_host_ms=1.401 queue_s=0.032 restore_s=0.032
+2026-11-17T01:36:03.424431912Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:03.504146600Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:03.507970788Z info: prompt cache: 12 tokens, resumed at 0, kept 1; 16 states, 102 MiB and 0 MiB spare of 512 MiB (hits 1, misses 11, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:03.878391503Z [tensorfold] done chatcmpl-2c4af19c51566d67c0cc2f0c9c838940 prompt=12 cached=0 thinking=False effort=none tokens=20 sha=4aaba7a4010b finish=stop rounds=12 accepted=8/18 prefill_s=0.082 ttft_s=0.083 decode_s=0.4 s_per_token=0.0194 tok_per_s=51.6 accept=44.4% tokens_per_round=1.7 render_s=0.000 encode_s=0.000 engram_host_ms=4.041 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:03.878414224Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:03.949994727Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:03.954020147Z info: prompt cache: 11 tokens, resumed at 0, kept 1; 17 states, 108 MiB and 0 MiB spare of 512 MiB (hits 1, misses 12, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:04.190764540Z [tensorfold] done chatcmpl-c12c88163c070caf8d43489929b58ac1 prompt=11 cached=0 thinking=False effort=none tokens=36 sha=f73065ec5832 finish=stop rounds=6 accepted=29/29 prefill_s=0.074 ttft_s=0.075 decode_s=0.2 s_per_token=0.0068 tok_per_s=147.8 accept=100.0% tokens_per_round=6.0 render_s=0.000 encode_s=0.000 engram_host_ms=6.100 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:04.190788268Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:04.260706511Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:04.264617467Z info: prompt cache: 10 tokens, resumed at 0, kept 1; 18 states, 114 MiB and 0 MiB spare of 512 MiB (hits 1, misses 13, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:04.881245388Z [tensorfold] done chatcmpl-2bda6504fcce5087e2f6ecf9507d2aa7 prompt=10 cached=0 thinking=False effort=none tokens=43 sha=57308bd26b4f finish=stop rounds=18 accepted=25/40 prefill_s=0.073 ttft_s=0.073 decode_s=0.6 s_per_token=0.0146 tok_per_s=68.7 accept=62.5% tokens_per_round=2.4 render_s=0.000 encode_s=0.000 engram_host_ms=9.427 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:04.881257276Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:04.959974777Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:04.964002501Z info: prompt cache: 13 tokens, resumed at 0, kept 1; 19 states, 121 MiB and 0 MiB spare of 512 MiB (hits 1, misses 14, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:06.535521362Z [tensorfold] done chatcmpl-c94a169d6fa43ed95161de5ea95b1d73 prompt=13 cached=0 thinking=False effort=none tokens=160 sha=8d33a07eca65 finish=length rounds=39 accepted=120/155 prefill_s=0.081 ttft_s=0.082 decode_s=1.6 s_per_token=0.0098 tok_per_s=101.6 accept=77.4% tokens_per_round=4.1 render_s=0.000 encode_s=0.000 engram_host_ms=26.672 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:06.535536210Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:06.605674598Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:06.610321876Z info: prompt cache: 10 tokens, resumed at 0, kept 1; 20 states, 127 MiB and 0 MiB spare of 512 MiB (hits 1, misses 15, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:07.732330839Z [tensorfold] done chatcmpl-fd9a87f6ee2e0b34580e1344abd1aa3c prompt=10 cached=0 thinking=False effort=none tokens=109 sha=9e26f4534de9 finish=stop rounds=31 accepted=78/103 prefill_s=0.074 ttft_s=0.074 decode_s=1.1 s_per_token=0.0104 tok_per_s=96.5 accept=75.7% tokens_per_round=3.5 render_s=0.000 encode_s=0.000 engram_host_ms=16.043 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:07.732351719Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:07.811325237Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:07.815132064Z info: prompt cache: 14 tokens, resumed at 0, kept 1; 21 states, 133 MiB and 0 MiB spare of 512 MiB (hits 1, misses 16, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:08.582547208Z [tensorfold] done chatcmpl-4962795ac30775268fcc2500e0c97c97 prompt=14 cached=0 thinking=False effort=none tokens=50 sha=d91fb666475b finish=stop rounds=24 accepted=25/48 prefill_s=0.082 ttft_s=0.082 decode_s=0.8 s_per_token=0.0156 tok_per_s=64.0 accept=52.1% tokens_per_round=2.1 render_s=0.000 encode_s=0.000 engram_host_ms=7.939 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:08.582563720Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:08.667618152Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:08.671469107Z info: prompt cache: 16 tokens, resumed at 0, kept 1; 22 states, 140 MiB and 0 MiB spare of 512 MiB (hits 1, misses 17, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:08.953097972Z [tensorfold] done chatcmpl-f37741ba5c7b9b119688ba7a7f7667cd prompt=16 cached=0 thinking=False effort=none tokens=32 sha=b61fdfdf1f6f finish=stop rounds=7 accepted=25/29 prefill_s=0.088 ttft_s=0.088 decode_s=0.3 s_per_token=0.0090 tok_per_s=111.0 accept=86.2% tokens_per_round=4.6 render_s=0.000 encode_s=0.000 engram_host_ms=5.067 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:08.953108388Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:09.029479450Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:09.033389126Z info: prompt cache: 12 tokens, resumed at 0, kept 1; 23 states, 146 MiB and 0 MiB spare of 512 MiB (hits 1, misses 18, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:11.453678335Z [tensorfold] done chatcmpl-dc6fbe4608f400ec469614a8831643f0 prompt=12 cached=0 thinking=False effort=none tokens=160 sha=7ad580a9dcf2 finish=length rounds=76 accepted=83/130 prefill_s=0.079 ttft_s=0.080 decode_s=2.4 s_per_token=0.0152 tok_per_s=65.8 accept=63.8% tokens_per_round=2.1 render_s=0.000 encode_s=0.000 engram_host_ms=21.699 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:11.453703455Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:11.537347371Z info: prompt cache: 12 tokens, resumed at 0, kept 0; 23 states, 146 MiB and 0 MiB spare of 512 MiB (hits 1, misses 19, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:11.607140349Z info: prompt cache: 11 tokens, resumed at 0, kept 0; 23 states, 146 MiB and 0 MiB spare of 512 MiB (hits 1, misses 20, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:11.680239753Z info: prompt cache: 10 tokens, resumed at 0, kept 0; 23 states, 146 MiB and 0 MiB spare of 512 MiB (hits 1, misses 21, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:11.757866435Z info: prompt cache: 13 tokens, resumed at 0, kept 0; 23 states, 146 MiB and 0 MiB spare of 512 MiB (hits 1, misses 22, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:11.828927401Z info: prompt cache: 10 tokens, resumed at 0, kept 0; 23 states, 146 MiB and 0 MiB spare of 512 MiB (hits 1, misses 23, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:11.911045601Z info: prompt cache: 14 tokens, resumed at 0, kept 0; 23 states, 146 MiB and 0 MiB spare of 512 MiB (hits 1, misses 24, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:11.996847571Z info: prompt cache: 16 tokens, resumed at 0, kept 0; 23 states, 146 MiB and 0 MiB spare of 512 MiB (hits 1, misses 25, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:12.074829150Z info: prompt cache: 12 tokens, resumed at 0, kept 0; 23 states, 146 MiB and 0 MiB spare of 512 MiB (hits 1, misses 26, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:12.887103388Z [tensorfold] done chatcmpl-777d284405c32eee2ae7f5177a6ccf5f prompt=11 cached=0 thinking=False effort=none tokens=36 sha=f73065ec5832 finish=stop rounds=9 accepted=26/26 prefill_s=0.070 ttft_s=0.149 decode_s=1.3 s_per_token=0.0366 tok_per_s=27.3 accept=100.0% tokens_per_round=4.0 render_s=0.000 encode_s=0.000 engram_host_ms=241.416 queue_s=0.079 restore_s=0.000
+2026-11-17T01:36:12.887121228Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:13.163977998Z [tensorfold] done chatcmpl-170bde7265f4bddadbce1c7cc5935769 prompt=16 cached=0 thinking=False effort=none tokens=32 sha=b61fdfdf1f6f finish=stop rounds=12 accepted=20/21 prefill_s=0.086 ttft_s=0.536 decode_s=1.2 s_per_token=0.0376 tok_per_s=26.6 accept=95.2% tokens_per_round=2.7 render_s=0.000 encode_s=0.000 engram_host_ms=330.276 queue_s=0.450 restore_s=0.000
+2026-11-17T01:36:13.164020430Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:13.525425871Z [tensorfold] done chatcmpl-007060403a74771de2883e57fc423041 prompt=12 cached=0 thinking=False effort=none tokens=20 sha=4aaba7a4010b finish=stop rounds=16 accepted=4/6 prefill_s=0.080 ttft_s=0.080 decode_s=2.0 s_per_token=0.1046 tok_per_s=9.6 accept=66.7% tokens_per_round=1.3 render_s=0.000 encode_s=0.000 engram_host_ms=444.591 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:13.525441599Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:14.125778415Z [tensorfold] done chatcmpl-b2b12fe5a4f4d345f21fe235f94693ba prompt=10 cached=0 thinking=False effort=none tokens=43 sha=57308bd26b4f finish=stop rounds=23 accepted=19/19 prefill_s=0.073 ttft_s=0.222 decode_s=2.4 s_per_token=0.0582 tok_per_s=17.2 accept=100.0% tokens_per_round=1.9 render_s=0.000 encode_s=0.000 engram_host_ms=633.094 queue_s=0.148 restore_s=0.000
+2026-11-17T01:36:14.125801951Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:14.756062601Z [tensorfold] done chatcmpl-788646e0d37259766b457831d5a6250c prompt=14 cached=0 thinking=False effort=none tokens=50 sha=d91fb666475b finish=stop rounds=31 accepted=18/26 prefill_s=0.082 ttft_s=0.451 decode_s=2.8 s_per_token=0.0581 tok_per_s=17.2 accept=69.2% tokens_per_round=1.6 render_s=0.000 encode_s=0.000 engram_host_ms=793.505 queue_s=0.369 restore_s=0.000
+2026-11-17T01:36:14.756084073Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:15.229743612Z [tensorfold] done chatcmpl-fe145bc429cc9ffe2dfc85bbf572713d prompt=10 cached=0 thinking=False effort=none tokens=109 sha=9e26f4534de9 finish=stop rounds=38 accepted=71/86 prefill_s=0.071 ttft_s=0.370 decode_s=3.4 s_per_token=0.0315 tok_per_s=31.8 accept=82.6% tokens_per_round=2.9 render_s=0.000 encode_s=0.000 engram_host_ms=892.674 queue_s=0.298 restore_s=0.000
+2026-11-17T01:36:15.229764348Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:15.595257193Z [tensorfold] done chatcmpl-d85c609c96ebd11a8df33b217d85b80e prompt=13 cached=0 thinking=False effort=none tokens=160 sha=8d33a07eca65 finish=length rounds=45 accepted=114/134 prefill_s=0.078 ttft_s=0.299 decode_s=3.8 s_per_token=0.0241 tok_per_s=41.4 accept=85.1% tokens_per_round=3.6 render_s=0.000 encode_s=0.000 engram_host_ms=899.897 queue_s=0.221 restore_s=0.000
+2026-11-17T01:36:15.595276041Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:16.799911541Z [tensorfold] done chatcmpl-7642cc4af24021081df1d26806e5e34e prompt=12 cached=0 thinking=False effort=none tokens=160 sha=7ad580a9dcf2 finish=length rounds=84 accepted=75/107 prefill_s=0.078 ttft_s=0.612 decode_s=4.7 s_per_token=0.0297 tok_per_s=33.7 accept=70.1% tokens_per_round=1.9 render_s=0.000 encode_s=0.000 engram_host_ms=910.694 queue_s=0.534 restore_s=0.000
+2026-11-17T01:36:16.799934213Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:16.812169882Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:16.813266253Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:16.814282432Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:16.841839187Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:18.868805468Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:21.759231758Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:21.764593854Z info: prompt cache: 8196 tokens, resumed at 0, kept 2; 25 states, 159 MiB and 0 MiB spare of 512 MiB (hits 1, misses 27, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:21.764624190Z [tensorfold] done chatcmpl-599650c22e52ca835fb182728ec6c039 prompt=8196 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=4.923 ttft_s=4.934 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.010 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:21.765585009Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:21.767908600Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:21.768925851Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:21.793956406Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:27.227969860Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:27.232326802Z info: prompt cache: 7934 tokens, resumed at 0, kept 2; 27 states, 172 MiB and 0 MiB spare of 512 MiB (hits 1, misses 28, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:27.232463346Z [tensorfold] done chatcmpl-a198fa2d206979ba69942ff06c64b8ee prompt=7934 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=5.438 ttft_s=5.449 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.010 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:27.233238420Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:27.234378680Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:27.235387051Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:27.327877681Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:42.988640033Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:42.994345186Z info: prompt cache: 32236 tokens, resumed at 0, kept 2; 29 states, 184 MiB and 0 MiB spare of 512 MiB (hits 1, misses 29, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:42.994541219Z [tensorfold] done chatcmpl-c4d5b0ce331c2256bdd1afb0d490479d prompt=32236 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=15.666 ttft_s=15.709 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.042 engram_host_ms=0.000 queue_s=0.001 restore_s=0.000
+2026-11-17T01:36:42.995301717Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:42.996340392Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:42.997164155Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:43.072848591Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:48.870551892Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:58.831510149Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:58.835624145Z info: prompt cache: 32632 tokens, resumed at 0, kept 2; 31 states, 197 MiB and 0 MiB spare of 512 MiB (hits 1, misses 30, evicted 0, refused 0, failed 0)
+2026-11-17T01:36:58.835835394Z [tensorfold] done chatcmpl-ee757eae9ffdf2bbf9687ee2846c78ba prompt=32632 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=15.762 ttft_s=15.798 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.034 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:36:58.836603332Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:58.838605898Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:58.840206655Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:58.841074818Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:36:58.847498101Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:36:59.354329020Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:36:59.360599503Z info: prompt cache: 394 tokens, resumed at 0, kept 1; 32 states, 204 MiB and 0 MiB spare of 512 MiB (hits 1, misses 31, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:06.506844550Z [tensorfold] done chatcmpl-26d2641ca74b1d3888961fef0e826a3a prompt=394 cached=0 thinking=False effort=none tokens=512 sha=2fb1a96d11c5 finish=length rounds=218 accepted=293/433 prefill_s=0.513 ttft_s=0.518 decode_s=7.1 s_per_token=0.0140 tok_per_s=71.5 accept=67.7% tokens_per_round=2.3 render_s=0.000 encode_s=0.004 engram_host_ms=81.488 queue_s=0.000 restore_s=0.000
+2026-11-17T01:37:06.507731033Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:06.509153934Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:06.510150945Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:06.512151095Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:06.986910433Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:06.990949438Z info: prompt cache: 294 tokens, resumed at 0, kept 1; 33 states, 210 MiB and 0 MiB spare of 512 MiB (hits 1, misses 32, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:13.325441163Z [tensorfold] done chatcmpl-a0aa9f8d4c7baf6ca5a28e8237f3aa9b prompt=294 cached=0 thinking=False effort=none tokens=512 sha=04f6a7d66b16 finish=length rounds=191 accepted=320/418 prefill_s=0.479 ttft_s=0.480 decode_s=6.3 s_per_token=0.0124 tok_per_s=80.7 accept=76.6% tokens_per_round=2.7 render_s=0.000 encode_s=0.001 engram_host_ms=60.784 queue_s=0.000 restore_s=0.000
+2026-11-17T01:37:13.326767199Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:13.328153908Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:13.329232631Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:13.331845119Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:13.818838575Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:13.822848027Z info: prompt cache: 335 tokens, resumed at 0, kept 1; 34 states, 216 MiB and 0 MiB spare of 512 MiB (hits 1, misses 33, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:18.868539148Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:19.577049625Z [tensorfold] done chatcmpl-6b222aea153b1751a94442d4f7feb774 prompt=335 cached=0 thinking=False effort=none tokens=512 sha=7915412734ca finish=length rounds=162 accepted=350/441 prefill_s=0.491 ttft_s=0.492 decode_s=5.8 s_per_token=0.0113 tok_per_s=88.8 accept=79.4% tokens_per_round=3.2 render_s=0.000 encode_s=0.001 engram_host_ms=53.398 queue_s=0.000 restore_s=0.000
+2026-11-17T01:37:19.577812427Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:19.579976258Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:19.583151468Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:19.583974926Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:19.592183928Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:19.593218827Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:19.593732748Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:19.594234126Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:19.595446770Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:19.596810662Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:19.597492536Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:19.597503000Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:20.067317667Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:20.071514240Z info: prompt cache: 277 tokens, resumed at 0, kept 1; 35 states, 223 MiB and 0 MiB spare of 512 MiB (hits 1, misses 34, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:20.577116730Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:20.580939013Z info: prompt cache: 377 tokens, resumed at 0, kept 1; 36 states, 229 MiB and 0 MiB spare of 512 MiB (hits 1, misses 35, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:21.081513504Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:21.085399100Z info: prompt cache: 364 tokens, resumed at 0, kept 1; 37 states, 235 MiB and 0 MiB spare of 512 MiB (hits 1, misses 36, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:21.582982893Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:21.587066873Z info: prompt cache: 354 tokens, resumed at 0, kept 1; 38 states, 242 MiB and 0 MiB spare of 512 MiB (hits 1, misses 37, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:22.043451355Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:22.047322311Z info: prompt cache: 305 tokens, resumed at 0, kept 1; 39 states, 248 MiB and 0 MiB spare of 512 MiB (hits 1, misses 38, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:22.526086189Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:22.530200650Z info: prompt cache: 343 tokens, resumed at 0, kept 1; 40 states, 255 MiB and 0 MiB spare of 512 MiB (hits 1, misses 39, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:23.024299408Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:23.027999964Z info: prompt cache: 344 tokens, resumed at 0, kept 1; 41 states, 261 MiB and 0 MiB spare of 512 MiB (hits 1, misses 40, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:23.509296618Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:23.513386855Z info: prompt cache: 313 tokens, resumed at 0, kept 1; 42 states, 267 MiB and 0 MiB spare of 512 MiB (hits 1, misses 41, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:41.032092950Z [tensorfold] done chatcmpl-cc0dafead66d096e6dc05c692e4c2141 prompt=364 cached=0 thinking=False effort=none tokens=512 sha=4b6cdfebc62f finish=length rounds=207 accepted=304/332 prefill_s=0.505 ttft_s=1.494 decode_s=19.9 s_per_token=0.0390 tok_per_s=25.6 accept=91.6% tokens_per_round=2.5 render_s=0.000 encode_s=0.001 engram_host_ms=5564.433 queue_s=0.987 restore_s=0.000
+2026-11-17T01:37:42.623838810Z [tensorfold] done chatcmpl-5d3e79ec7c9c90b9f145ab174f69318d prompt=305 cached=0 thinking=False effort=none tokens=512 sha=e4480bea2cca finish=length rounds=227 accepted=284/327 prefill_s=0.460 ttft_s=2.457 decode_s=20.6 s_per_token=0.0403 tok_per_s=24.8 accept=86.9% tokens_per_round=2.3 render_s=0.001 encode_s=0.003 engram_host_ms=6080.268 queue_s=1.992 restore_s=0.000
+2026-11-17T01:37:43.257053246Z [tensorfold] done chatcmpl-94ddb7e1976730d618e7562f2053724c prompt=313 cached=0 thinking=False effort=none tokens=512 sha=d4196c14f1c8 finish=length rounds=235 accepted=276/310 prefill_s=0.485 ttft_s=3.919 decode_s=19.7 s_per_token=0.0386 tok_per_s=25.9 accept=89.0% tokens_per_round=2.2 render_s=0.003 encode_s=0.001 engram_host_ms=6285.228 queue_s=3.430 restore_s=0.000
+2026-11-17T01:37:46.290396743Z [tensorfold] done chatcmpl-04c12f22a59e9606bf2e7e3797e18ae9 prompt=343 cached=0 thinking=False effort=none tokens=512 sha=f131801ad26e finish=length rounds=280 accepted=232/292 prefill_s=0.483 ttft_s=2.936 decode_s=23.8 s_per_token=0.0465 tok_per_s=21.5 accept=79.5% tokens_per_round=1.8 render_s=0.001 encode_s=0.001 engram_host_ms=6794.878 queue_s=2.451 restore_s=0.000
+2026-11-17T01:37:48.106817154Z [tensorfold] done chatcmpl-dd8fb5fa78edde3eeae09c65a4bbb8ce prompt=277 cached=0 thinking=False effort=none tokens=512 sha=fa83c3aa12da finish=length rounds=312 accepted=200/255 prefill_s=0.479 ttft_s=0.481 decode_s=28.0 s_per_token=0.0549 tok_per_s=18.2 accept=78.4% tokens_per_round=1.6 render_s=0.000 encode_s=0.002 engram_host_ms=6888.602 queue_s=0.000 restore_s=0.000
+2026-11-17T01:37:48.869087588Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:48.885066805Z [tensorfold] done chatcmpl-c18f52efd4c07a1634d497d6339d656d prompt=354 cached=0 thinking=False effort=none tokens=512 sha=b9bc3ac2ed76 finish=length rounds=328 accepted=183/242 prefill_s=0.502 ttft_s=1.996 decode_s=27.3 s_per_token=0.0534 tok_per_s=18.7 accept=75.6% tokens_per_round=1.6 render_s=0.000 encode_s=0.003 engram_host_ms=6896.516 queue_s=1.491 restore_s=0.000
+2026-11-17T01:37:48.920075426Z [tensorfold] done chatcmpl-147e86f0c9345716cb4b8254dc03beba prompt=344 cached=0 thinking=False effort=none tokens=512 sha=9fcd41f72713 finish=length rounds=329 accepted=182/243 prefill_s=0.498 ttft_s=3.437 decode_s=25.9 s_per_token=0.0507 tok_per_s=19.7 accept=74.9% tokens_per_round=1.6 render_s=0.002 encode_s=0.004 engram_host_ms=6896.691 queue_s=2.933 restore_s=0.000
+2026-11-17T01:37:50.161333068Z [tensorfold] done chatcmpl-6f51b900ac86b4c33c801d16f8327160 prompt=377 cached=0 thinking=False effort=none tokens=512 sha=1262d3bb0556 finish=length rounds=376 accepted=135/151 prefill_s=0.509 ttft_s=0.990 decode_s=29.6 s_per_token=0.0579 tok_per_s=17.3 accept=89.4% tokens_per_round=1.4 render_s=0.000 encode_s=0.001 engram_host_ms=6902.742 queue_s=0.478 restore_s=0.000
+2026-11-17T01:37:50.162842128Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:50.664311773Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:50.667167894Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:50.667971848Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:37:50.674194604Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:50.678282920Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:50.681492834Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:50.682609734Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:50.682639430Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:50.683774537Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:50.686659218Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:50.687072227Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:37:51.167195102Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:51.171165851Z info: prompt cache: 302 tokens, resumed at 0, kept 1; 43 states, 274 MiB and 0 MiB spare of 512 MiB (hits 1, misses 42, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:51.652602970Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:51.656982199Z info: prompt cache: 331 tokens, resumed at 0, kept 1; 44 states, 280 MiB and 0 MiB spare of 512 MiB (hits 1, misses 43, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:52.139636970Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:52.144156376Z info: prompt cache: 324 tokens, resumed at 0, kept 1; 45 states, 286 MiB and 0 MiB spare of 512 MiB (hits 1, misses 44, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:52.618011488Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:52.621689995Z info: prompt cache: 331 tokens, resumed at 0, kept 1; 46 states, 293 MiB and 0 MiB spare of 512 MiB (hits 1, misses 45, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:53.105113296Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:53.108737483Z info: prompt cache: 333 tokens, resumed at 0, kept 1; 47 states, 299 MiB and 0 MiB spare of 512 MiB (hits 1, misses 46, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:53.587814323Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:53.592103424Z info: prompt cache: 317 tokens, resumed at 0, kept 1; 48 states, 306 MiB and 0 MiB spare of 512 MiB (hits 1, misses 47, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:54.089178816Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:54.093479421Z info: prompt cache: 372 tokens, resumed at 0, kept 1; 49 states, 312 MiB and 0 MiB spare of 512 MiB (hits 1, misses 48, evicted 0, refused 0, failed 0)
+2026-11-17T01:37:54.582356707Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:37:54.586388319Z info: prompt cache: 335 tokens, resumed at 0, kept 1; 50 states, 318 MiB and 0 MiB spare of 512 MiB (hits 1, misses 49, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:11.961385730Z [tensorfold] done chatcmpl-61d8300b896b2e1877813e364a8a9d35 prompt=372 cached=0 thinking=False effort=none tokens=512 sha=da901726fcbd finish=length rounds=204 accepted=308/341 prefill_s=0.501 ttft_s=3.419 decode_s=17.9 s_per_token=0.0350 tok_per_s=28.6 accept=90.3% tokens_per_round=2.5 render_s=0.000 encode_s=0.012 engram_host_ms=5542.165 queue_s=2.906 restore_s=0.000
+2026-11-17T01:38:12.501824599Z [tensorfold] done chatcmpl-b9047e6290429a0e4e14e4626ed7c2d6 prompt=317 cached=0 thinking=False effort=none tokens=512 sha=aab717808eeb finish=length rounds=211 accepted=301/328 prefill_s=0.483 ttft_s=2.919 decode_s=18.9 s_per_token=0.0370 tok_per_s=27.0 accept=91.8% tokens_per_round=2.4 render_s=0.006 encode_s=0.004 engram_host_ms=5717.151 queue_s=2.425 restore_s=0.000
+2026-11-17T01:38:18.868970746Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:19.320894174Z [tensorfold] done chatcmpl-04fb5f15b4af6285d6cc1144d9313899 prompt=302 cached=0 thinking=False effort=none tokens=512 sha=46b4d736e26c finish=length rounds=302 accepted=209/271 prefill_s=0.497 ttft_s=0.499 decode_s=28.1 s_per_token=0.0551 tok_per_s=18.2 accept=77.1% tokens_per_round=1.7 render_s=0.001 encode_s=0.001 engram_host_ms=7694.731 queue_s=0.000 restore_s=0.000
+2026-11-17T01:38:19.590858416Z [tensorfold] done chatcmpl-2a6cb5161fc8ea22c44daa29bf499d08 prompt=333 cached=0 thinking=False effort=none tokens=512 sha=9132e4cafaa9 finish=length rounds=306 accepted=205/295 prefill_s=0.487 ttft_s=2.435 decode_s=26.5 s_per_token=0.0518 tok_per_s=19.3 accept=69.5% tokens_per_round=1.7 render_s=0.004 encode_s=0.005 engram_host_ms=7742.231 queue_s=1.939 restore_s=0.000
+2026-11-17T01:38:19.952479245Z [tensorfold] done chatcmpl-e26666a57eb3462236b130ed950e508f prompt=335 cached=0 thinking=False effort=none tokens=512 sha=05ab592f470b finish=length rounds=312 accepted=199/266 prefill_s=0.493 ttft_s=3.914 decode_s=25.4 s_per_token=0.0496 tok_per_s=20.1 accept=74.8% tokens_per_round=1.6 render_s=0.002 encode_s=0.010 engram_host_ms=7770.523 queue_s=3.407 restore_s=0.000
+2026-11-17T01:38:20.047595906Z [tensorfold] done chatcmpl-48fd84afc7ef2d4319d7bcdfd89194ac prompt=331 cached=0 thinking=False effort=none tokens=512 sha=eced15a2d443 finish=length rounds=314 accepted=198/274 prefill_s=0.486 ttft_s=0.984 decode_s=28.4 s_per_token=0.0556 tok_per_s=18.0 accept=72.3% tokens_per_round=1.6 render_s=0.000 encode_s=0.002 engram_host_ms=7771.868 queue_s=0.493 restore_s=0.000
+2026-11-17T01:38:20.977241498Z [tensorfold] done chatcmpl-78ad1a2bbde8bf83268e7f5ee6929316 prompt=331 cached=0 thinking=False effort=none tokens=512 sha=0d9dfa497b45 finish=length rounds=336 accepted=175/252 prefill_s=0.477 ttft_s=1.942 decode_s=28.4 s_per_token=0.0555 tok_per_s=18.0 accept=69.4% tokens_per_round=1.5 render_s=0.001 encode_s=0.001 engram_host_ms=7783.147 queue_s=1.462 restore_s=0.000
+2026-11-17T01:38:21.127983227Z [tensorfold] done chatcmpl-476908a62d7a595fd1297553cb2d2e38 prompt=324 cached=0 thinking=False effort=none tokens=512 sha=430a202031cf finish=length rounds=341 accepted=171/244 prefill_s=0.487 ttft_s=1.465 decode_s=29.0 s_per_token=0.0567 tok_per_s=17.6 accept=70.1% tokens_per_round=1.5 render_s=0.001 encode_s=0.001 engram_host_ms=7784.033 queue_s=0.975 restore_s=0.000
+2026-11-17T01:38:21.129370544Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:21.630541756Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:21.633243300Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:21.634149895Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:21.639008950Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:38:21.640971356Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:38:21.643941589Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:38:21.649190357Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:38:21.649606647Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:38:21.650996123Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:38:21.652498511Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:38:21.652859137Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:38:22.115205013Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:38:22.119352945Z info: prompt cache: 305 tokens, resumed at 0, kept 1; 51 states, 325 MiB and 0 MiB spare of 512 MiB (hits 1, misses 50, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:22.577043431Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:38:22.581072068Z info: prompt cache: 293 tokens, resumed at 0, kept 1; 52 states, 331 MiB and 0 MiB spare of 512 MiB (hits 1, misses 51, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:23.041435154Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:38:23.045523198Z info: prompt cache: 272 tokens, resumed at 0, kept 1; 53 states, 337 MiB and 0 MiB spare of 512 MiB (hits 1, misses 52, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:23.533438769Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:38:23.537266877Z info: prompt cache: 350 tokens, resumed at 0, kept 1; 54 states, 344 MiB and 0 MiB spare of 512 MiB (hits 1, misses 53, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:24.007551802Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:38:24.012834186Z info: prompt cache: 281 tokens, resumed at 0, kept 1; 55 states, 350 MiB and 0 MiB spare of 512 MiB (hits 1, misses 54, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:24.494581690Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:38:24.498340358Z info: prompt cache: 341 tokens, resumed at 0, kept 1; 56 states, 357 MiB and 0 MiB spare of 512 MiB (hits 1, misses 55, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:25.009968306Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:38:25.013868670Z info: prompt cache: 416 tokens, resumed at 0, kept 1; 57 states, 363 MiB and 0 MiB spare of 512 MiB (hits 1, misses 56, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:25.500171756Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:38:25.504176568Z info: prompt cache: 338 tokens, resumed at 0, kept 1; 58 states, 369 MiB and 0 MiB spare of 512 MiB (hits 1, misses 57, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:43.691311095Z [tensorfold] done chatcmpl-8e1070183702234eab4fa3b64ecce325 prompt=338 cached=0 thinking=False effort=none tokens=512 sha=a743210f7acd finish=length rounds=214 accepted=297/329 prefill_s=0.490 ttft_s=3.861 decode_s=18.2 s_per_token=0.0356 tok_per_s=28.1 accept=90.3% tokens_per_round=2.4 render_s=0.006 encode_s=0.003 engram_host_ms=5783.980 queue_s=3.361 restore_s=0.000
+2026-11-17T01:38:46.911179137Z [tensorfold] done chatcmpl-d9807656d1d5d0975ad1448d521bf3f0 prompt=341 cached=0 thinking=False effort=none tokens=512 sha=00be89797b35 finish=length rounds=253 accepted=259/305 prefill_s=0.485 ttft_s=2.854 decode_s=22.4 s_per_token=0.0439 tok_per_s=22.8 accept=84.9% tokens_per_round=2.0 render_s=0.000 encode_s=0.007 engram_host_ms=6793.469 queue_s=2.362 restore_s=0.000
+2026-11-17T01:38:47.525013721Z [tensorfold] done chatcmpl-cc74b1c5b762978697acdec7fe8cc1c4 prompt=350 cached=0 thinking=False effort=none tokens=512 sha=b5d96beab62c finish=length rounds=261 accepted=250/301 prefill_s=0.492 ttft_s=1.894 decode_s=24.0 s_per_token=0.0469 tok_per_s=21.3 accept=83.1% tokens_per_round=2.0 render_s=0.000 encode_s=0.005 engram_host_ms=6974.144 queue_s=1.396 restore_s=0.000
+2026-11-17T01:38:48.868424318Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:50.648609241Z [tensorfold] done chatcmpl-7cf09be198b6bf665b7dd8e0e2525f31 prompt=416 cached=0 thinking=False effort=none tokens=512 sha=903b14f9f293 finish=length rounds=310 accepted=201/253 prefill_s=0.516 ttft_s=3.370 decode_s=25.6 s_per_token=0.0502 tok_per_s=19.9 accept=79.4% tokens_per_round=1.7 render_s=0.005 encode_s=0.004 engram_host_ms=7344.828 queue_s=2.846 restore_s=0.000
+2026-11-17T01:38:50.828117411Z [tensorfold] done chatcmpl-fb91de53d38b6cb792b1ab80cad3a039 prompt=305 cached=0 thinking=False effort=none tokens=512 sha=23fca7441d4b finish=length rounds=313 accepted=199/281 prefill_s=0.480 ttft_s=0.481 decode_s=28.7 s_per_token=0.0562 tok_per_s=17.8 accept=70.8% tokens_per_round=1.6 render_s=0.000 encode_s=0.001 engram_host_ms=7347.637 queue_s=0.000 restore_s=0.000
+2026-11-17T01:38:50.929459676Z [tensorfold] done chatcmpl-2c90a265abce0c2d7dffe59c2d600e8d prompt=281 cached=0 thinking=False effort=none tokens=512 sha=0a7b55b3e11e finish=length rounds=315 accepted=196/254 prefill_s=0.476 ttft_s=2.373 decode_s=26.9 s_per_token=0.0527 tok_per_s=19.0 accept=77.2% tokens_per_round=1.6 render_s=0.004 encode_s=0.005 engram_host_ms=7348.984 queue_s=1.888 restore_s=0.000
+2026-11-17T01:38:51.213456409Z [tensorfold] done chatcmpl-8cdcee40d2a37b80daf36ee290cf9b35 prompt=293 cached=0 thinking=False effort=none tokens=512 sha=bb3a2ea5941d finish=length rounds=322 accepted=189/260 prefill_s=0.462 ttft_s=0.942 decode_s=28.6 s_per_token=0.0560 tok_per_s=17.8 accept=72.7% tokens_per_round=1.6 render_s=0.000 encode_s=0.001 engram_host_ms=7352.346 queue_s=0.478 restore_s=0.000
+2026-11-17T01:38:51.556512701Z [tensorfold] done chatcmpl-078b25e471ac27eb4146246989e301f7 prompt=272 cached=0 thinking=False effort=none tokens=512 sha=f60e2fb067fb finish=length rounds=333 accepted=178/229 prefill_s=0.464 ttft_s=1.407 decode_s=28.5 s_per_token=0.0558 tok_per_s=17.9 accept=77.7% tokens_per_round=1.5 render_s=0.000 encode_s=0.005 engram_host_ms=7354.578 queue_s=0.937 restore_s=0.000
+2026-11-17T01:38:51.558258002Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:52.059802096Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:52.063361594Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:52.064430094Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:52.066026227Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:38:52.068301578Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:38:52.643469130Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:38:52.647327254Z info: prompt cache: 559 tokens, resumed at 0, kept 1; 59 states, 376 MiB and 0 MiB spare of 512 MiB (hits 1, misses 58, evicted 0, refused 0, failed 0)
+2026-11-17T01:38:59.882744210Z info: dsv41: CUDA graphs: 64 kept
+2026-11-17T01:39:00.075964007Z [tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+2026-11-17T01:39:00.075987495Z [tensorfold] done chatcmpl-c5441984093aea6e73379cff7db9bc49 prompt=559 cached=0 thinking=True effort=none tokens=768 sha=95a72be7e7dd finish=length rounds=182 accepted=585/680 prefill_s=0.579 ttft_s=0.580 decode_s=7.4 s_per_token=0.0097 tok_per_s=103.3 accept=86.0% tokens_per_round=4.2 render_s=0.000 encode_s=0.001 engram_host_ms=80.853 queue_s=0.000 restore_s=0.000
+2026-11-17T01:39:00.077313371Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:00.078560239Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:00.079532178Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:00.082078218Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:00.830172177Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:39:00.834316862Z info: prompt cache: 992 tokens, resumed at 0, kept 1; 60 states, 382 MiB and 0 MiB spare of 512 MiB (hits 1, misses 59, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:09.437509323Z [tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+2026-11-17T01:39:09.437534635Z [tensorfold] done chatcmpl-3c71e156a848698a87fe8e6f6f77cf20 prompt=992 cached=0 thinking=True effort=none tokens=768 sha=d52a66f31575 finish=length rounds=225 accepted=542/741 prefill_s=0.752 ttft_s=0.754 decode_s=8.6 s_per_token=0.0112 tok_per_s=89.2 accept=73.1% tokens_per_round=3.4 render_s=0.000 encode_s=0.001 engram_host_ms=62.615 queue_s=0.000 restore_s=0.000
+2026-11-17T01:39:09.438394813Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:09.440533316Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:09.441552247Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:09.447081736Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:09.448518205Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:09.448860430Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:09.449538656Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:10.037613080Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:39:10.041723765Z info: prompt cache: 594 tokens, resumed at 0, kept 1; 61 states, 388 MiB and 0 MiB spare of 512 MiB (hits 1, misses 60, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:10.619661598Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:39:10.623785435Z info: prompt cache: 592 tokens, resumed at 0, kept 1; 62 states, 395 MiB and 0 MiB spare of 512 MiB (hits 1, misses 61, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:11.273704050Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:39:11.278049424Z info: prompt cache: 841 tokens, resumed at 0, kept 1; 63 states, 401 MiB and 0 MiB spare of 512 MiB (hits 1, misses 62, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:11.769898415Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:39:11.774142028Z info: prompt cache: 387 tokens, resumed at 0, kept 1; 64 states, 408 MiB and 0 MiB spare of 512 MiB (hits 1, misses 63, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:18.869159574Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:26.990563075Z [tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+2026-11-17T01:39:26.990614948Z [tensorfold] done chatcmpl-9ee93ce16aeff73714be91a18e1ec826 prompt=841 cached=0 thinking=True effort=none tokens=768 sha=2f4bd3b467d8 finish=length rounds=192 accepted=575/647 prefill_s=0.654 ttft_s=1.833 decode_s=15.7 s_per_token=0.0205 tok_per_s=48.8 accept=88.9% tokens_per_round=4.0 render_s=0.000 encode_s=0.003 engram_host_ms=4637.382 queue_s=1.175 restore_s=0.000
+2026-11-17T01:39:28.859162335Z [tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+2026-11-17T01:39:28.859185183Z [tensorfold] done chatcmpl-9d3c3ef5c2abed1cc6ef344a0c16d56c prompt=387 cached=0 thinking=True effort=none tokens=768 sha=60b8012fb235 finish=length rounds=216 accepted=551/608 prefill_s=0.496 ttft_s=2.328 decode_s=17.1 s_per_token=0.0223 tok_per_s=44.9 accept=90.6% tokens_per_round=3.6 render_s=0.001 encode_s=0.002 engram_host_ms=5245.321 queue_s=1.829 restore_s=0.000
+2026-11-17T01:39:30.984238835Z [tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+2026-11-17T01:39:30.984282499Z [tensorfold] done chatcmpl-4363252d69268e39d3ec0f089f376b7c prompt=594 cached=0 thinking=True effort=none tokens=768 sha=d8fff345d700 finish=length rounds=250 accepted=517/649 prefill_s=0.594 ttft_s=0.597 decode_s=20.9 s_per_token=0.0273 tok_per_s=36.6 accept=79.7% tokens_per_round=3.1 render_s=0.000 encode_s=0.002 engram_host_ms=5421.528 queue_s=0.000 restore_s=0.000
+2026-11-17T01:39:32.306845608Z [tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+2026-11-17T01:39:32.306867080Z [tensorfold] done chatcmpl-efddb2918fde56822c21e0455516fffb prompt=592 cached=0 thinking=True effort=none tokens=768 sha=d2be37ff04c9 finish=length rounds=287 accepted=480/673 prefill_s=0.582 ttft_s=1.179 decode_s=21.7 s_per_token=0.0283 tok_per_s=35.4 accept=71.3% tokens_per_round=2.7 render_s=0.001 encode_s=0.002 engram_host_ms=5440.340 queue_s=0.593 restore_s=0.000
+2026-11-17T01:39:32.308017115Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:32.809379112Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:32.813980758Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:32.815103530Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:32.816125581Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:32.833147793Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:37.650267968Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:39:37.654064092Z info: prompt cache: 8225 tokens, resumed at 0, kept 2; 66 states, 420 MiB and 0 MiB spare of 512 MiB (hits 1, misses 64, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:37.654152316Z [tensorfold] done chatcmpl-095b4f4567dafbab918fb22b6116e29f prompt=8225 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=4.820 ttft_s=4.831 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.010 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:39:37.655496257Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:39.451417900Z info: prompt cache: 8225 tokens, resumed at 6144, kept 0; 66 states, 420 MiB and 0 MiB spare of 512 MiB (hits 2, misses 64, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:39.451647756Z [tensorfold] done chatcmpl-7a1144c5edb3b32a7a20965054cf2365 prompt=8225 cached=6144 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=1.796 ttft_s=1.797 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.000 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:39:39.452358862Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:39.453454226Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:39.454165364Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:39.478118974Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:43.903906692Z info: prompt cache: 8192 tokens, resumed at 0, kept 2; 68 states, 433 MiB and 0 MiB spare of 512 MiB (hits 2, misses 65, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:43.904073397Z [tensorfold] done chatcmpl-e317b88fbb3c0653b708a99cb6f7eb5d prompt=8192 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=4.426 ttft_s=4.435 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.009 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:39:43.905386041Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:45.131820373Z info: prompt cache: 8192 tokens, resumed at 6144, kept 0; 68 states, 433 MiB and 0 MiB spare of 512 MiB (hits 3, misses 65, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:45.132021589Z [tensorfold] done chatcmpl-e5538ea64a18407e3347a8154549168b prompt=8192 cached=6144 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=1.226 ttft_s=1.227 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.000 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:39:45.132776584Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:45.133866139Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:45.134890878Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:45.157082179Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:48.868120041Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:49.455815489Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:39:49.459845213Z info: prompt cache: 8265 tokens, resumed at 0, kept 2; 70 states, 446 MiB and 0 MiB spare of 512 MiB (hits 3, misses 66, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:49.460108670Z [tensorfold] done chatcmpl-6f8dbf6223d12a70ce0e3f25ff105dad prompt=8265 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=4.303 ttft_s=4.312 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.009 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:39:49.461415394Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:39:50.844830451Z info: prompt cache: 8265 tokens, resumed at 6144, kept 0; 70 states, 446 MiB and 0 MiB spare of 512 MiB (hits 4, misses 66, evicted 0, refused 0, failed 0)
+2026-11-17T01:39:50.845062516Z [tensorfold] done chatcmpl-9fdc90638cf51618ba1e44f0147f31f9 prompt=8265 cached=6144 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=1.383 ttft_s=1.384 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.000 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:39:50.845795190Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:50.846857177Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:50.847870060Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:39:50.927291682Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:40:06.360193029Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:40:06.364273010Z info: prompt cache: 31797 tokens, resumed at 0, kept 2; 72 states, 459 MiB and 0 MiB spare of 512 MiB (hits 4, misses 67, evicted 0, refused 0, failed 0)
+2026-11-17T01:40:06.364332914Z [tensorfold] done chatcmpl-9bb4108a874d898db34544e4057448e4 prompt=31797 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=15.437 ttft_s=15.472 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.035 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:40:06.366723898Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:40:07.246090150Z info: prompt cache: 31797 tokens, resumed at 30720, kept 0; 72 states, 459 MiB and 0 MiB spare of 512 MiB (hits 5, misses 67, evicted 0, refused 0, failed 0)
+2026-11-17T01:40:07.246265670Z [tensorfold] done chatcmpl-89dd38ab50252debd5efa56c0f54e854 prompt=31797 cached=30720 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=0.879 ttft_s=0.881 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.001 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:40:07.247009097Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:40:07.248061180Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:40:07.249087935Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:40:07.317389954Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:40:18.868921778Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:40:22.828657448Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:40:22.832690677Z info: prompt cache: 32016 tokens, resumed at 0, kept 2; 74 states, 471 MiB and 0 MiB spare of 512 MiB (hits 5, misses 68, evicted 0, refused 0, failed 0)
+2026-11-17T01:40:22.832748181Z [tensorfold] done chatcmpl-d98cca69add22e3cc3c17784c71efa6b prompt=32016 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=15.515 ttft_s=15.552 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.036 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:40:22.835147020Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:40:23.807408487Z info: prompt cache: 32016 tokens, resumed at 30720, kept 0; 74 states, 471 MiB and 0 MiB spare of 512 MiB (hits 6, misses 68, evicted 0, refused 0, failed 0)
+2026-11-17T01:40:23.807590232Z [tensorfold] done chatcmpl-a89a01c92b7ae4c48beb1799b7883a27 prompt=32016 cached=30720 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=0.972 ttft_s=0.973 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.001 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:40:23.808355370Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:40:23.809421325Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:40:23.810429009Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:40:23.880695146Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:40:39.429080211Z error: dsv41: the parts' planner did not keep a prompt state: BadOp
+2026-11-17T01:40:39.433404736Z info: prompt cache: 32143 tokens, resumed at 0, kept 2; 76 states, 484 MiB and 0 MiB spare of 512 MiB (hits 6, misses 69, evicted 0, refused 0, failed 0)
+2026-11-17T01:40:39.433593328Z [tensorfold] done chatcmpl-ac55c35c0d420a4d27e355c036d782c0 prompt=32143 cached=0 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=15.552 ttft_s=15.588 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.001 encode_s=0.035 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:40:39.435894856Z [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-11-17T01:40:40.460603365Z info: prompt cache: 32143 tokens, resumed at 30720, kept 0; 76 states, 484 MiB and 0 MiB spare of 512 MiB (hits 7, misses 69, evicted 0, refused 0, failed 0)
+2026-11-17T01:40:40.460805285Z [tensorfold] done chatcmpl-6a47dddcafc350f0636eff1e797598ef prompt=32143 cached=30720 thinking=False effort=none tokens=1 sha=b6b1b469ea43 finish=length rounds=0 accepted=0/0 prefill_s=1.024 ttft_s=1.026 decode_s=0.0 s_per_token=- tok_per_s=- accept=- tokens_per_round=- render_s=0.000 encode_s=0.000 engram_host_ms=0.000 queue_s=0.000 restore_s=0.000
+2026-11-17T01:40:40.461555416Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:40:40.464439440Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -
+2026-11-17T01:40:40.465399827Z [tensorfold] 127.0.0.1 "GET /metrics HTTP/1.1" 200 -

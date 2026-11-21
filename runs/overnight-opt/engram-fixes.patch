@@ -1,0 +1,81 @@
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -68,8 +68,18 @@
+ /// The parsed TF_DS_ENGRAM_CPUS (empty = unset); model open sets it once, before any Engram thread starts.
+ var engram_cpus: CpuSet = .{};
+ 
+-pub fn setCpus(text: ?[]const u8, cpu_count: usize) !void {
+-    engram_cpus = if (text) |t| try parseCpus(t, cpu_count) else .{};
++pub fn setCpus(text: ?[]const u8) !void {
++    const spec = text orelse {
++        engram_cpus = .{};
++        return;
++    };
++    const requested = try parseCpus(spec, max_cpus);
++    var allowed: std.os.linux.cpu_set_t = @splat(0);
++    if (std.os.linux.errno(std.os.linux.sched_getaffinity(0, @sizeOf(@TypeOf(allowed)), &allowed)) != .SUCCESS) return error.InvalidCpus;
++    for (requested.set, allowed) |want, have| {
++        if (want & ~have != 0) return error.InvalidCpus;
++    }
++    engram_cpus = requested;
+ }
+ 
+ /// The calling thread on the Engram CPUs, when TF_DS_ENGRAM_CPUS is set; no syscall otherwise and off Linux.
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -574,9 +574,8 @@
+         if (o.engram_dir) |edir| {
+             // TF_DS_ENGRAM_CPUS: the Engram host threads' CPUs, parsed once here; unset leaves every thread's affinity alone
+             const cpus_env = if (std.c.getenv("TF_DS_ENGRAM_CPUS")) |v| std.mem.span(v) else null;
+-            const ncpu = std.Thread.getCpuCount() catch 1;
+-            engram_io.setCpus(cpus_env, ncpu) catch {
+-                std.log.err("dsv41: TF_DS_ENGRAM_CPUS={s}: expected a-b ranges and/or comma lists of CPUs below {d}", .{ cpus_env.?, ncpu });
++            engram_io.setCpus(cpus_env) catch {
++                std.log.err("dsv41: TF_DS_ENGRAM_CPUS={s}: expected a-b ranges and/or comma lists of CPUs in the process affinity mask", .{cpus_env.?});
+                 return error.InvalidEngramCpus;
+             };
+             const map_text = try std.Io.Dir.cwd().readFileAlloc(io, o.token_map orelse return error.NoTokenMap, a, .limited(1 << 26));
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -2424,23 +2424,27 @@
+     const def = @max(aio.slots / 4, 1);
+     const per = if (aio.batch) |b| @min(def, b) else def; // TF_DS_ENGRAM_AIO_BATCH: an upper bound on a batch's rows
+     var batch: [64]u64 = undefined;
+-    var nb: usize = 0;
++    var first: usize = 0;
++    var pending: usize = 0;
++    errdefer for (0..pending) |i| aio.wait(batch[(first + i) % batch.len]) catch {};
+     var at: usize = 0;
+-    errdefer for (batch[0..nb]) |id| aio.wait(id) catch {};
+     while (at < ids.len) : (at += per) {
++        if (pending == batch.len) {
++            const oldest = batch[first];
++            first = (first + 1) % batch.len;
++            pending -= 1;
++            try aio.wait(oldest);
++        }
+         const n = @min(per, ids.len - at);
+-        if (nb == batch.len) return error.TooManyRows;
+-        batch[nb] = try aio.start(t, ids[at..][0..n], out_w[at * t.row_w ..][0 .. n * t.row_w], out_s[at * t.row_s ..][0 .. n * t.row_s]);
+-        nb += 1;
+-    }
+-    for (batch[0..nb], 0..) |id, i| {
+-        aio.wait(id) catch |err| {
+-            for (batch[i + 1 .. nb]) |rest| aio.wait(rest) catch {};
+-            nb = 0;
+-            return err;
+-        };
+-    }
+-    nb = 0;
++        batch[(first + pending) % batch.len] = try aio.start(t, ids[at..][0..n], out_w[at * t.row_w ..][0 .. n * t.row_w], out_s[at * t.row_s ..][0 .. n * t.row_s]);
++        pending += 1;
++    }
++    while (pending != 0) {
++        const oldest = batch[first];
++        first = (first + 1) % batch.len;
++        pending -= 1;
++        try aio.wait(oldest);
++    }
+ }
+ 
+ /// The rows of one block of the indexer's scores for a chunk of `n` rows over `n_comp_end` compressed keys: as many as

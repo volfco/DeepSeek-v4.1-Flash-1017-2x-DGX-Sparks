@@ -1,0 +1,54 @@
+record: label='adaptive' url=http://127.0.0.1:8000 salt=aa567db8a9ce like=runs/combo3/blocks/a01.exact.json
+  len_1: prompt=5 out=10 stop cached=0 sha=44046c9e0fad(server) 0.229s
+  len_100: prompt=100 out=24 stop cached=0 sha=775a69aeedce(server) 0.902s
+  len_2048: prompt=2048 out=39 stop cached=0 sha=e120fc5606fd(server) 2.481s
+  len_2049: prompt=2050 out=50 stop cached=0 sha=d52c39d6f965(server) 1.92s
+  len_4096: prompt=4077 out=34 stop cached=2048 sha=b0d5d93443d2(server) 1.878s
+  len_8000: prompt=7962 out=56 stop cached=6144 sha=bc7b8d68c494(server) 2.109s
+  len_20000: prompt=19909 out=42 stop cached=18432 sha=fe7d68b2a404(server) 1.829s
+  len_30000: prompt=29994 out=46 stop cached=28672 sha=96245f72d370(server) 1.6s
+  len_50000: prompt=49967 out=25 stop cached=49152 sha=02769c61029e(server) 1.38s
+  len_64000: prompt=63954 out=25 stop cached=63488 sha=f64ef85e05a8(server) 1.048s
+  len_100000: prompt=99904 out=46 stop cached=98304 sha=a62dcc32a1a6(server) 1.966s
+  repeat_2048: prompt=2048 out=39 stop cached=0 sha=e120fc5606fd(server) 1.669s
+  resume_1: prompt=7963 out=27 stop cached=6144 sha=a0031229ff35(server) 2.312s
+  resume_2: prompt=7965 out=192 length cached=6144 sha=2477213ce457(server) 3.648s
+  resume_3: prompt=7966 out=12 stop cached=6144 sha=e8a732d56b29(server) 1.161s
+  resume_1_again: prompt=7963 out=27 stop cached=6144 sha=a0031229ff35(server) 1.375s
+  conc_1 (8 at once): prompt=597 out=36 sha=5a2e108d1cb6 7.002s
+  conc_2 (8 at once): prompt=1197 out=31 sha=2935bfe2ba8d 5.888s
+  conc_3 (8 at once): prompt=1792 out=43 sha=2b982d8fa349 7.262s
+  conc_4 (8 at once): prompt=2387 out=39 sha=e120fc5606fd 7.654s
+  conc_5 (8 at once): prompt=2988 out=48 sha=1a20d85c471a 8.038s
+  conc_6 (8 at once): prompt=3583 out=31 sha=2935bfe2ba8d 7.836s
+  conc_7 (8 at once): prompt=4180 out=40 sha=9db38b46d5b9 7.259s
+  conc_8 (8 at once): prompt=4798 out=50 sha=266f2fdc916d 8.146s
+  solo_1: prompt=597 out=36 stop cached=0 sha=5a2e108d1cb6(server) 1.025s
+  solo_2: prompt=1197 out=31 stop cached=0 sha=2935bfe2ba8d(server) 1.2s
+  solo_3: prompt=1792 out=43 stop cached=0 sha=2b982d8fa349(server) 1.575s
+  solo_4: prompt=2387 out=39 stop cached=2048 sha=e120fc5606fd(server) 0.973s
+  solo_5: prompt=2988 out=48 stop cached=2048 sha=1a20d85c471a(server) 1.347s
+  solo_6: prompt=3583 out=31 stop cached=2048 sha=2935bfe2ba8d(server) 1.369s
+  solo_7: prompt=4180 out=40 stop cached=2048 sha=9db38b46d5b9(server) 1.767s
+  solo_8: prompt=4798 out=50 stop cached=4096 sha=266f2fdc916d(server) 1.277s
+  conv_A1: prompt=5974 out=11 cached=4096 sha=c7b0e613dc42 1.16s
+  conv_B1: prompt=5972 out=6 cached=4096 sha=c3b31d025830 1.173s
+  conv_C1: prompt=5969 out=12 cached=4096 sha=74b2dceef366 1.245s
+  conv_A2: prompt=5997 out=20 cached=4096 sha=b45d802184b6 1.22s
+  conv_B2: prompt=5989 out=13 cached=4096 sha=0b9751a43fe7 1.19s
+  conv_C2: prompt=5991 out=24 cached=4096 sha=61d2658d73b9 1.254s
+  conv_A3: prompt=6028 out=9 cached=4096 sha=21cac70c909b 1.164s
+  check repeat_2048 == len_2048: ok 
+  check resume_1_again == resume_1: ok 
+  check solo_1 == conc_1: ok 
+  check solo_2 == conc_2: ok 
+  check solo_3 == conc_3: ok 
+  check solo_4 == conc_4: ok 
+  check solo_5 == conc_5: ok 
+  check solo_6 == conc_6: ok 
+  check solo_7 == conc_7: ok 
+  check solo_8 == conc_8: ok 
+  info: repeat_2048 cached_tokens=0 (informational: a 2048-token prompt may keep no snapshot)
+  check resume_2 cache hit (cached_tokens>0): ok cached=6144
+  check resume_3 cache hit (cached_tokens>0): ok cached=6144
+wrote /home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/engine-followup/adaptive01/adaptive.exact.json: 39 cases, 0 errors [], 0 failed checks []

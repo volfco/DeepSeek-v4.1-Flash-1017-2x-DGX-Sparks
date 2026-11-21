@@ -1,0 +1,88 @@
+[start.sh] WARN: ABLIT=1: drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated is gated. You must have access at https://huggingface.co/drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated (accept its terms while logged in) and use your Hugging Face read token: export HF_TOKEN=hf_... or hf auth login. The token's account must have access to this repository.
+[start.sh] Spill tier: 180 GiB a Spark, floor 50 GiB, quota 0 GiB; rank 0 /home/colum/.cache/dsv41-spill, rank 1 /home/colum/.cache/dsv41-spill
+
+
+  Mia's TensorFold Start Script
+  Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw · 2 x DGX Spark · 8 at once · 1048576-token window · pool 2101248 · KV shard (fetch) · spill 180 GiB · EXL3 2.9 bpw · port 8000
+
+[1/5] Setup: image, checkpoint, Engram's tables, weight files and kit; the worker's NFS volume and disk
+[start.sh] Ready: tensorfold-dsv41:exl3-tp2-b40ea899e367, Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw @ 45ee5d0f, Engram's tables, the weight files and the kit
+[2/5] Checks: link, previous server, port, memory
+[start.sh] Rail roceP2p1s0f0 <-> roceP2p1s0f1: 192.168.100.5 <-> 192.168.100.6 reaches the peer (MTU 9000): used
+[start.sh] Link: rendezvous 192.168.100.1:29620
+[start.sh]   rank 0 (this node): RoCE rocep1s0f0,roceP2p1s0f0 (GID 3)
+[start.sh]   rank 1 (colum@10.50.0.11): RoCE rocep1s0f1,roceP2p1s0f1 (GID 3), NFS from 192.168.100.1
+[start.sh] Weights' digests (TF_DS_RANK_CACHE_SHA): a few seconds when cached, about a minute a Spark when a weight file is new
+[start.sh] Weights: rank 0 sha256:813f27dbe5509b7fac433aaac9e8e90159e9b58eeb691911d87f0b10fbdf43df, rank 1 sha256:88ad5503567937fe0f602f1e63c850022082a7633a7a7dd8e51af6e63e2d109e (1 s)
+[stop.sh] Stopping dsv41-1017-exl3-tf on both Sparks (up to 90s)
+[stop.sh] Stopped and removed rank 0 here; its log: /home/colum/.cache/dsv41-tensorfold/logs/20261116-032148-rank0.log.gz
+[stop.sh] Stopped and removed rank 1 on colum@10.50.0.11; its log there: /home/colum/.cache/dsv41-tensorfold/logs/20261116-032149-rank1.log.gz
+[stop.sh] Stopped and removed dsv41-1017-exl3-tf on both Sparks; its GPU memory is free again
+[start.sh] Memory guard on: each rank's container is killed when the memory available stays under 2.5 GiB for 4 s, or falls under 1 GiB (log: memguard.log)
+[3/5] Launch: container dsv41-1017-exl3-tf, rank 1 on the worker, then rank 0 here
+[start.sh] Rank 1 on colum@10.50.0.11: tf-dsv41-lanes /hf/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036/checkpoint /rank-cache 1 2 192.168.100.1 29620 /hf/tensorfold-dsv41/kit-abe07c7d/kit --engram /engram --token-map /hf/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036/dsv41_token_map.json --pool 2101248 --streams 8 --drafts 1 --graphs 1 --side 1 --prefetch 1 --aio 1 --graph-cap 128 --rdma rocep1s0f1,roceP2p1s0f1
+[start.sh] Rank 0 here: tensorfold-native serve /hf/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036/model --backend cuda --host 0.0.0.0 --port 8000 --name DeepSeek-V4.1-Flash-1017 --context 1048576 --parallel 8 --max-tokens 32768 --temperature 1.0 --top-p 0.95 --top-k 20 --thinking --spill-dir /spill --spill-gib 180 --spill-min-free-gib 50 --spill-min-tokens 2048
+[4/5] Loading: ~98 GiB of weights on each Spark, then Engram and the caches (a few minutes)
+  │ 
+  │ =============
+  │ == PyTorch ==
+  │ =============
+  │ 
+  │ NVIDIA Release 26.07 (build 373437299)
+  │ PyTorch Version 2.13.0a0+9186a08
+  │ Container image Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  │ Copyright (c) 2014-2024 Facebook Inc.
+  │ Copyright (c) 2011-2014 Idiap Research Institute (Ronan Collobert)
+  │ Copyright (c) 2012-2014 Deepmind Technologies    (Koray Kavukcuoglu)
+  │ Copyright (c) 2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+  │ Copyright (c) 2011-2013 NYU                      (Clement Farabet)
+  │ Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+  │ Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
+  │ Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+  │ Copyright (c) 2015      Google Inc.
+  │ Copyright (c) 2015      Yangqing Jia
+  │ Copyright (c) 2013-2016 The Caffe contributors
+  │ All rights reserved.
+  │ 
+  │ Various files include modifications (c) NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+  │ 
+  │ GOVERNING TERMS: The software and materials are governed by the NVIDIA Software License Agreement
+  │ (found at https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
+  │ and the Product-Specific Terms for NVIDIA AI Products
+  │ (found at https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+  │ 
+  │ NOTE: CUDA Forward Compatibility mode ENABLED.
+  │   Using CUDA 13.3 driver version 610.43.02 with kernel driver version 580.159.03.
+  │   See https://docs.nvidia.com/deploy/cuda-compatibility/ for details.
+  │ 
+  │ info: rank cache: 95.1 GiB of expert entries read whole in 87.8 s
+  │ RDMA rank 0 peer 1 rail 0: gid_index=3 path_mtu=5
+  │ RDMA rank 0 peer 1 rail 1: gid_index=3 path_mtu=5
+  │ info: dsv41: pool 2101248 positions, fetch 1050624 a part; a conversation may use up to 1048576 tokens; compressed planes 1062 MiB a rank (1783 MiB replicated); arena 4540 MiB used
+  │ info: dsv41 spill: rank 0's store under /spill (180.0 GiB, staging 128 MiB); the ranks agreed
+  │ {"vision": "Pillow 12.3.0 decodes the formats other than PNG"}
+  │ info: dsv41: a broken rank pair ends this server with status 75 for a restart of both ranks (TF_DS_PAIR_BROKEN=degrade: requests fail one by one instead)
+  │ [tensorfold] warning: non-loopback server has no API key; requests are open
+  │ [tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 105.21 GiB; 8 streams at once, 0.00 GiB each at a 1048576-token window, of 0.0 GiB left after a 12.2 GiB reserve; prompts in 2048-row chunks
+  │ [tensorfold] serving DeepSeek-V4.1-Flash-1017 at http://0.0.0.0:8000/v1 (sampling: temperature 1.0, top_p 0.95, top_k 20; drafts: on; context: 1048576; loaded in 100.6s)
+  │ [tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {"enable_thinking": false}
+  │ [tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[start.sh] Server answered after 102s
+[5/5] Smoke test: one chat completion through both ranks
+── rank 1 (colum@10.50.0.11): last log lines ──
+  │ 
+  │ GOVERNING TERMS: The software and materials are governed by the NVIDIA Software License Agreement
+  │ (found at https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
+  │ and the Product-Specific Terms for NVIDIA AI Products
+  │ (found at https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+  │ 
+  │ NOTE: CUDA Forward Compatibility mode ENABLED.
+  │   Using CUDA 13.3 driver version 610.43.02 with kernel driver version 580.159.03.
+  │   See https://docs.nvidia.com/deploy/cuda-compatibility/ for details.
+  │ 
+  │ {"rank": 1, "loaded_s": 98.8, "pool": 2101248, "drafts": true, "arena_used": 4760760681, "arena_reserved": 4836871168}
+  │ info: rank cache: 95.1 GiB of expert entries read whole in 20.2 s
+  │ RDMA rank 1 peer 0 rail 0: gid_index=3 path_mtu=5
+  │ RDMA rank 1 peer 0 rail 1: gid_index=3 path_mtu=5
+  │ info: dsv41: pool 2101248 positions, fetch 1050624 a part; a conversation may use up to 1048576 tokens; compressed planes 1062 MiB a rank (1783 MiB replicated); arena 4540 MiB used
+[start.sh] ERROR: the smoke test request failed (no reply text, or one character repeated); the ranks are still running

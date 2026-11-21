@@ -1,0 +1,336 @@
+# port-patches.sh: second-pass-int @ 712aa110a628 over 185b0c9 @ 185b0c9f5b60 (commits 185b0c9f5b60..712aa110a628)
+# dsv41: TF_DS_GREEDY_ARGMAX (off by default) exchanges a greedy round's argmax instead of the logits - R * 8 bytes a rank against its vocabulary half, reduced to the same pick
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index cfdae80f2aa3b28bdcb45c4986952e4287f09fb9..9e76fb6bff6b9a65f79d57851d38d319462eaf12 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -371,6 +371,47 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_fast_kerne
+     for (int i = threadIdx.x; i < k; i += blockDim.x) o[i] = cols[i] < v ? cols[i] : -1;
+ }
+ 
++// TF_DS_GREEDY_ARGMAX: a round whose rows are all greedy consumes only the pick, so each rank's (value, index) a row
++// travels instead of its vocabulary half. The argmax is tf_ds_block_argmax_v's (NaN skipped, ties to the lower column);
++// its row[0] rule is NOT applied here - the reduce applies rank 0's, which is the whole row's first value - and that
++// flag rides the pair as an index sentinel. out [rows][2]: the value's bits, then the index.
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_argmax_pair_kernel(const float* logits, unsigned long long ld,
++                                                                           int n, unsigned* out, int pdl) {
++    pdl_enter(pdl);
++    const float* row = logits + (unsigned long long)blockIdx.x * ld;
++    float bv = 0.0f;
++    const unsigned bi = tf_ds_block_argmax_v(row, n, &bv);
++    if (threadIdx.x == 0) {
++        out[2 * blockIdx.x] = __float_as_uint(bv);
++        out[2 * blockIdx.x + 1] = row[0] != row[0] ? 0xffffffffu : bi;
++    }
++}
++
++// The ranks' pairs [rows][world][2] in rank order reduced to the round's picks: tf_ds_argmax_rows_kernel's answer for
++// the whole vocabulary (the first largest, the lower rank winning a tie, rank 0's row[0] NaN rule as pick 0). A thread a
++// row (R <= 16), the pairs as the ranks' exchange left them; `n` is a rank's columns, so rank k's local index i is the
++// whole row's k * n + i (the logits' layout: the ranks' halves in rank order).
++extern "C" __global__ void tf_ds_argmax_reduce_kernel(const unsigned* pairs, int world, int n, int rows, unsigned* out, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x * blockDim.x + threadIdx.x;
++    if (r >= rows) return;
++    const unsigned* p = pairs + (long long)r * world * 2;
++    if (p[1] == 0xffffffffu) {   // rank 0's first value was NaN: the row's pick is 0, as the whole-row rule says
++        out[r] = 0u;
++        return;
++    }
++    float bv = __uint_as_float(p[0]);
++    unsigned bi = p[1];
++    for (int k = 1; k < world; k++) {
++        const float v = __uint_as_float(p[2 * k]);
++        if (v > bv) {   // strict: an earlier rank wins a tie (each rank's own tie already went to its lower column)
++            bv = v;
++            bi = (unsigned)k * (unsigned)n + p[2 * k + 1];
++        }
++    }
++    out[r] = bi;
++}
++
+ // The next kernels' weights touched into L2 ahead of them (the served build's paced l2_prefetch, as its trace shows it:
+ // a block of 128 threads on a stream of its own, up to 16 ranges a launch): every 128-byte line of each range, the
+ // ranges in order. It writes nothing.
+@@ -697,7 +738,7 @@ extern "C" __global__ void tf_ds_copy_rows16_kernel(const uint4* src, unsigned l
+ // A greedy row's token as sampling.argmax takes it on the host (best = 0; best = i where row[i] > row[best]): the
+ // first index of the largest value, a NaN never larger, and 0 when the row's first value is NaN. Every thread of a
+ // 1024-thread block calls it; the token is valid in thread 0.
+-__device__ unsigned tf_ds_block_argmax(const float* row, int n) {
++__device__ unsigned tf_ds_block_argmax_v(const float* row, int n, float* out_v) {
+     const float ninf = -__int_as_float(0x7f800000);
+     float bv = ninf;
+     int bi = 0x7fffffff;
+@@ -737,7 +778,14 @@ __device__ unsigned tf_ds_block_argmax(const float* row, int n) {
+             bi = oi;
+         }
+     }
+-    return row[0] != row[0] ? 0u : (unsigned)bi;
++    *out_v = bv;
++    return (unsigned)bi;
++}
++
++__device__ unsigned tf_ds_block_argmax(const float* row, int n) {
++    float v;
++    const unsigned bi = tf_ds_block_argmax_v(row, n, &v);
++    return row[0] != row[0] ? 0u : bi;
+ }
+ 
+ // logits [rows, n] fp32 (row stride ld), out [rows] u32; a row a block (1024 threads).
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 51deb18c8b13c77624e2cebb3eedebf73a8a883f..82c3c75410025a3466c8d7fe37957d0beded19ff 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1453,11 +1453,9 @@ fn chunkRows(start: usize, len: usize) usize {
+         }
+         // 0160 (TF_DS_ABSORB_AFTER_PICK): forward, then the pick, then the taps' absorb left running under the host's
+         // accept and the pass frame's send; off: the served order (forward, absorb, pick)
+-        try m.verify(rows);
+-        if (!m.absorb_after_pick) try m.absorbRows(rows, self.built.absorb[0..windows.len]);
+-        const t2 = m.now();
+         // every row greedy: the device's argmax (R tokens back); every sampled row one the kernel reproduces and
+-        // TF_DS_T27_DEVICE_DRAW on: the device's draw (R tokens back); else the logits for the host's draws
++        // TF_DS_T27_DEVICE_DRAW on: the device's draw (R tokens back); else the logits for the host's draws. Read before
++        // the forward: TF_DS_GREEDY_ARGMAX decides the head's exchange from it.
+         var rules: sampling.RoundRules = .{};
+         for (windows) |w| if (w.stream.sampling) |sm| rules.add(sm.temperature, sm.top_k);
+         // a score stream's rows need every logit on the host
+@@ -1467,6 +1465,13 @@ fn chunkRows(start: usize, len: usize) usize {
+         // TF_DS_SPEC_SAMPLE: a sampled round reads its logits on the host (the drafted rows' p), whatever the draw switch
+         const spec = m.ops.spec and m.dr != null and m.dr.?.sq != 0;
+         const path = if (spec and rules.sampled) .host_draw else rules.path(m.ops.draw_rows != null);
++        // TF_DS_GREEDY_ARGMAX (0186): a greedy round consumes nothing but the pick, so its head exchanges the ranks'
++        // (value, index) a row instead of the vocabulary halves; the round decides, so the stretch's graph carries it
++        m.rd.map = m.argmax_map and sampling.argmaxMapWorks(m.eng.world, m.two != null, path);
++        defer m.rd.map = false;
++        try m.verify(rows);
++        if (!m.absorb_after_pick) try m.absorbRows(rows, self.built.absorb[0..windows.len]);
++        const t2 = m.now();
+         // TF_DS_DEVICE_ACCEPT: chain windows' keep counts from the device (one kernel after the pick, in roundArgmax);
+         // every window a chain and the rows' picks from the device, else the host's acceptPath decides as before
+         var accept_n: usize = 0;
+@@ -1503,6 +1508,7 @@ fn chunkRows(start: usize, len: usize) usize {
+         }
+         defer m.draw_rows = 0;
+         const tokens: []const u32 = if (path == .host_draw) &.{} else try m.roundArgmax(n_rows);
++        m.rd.map = false; // (the round's own; the next one decides again)
+         // TF_DS_DEVICE_ACCEPT: the keeps ride the amax buffer right after the picks (roundArgmax memcpy'd them out)
+         if (accept_n != 0) {
+             for (0..accept_n) |k| out[k].device_keep = m.amax_host[n_rows + k];
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 8f27fddc10b3c06d68ec0bad67a450b00cdb3052..ff2836bc9b6aa6f7a40988a7b89dc006f499e6c0 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -118,6 +118,8 @@ pub const Options = struct {
+     prefetch: bool = false, // the paced L2 prefetch (round.Round.usePrefetch)
+     // TF_DS_PREFILL_GATHER_OVERLAP (0183): the chunk's MoE gather on a stream of its own, joined where the post reads it
+     gather_overlap: bool = false,
++    // TF_DS_GREEDY_ARGMAX (0186): a greedy round exchanges the ranks' argmax instead of the logits
++    greedy_argmax: bool = false,
+     // TF_DS_BF16_PARTIALS (0185, LOSSY): the chunk's attention partial rounded to bf16 before its gather
+     bf16_partials: bool = false,
+     engram_aio: bool = false, // a round's Engram reads by Linux AIO on O_DIRECT (else the reader pool)
+@@ -222,6 +224,8 @@ pub const Model = struct {
+     // TF_DS_EXACT_RESUME: every slot's tail (prompt.Tail: the last window rows of a prompt pass's decoder input, a ring)
+     // and the device buffer they share; no tails with the switch off
+     exact_resume: bool = false,
++    // TF_DS_GREEDY_ARGMAX (0186): the switch, and each round's choice (lanes.zig arms round.Round.map from it)
++    argmax_map: bool = false,
+     tails: []prompt.Tail = &.{},
+     tail_buf: ?cuda.DeviceBuffer = null,
+     // TF_DS_ABSORB_AFTER_PICK (0160): the round's drafter-taps absorb launches after the pick's host read and is
+@@ -526,6 +530,7 @@ pub const Model = struct {
+         if (o.side) try m.rd.useSide(&m.eng);
+         if (o.prefetch) try m.rd.usePrefetch(&m.eng);
+         if (o.gather_overlap and prompt.overlapWorks(sp.world, m.two != null)) try m.useGatherSide();
++        m.argmax_map = o.greedy_argmax;
+         if (o.drafts) {
+             m.dpool = try draft.Pool.init(&m.eng, &m.arena, m.streams);
+             m.dr = try draft.Drafter.init(&m.eng, &m.arena, sp);
+@@ -1835,6 +1840,10 @@ pub const Model = struct {
+ 
+     /// The round's token kernel over R rows into amax: the draw under setDraw rules, else the argmax.
+     fn launchPick(m: *Model, R: usize) !void {
++        if (m.rd.map_done) { // TF_DS_GREEDY_ARGMAX: the head exchanged the pairs; the reduce is the pick
++            m.rd.map_done = false;
++            return m.ops.argmaxReduce(m.stream, m.rd.amap, m.eng.world, m.rd.amap_n, R, m.amax);
++        }
+         if (m.draw_rows == 0) return m.ops.argmaxRows(m.stream, m.rd.logits, m.vocab, m.vocab, R, m.amax);
+         if (R != m.draw_rows) return error.BadRound;
+         try m.ops.drawRows(m.stream, m.rd.logits, m.vocab, m.vocab, R, m.draw_tab, m.amax);
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 2b63a8202e416d8a6f24f12172b1198d272b4ae2..2c4a885ab38e25573b8c91be2d801df8f3e8e2da 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -86,6 +86,13 @@
+ //!                                               is in flight; the same all-gather on the same ranks, so bits identical
+ //!                                               (set alike on both ranks; no frame, no bytes, no fingerprint bit). A lone
+ //!                                               rank or the four-node 2D split keeps the main stream. Off: nothing changes
++//!   TF_DS_GREEDY_ARGMAX=1                      a round whose rows are all greedy (no sampled row, no draw rules, no score
++//!                                               stream, no probe) exchanges each rank's (value, index) a row - R * 8 bytes
++//!                                               - instead of the ranks' vocabulary halves (258,560 B a row a rank), and
++//!                                               reduces them to the same pick with the same rules: the first largest,
++//!                                               the lower rank winning a tie, rank 0's row[0] NaN rule as 0. Bits
++//!                                               identical; two or more ranks without the 2D split; the graph key carries
++//!                                               the round's choice. Off: the logits gather as served
+ //!   TF_DS_BF16_PARTIALS=1                      LOSSY, opt-in: a prompt chunk's attention partial (wo_b's output)
+ //!                                               is written bf16, gathered as bf16 (the payload halves) and widened
+ //!                                               back to fp32 before the FFN mixes' sum, as Baseten rounds before the
+@@ -339,6 +346,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+         .prefetch = if (getenv("TF_DS_L2_PREFETCH")) |v| !std.mem.eql(u8, v, "0") else false,
+         .gather_overlap = ops_mod.onValue(getenv(prompt.gather_side_env)), // 0183 (the 2D split and a lone rank keep the main stream: Model.useGatherSide)
+         .bf16_partials = ops_mod.onValue(getenv("TF_DS_BF16_PARTIALS")), // 0185, LOSSY (a lone rank and the 2D split keep fp32: Model.open)
++        .greedy_argmax = ops_mod.onValue(getenv("TF_DS_GREEDY_ARGMAX")), // 0186 (a greedy round's rule: sampling.argmaxMapWorks)
+         .engram_aio = if (getenv("TF_DS_ENGRAM_AIO")) |v| !std.mem.eql(u8, v, "0") else false,
+         .pool = try pool_mod.resolve(o.context, getenv("TF_DS_POOL")), // may exceed the window: more kept prompts stay resident
+         .window = o.context, // (a follower takes TF_DS_WINDOW, else rank 0's: Model.open)
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 0ec0f1775beb2bd87e8b7a3c9836ff66f245daed..028416b6355cb5b5858fb2da4ecf5c7b5d7e5258 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -111,6 +111,8 @@ pub const Ops = struct {
+     gather: cuda.Function,
+     copy16: cuda.Function,
+     argmax_rows: cuda.Function,
++    argmax_pair: cuda.Function, // TF_DS_GREEDY_ARGMAX: a rank's (value, index) a row
++    argmax_reduce: cuda.Function, // TF_DS_GREEDY_ARGMAX: the ranks' pairs to the round's picks
+     accept_chain: cuda.Function, // TF_DS_DEVICE_ACCEPT (only launched under it)
+     gpu_clock: cuda.Function,
+     prune: ?expert_prune.Mode = null, // TF_DS_T13_EXPERT_PRUNE and _EXPERT_CAP, read at load
+@@ -163,6 +165,8 @@ pub const Ops = struct {
+             .gather = try mv.function("tf_gather_rows_kernel"),
+             .copy16 = try fm.function("tf_ds_copy_rows16_kernel"),
+             .argmax_rows = try fm.function("tf_ds_argmax_rows_kernel"),
++            .argmax_pair = try fm.function("tf_ds_argmax_pair_kernel"),
++            .argmax_reduce = try fm.function("tf_ds_argmax_reduce_kernel"),
+             .accept_chain = try fm.function("tf_ds_accept_chain_kernel"),
+             .gpu_clock = try fm.function("tf_ds_clock_kernel"),
+             .prune = prune,
+@@ -253,6 +257,34 @@ pub const Ops = struct {
+         try cuda.launch.launch(o.topk_i64, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
+     }
+ 
++    /// TF_DS_GREEDY_ARGMAX: each row's (value bits, index) of a rank's logits into out [rows, 2] (argmax_rows' rule
++    /// without its row[0] one, which rides the index as 0xffffffff - the reduce applies rank 0's).
++    pub fn argmaxPair(o: *const Ops, s: cuda.Stream, logits: u64, ld: usize, n: usize, rows: usize, out: u64) !void {
++        if (rows == 0) return;
++        var a: cuda.Args = .{};
++        a.add(logits);
++        a.add(@as(c_ulonglong, @intCast(ld)));
++        a.add(@as(c_int, @intCast(n)));
++        a.add(out);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.argmax_pair, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
++    }
++
++    /// TF_DS_GREEDY_ARGMAX: the ranks' pairs [rows, world, 2] in rank order (`n` a rank's columns) reduced to the picks,
++    /// which is argmaxRows' answer for the whole vocabulary (so the accept chain and the host read them as always).
++    pub fn argmaxReduce(o: *const Ops, s: cuda.Stream, pairs: u64, world: usize, n: usize, rows: usize, out: u64) !void {
++        if (rows == 0) return;
++        var a: cuda.Args = .{};
++        a.add(pairs);
++        a.add(@as(c_int, @intCast(world)));
++        a.add(@as(c_int, @intCast(n)));
++        a.add(@as(c_int, @intCast(rows)));
++        a.add(out);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        const block: u32 = if (rows >= 32) 32 else @intCast(rows);
++        try cuda.launch.launch(o.argmax_reduce, .{ .grid = .{ .x = 1 }, .block = .{ .x = block }, .pdl = o.pdl }, s, &a);
++    }
++
+     /// kernels.topk_indices(score, k) with torch.where(top < vis, top, -1): each row's k highest fp32 scores' columns
+     /// ascending (ties to the lower column), a column at or past vis[r] as -1. score [rows, n] (row stride ss), vis
+     /// [rows] int64, out [rows, k] int64.
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 9539089f54738b527bd10166b4babfa3936fba09..578da551336325009da5970af8dc1ba6a5c79f2f 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -287,6 +287,13 @@ pub const Round = struct {
+     hl: u64, // fp32 [R, columns]
+     hg: u64, // fp32 [world, R, columns]
+     logits: u64, // fp32 [R, world * columns]: the rows' logits, the ranks' columns in rank order
++    // TF_DS_GREEDY_ARGMAX: `map` says this round exchanges each rank's (value, index) a row instead of its columns of
++    // the logits (the caller sets it before the forward); `map_done` says the head wrote the pairs, so the pick is the
++    // reduce over them; amap holds them, [R, world, 2] u32 in rank order.
++    map: bool = false,
++    map_done: bool = false,
++    amap: u64,
++    amap_n: usize = 0, // a rank's columns of the head (the reduce's index offset)
+     taps: u64, // bf16 [R, taps * D]
+     // wo_a's suh concatenated a layer (wo_a_rot: torch.cat of the slices' suh, cached on the layer)
+     wo_suh: []u64,
+@@ -536,6 +543,10 @@ pub const Round = struct {
+         rd.hl = try a.take(R * w.head.n * 4);
+         rd.hg = try a.take(e.world * R * hh * 4);
+         rd.logits = try a.take(R * e.world * hh * 4);
++        rd.amap = try a.take(R * e.world * 8); // (TF_DS_GREEDY_ARGMAX: pairs, tiny; allocated either way)
++        rd.map = false;
++        rd.map_done = false;
++        rd.amap_n = 0;
+         rd.taps = try a.take(R * @max(c.dspark_taps.slice().len, 1) * d * 2);
+         // wo_a_rot's suh: the slices' suh one after another (torch.cat's bytes)
+         rd.wo_suh = try gpa.alloc(u64, w.layers.len);
+@@ -1692,7 +1703,8 @@ pub const Graphs = struct {
+     gpa: std.mem.Allocator,
+     lru: graph_cache.Lru(Key, Entry),
+ 
+-    pub const Key = struct { rows: u32, bucket: u64, stretch: u32, mode: u8 = 0 }; // mode: the round's shard.Mode (auto's choice)
++    // mode: the round's shard.Mode (auto's choice); map: TF_DS_GREEDY_ARGMAX's head (the exchange, not the logits' gather)
++    pub const Key = struct { rows: u32, bucket: u64, stretch: u32, mode: u8 = 0, map: u8 = 0 };
+     const Entry = struct { exec: cuda.graph.Exec, start: Carry, end: Carry };
+ 
+     pub fn init(gpa: std.mem.Allocator, cap: usize) Graphs {
+@@ -1823,7 +1835,7 @@ pub fn forward(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches
+         }
+         try rd.clock(e, Round.clock_wait);
+         if (graphs) |g| {
+-            try g.run(.{ .rows = @intCast(R), .bucket = rd.bucket, .stretch = sn, .mode = @intFromEnum(rd.smode) }, e, rd, ch, cs, rings, &cy, li, end);
++            try g.run(.{ .rows = @intCast(R), .bucket = rd.bucket, .stretch = sn, .mode = @intFromEnum(rd.smode), .map = @intFromBool(rd.map) }, e, rd, ch, cs, rings, &cy, li, end);
+         } else try stretch(e, rd, ch, cs, rings, &cy, li, end, probe);
+         try rd.clock(e, Round.clock_tail);
+         if (!ahead) try engramAhead(e, eh orelse return error.NoEngramTables, seq, rows, &ah);
+@@ -1923,6 +1935,17 @@ fn stretch(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches, ri
+     try prompt.grouped(e, ch, R, &.{w.head}, &.{rd.xc}, &.{d}, &.{rd.hl}, &.{hn}, &.{.f32});
+     try Probe.check(probe, .head_cols, w.layers.len, rd.hl);
+     const hh = if (e.two) |tw| tw.hw[0] + tw.hw[1] else hn; // a rank's vocabulary half (2D: both pairs' quarters)
++    if (rd.map) {
++        // TF_DS_GREEDY_ARGMAX: nothing but the pick is consumed, so the ranks' (value, index) a row travel instead of the
++        // vocabulary halves - an in-place all-gather of R * 8 bytes a rank, both ranks left holding the same pairs.
++        // roundArgmax's reduce turns them into the pick (the same answer the whole logits would have given).
++        try e.ops.argmaxPair(e.s, rd.hl, hn, hn, R, rd.amap + e.comm.rank * R * 8);
++        try e.comm.allGatherInPlace(rd.amap, R * 8, e.s);
++        rd.map_done = true;
++        rd.amap_n = hn;
++        try rd.mark(e, .head);
++        return;
++    }
+     if (e.two) |tw| try tw.quarters(e, rd.hl, rd.hg, R, tw.hw, 4) else try e.gatherF32(rd.hl, rd.hg, R * hn);
+     try Probe.check(probe, .head_gather, w.layers.len, rd.hg);
+     for (0..e.world) |k| try e.ops.copyRows(e.s, rd.hg + k * R * hh * 4, hh * 4, rd.logits + k * hh * 4, e.world * hh * 4, hh * 4, R);
+diff --git a/zig/src/families/dsv41/sampling.zig b/zig/src/families/dsv41/sampling.zig
+index 814d75178442800c15091284b372c0645b4694c3..616855add203d14708be29f4adf13c824619665b 100644
+--- a/zig/src/families/dsv41/sampling.zig
++++ b/zig/src/families/dsv41/sampling.zig
+@@ -330,6 +330,21 @@ pub const RoundRules = struct {
+     }
+ };
+ 
++/// TF_DS_GREEDY_ARGMAX applies to a round whose rows are all greedy (no sampled row, no draw rules, no score stream's
++/// logits) over a transport that can carry it: two or more ranks and not the four-node split (whose head is the pairs'
++/// quarters). The logits nothing else reads is the caller's word (the served round has no probe).
++pub fn argmaxMapWorks(world: usize, two: bool, path: RoundPath) bool {
++    return world >= 2 and !two and path == .greedy;
++}
++
++test "TF_DS_GREEDY_ARGMAX: greedy rounds only, two ranks, no 2D split" {
++    try std.testing.expect(argmaxMapWorks(2, false, .greedy) and argmaxMapWorks(4, false, .greedy));
++    try std.testing.expect(!argmaxMapWorks(2, false, .device_draw)); // a sampled row needs the distribution
++    try std.testing.expect(!argmaxMapWorks(2, false, .host_draw)); // the host's draw, or a score stream's logits
++    try std.testing.expect(!argmaxMapWorks(1, false, .greedy)); // one rank's pick is already local
++    try std.testing.expect(!argmaxMapWorks(2, true, .greedy)); // the 2D head exchanges quarters
++}
++
+ test "splitmix64 draws as exact_sampling.uniform makes them" {
+     // (seed, position, id) -> the bits of exact_sampling.uniform's double
+     try std.testing.expectEqual(@as(u64, 0x3fe8cd8867d6a69c), @as(u64, @bitCast(uniform(101, 2229, 2581))));

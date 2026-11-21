@@ -1,0 +1,229 @@
+[prepare.sh] WARN: ABLIT=1: drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated is gated. You must have access at https://huggingface.co/drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated (accept its terms while logged in) and use your Hugging Face read token: export HF_TOKEN=hf_... or hf auth login. The token's account must have access to this repository.
+[prepare.sh] Downloading the matching Mia 2.9 bpw overlay from drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated @ 0bdc2036
+Fetching 4 files:   0%|          | 0/4 [00:00<?, ?it/s]Fetching 4 files: 100%|██████████| 4/4 [00:00<00:00, 1074.43it/s]
+[prepare.sh] Preflight checks on both Sparks
+[prepare.sh] Rail roceP2p1s0f0 <-> roceP2p1s0f1: 192.168.100.5 <-> 192.168.100.6 reaches the peer (MTU 9000): used
+[prepare.sh] Link: this node 192.168.100.1 (enp1s0f0np0, RoCE rocep1s0f0,roceP2p1s0f0) <-> colum@10.50.0.11 192.168.100.2 (enp1s0f1np1, RoCE rocep1s0f1,roceP2p1s0f1); NFS from 10.50.0.1
+[prepare.sh] Pulling the prebuilt image ghcr.io/miaai-lab/deepseek-v4.1-flash-1017-2x-dgx-sparks-tensorfold:exl3-tp2-bd9020f403bd if there is one (PULL=0 builds instead)
+[prepare.sh] No prebuilt image for these pins (ghcr.io/miaai-lab/deepseek-v4.1-flash-1017-2x-dgx-sparks-tensorfold:exl3-tp2-bd9020f403bd): building it locally
+[prepare.sh] Building tensorfold-dsv41:exl3-tp2-bd9020f403bd (TensorFold fbbc97132cd0 + inputs' tools 59402086381a, 104 engine + 2 inputs patches, Zig 0.17.0; two Zig builds, ~6 min on a Spark)
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 5.54kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for nvcr.io/nvidia/pytorch:26.07-py3
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 DONE 0.0s
+
+#5 [ 1/12] FROM nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
+#5 resolve nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c 0.0s done
+#5 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 5.22MB 0.0s done
+#4 DONE 0.0s
+
+#6 [ 2/12] RUN python3 -m pip install --no-cache-dir safetensors
+#6 CACHED
+
+#7 [ 3/12] RUN ok=0;     for base in https://zig.linus.dev/zig "https://ziglang.org/download/0.17.0"; do       url="${base%/}/zig-aarch64-linux-0.17.0.tar.xz"; echo "zig: trying ${url}";       if curl --connect-timeout 20 --max-time 300 --retry 3 --retry-delay 5 --retry-max-time 600 -fsSL -o /tmp/zig.tar.xz "${url}" &&          echo "9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8  /tmp/zig.tar.xz" | sha256sum -c -; then ok=1; break; fi;       rm -f /tmp/zig.tar.xz;     done;     [ "$ok" = 1 ] || { echo "zig 0.17.0: no source served the pinned sha256" >&2; exit 1; };     mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 && rm /tmp/zig.tar.xz &&     /opt/zig/zig version
+#7 CACHED
+
+#8 [ 4/12] RUN git init -q /tensorfold && cd /tensorfold && git remote add origin "https://github.com/bertholomus/TensorFold.git" &&     git fetch -q --depth 1 origin "fbbc97132cd004237d9887b8d3185896efaedc5c" && git checkout -q --detach FETCH_HEAD &&     test "$(git rev-parse HEAD)" = "fbbc97132cd004237d9887b8d3185896efaedc5c"
+#8 CACHED
+
+#9 [ 5/12] COPY zig/patches /opt/tf-patches
+#9 DONE 0.0s
+
+#10 [ 6/12] RUN cd /tensorfold &&     for p in /opt/tf-patches/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; git apply --check "$p" && git apply "$p" || exit 1; done
+#10 0.214 applying /opt/tf-patches/0001-c7-indexer-split.patch
+#10 0.226 applying /opt/tf-patches/0004-call-gate.patch
+#10 0.232 applying /opt/tf-patches/0005-prefill-interleave.patch
+#10 0.236 applying /opt/tf-patches/0008-pool-window.patch
+#10 0.239 applying /opt/tf-patches/0010-rdma-idle-nap.patch
+#10 0.241 applying /opt/tf-patches/0011-cuda-budget-parked-pages.patch
+#10 0.244 applying /opt/tf-patches/0012-dsv41-base-fixes.patch
+#10 0.246 applying /opt/tf-patches/0013-core-spill-store.patch
+#10 0.251 applying /opt/tf-patches/0014-core-cache-tier.patch
+#10 0.257 applying /opt/tf-patches/0015-dsv41-kv-shard-attn.patch
+#10 0.267 applying /opt/tf-patches/0016-dsv41-spill-blocks.patch
+#10 0.274 applying /opt/tf-patches/0017-dsv41-kit-row-split.patch
+#10 0.280 applying /opt/tf-patches/0018-dsv41-kv-shard-lanes.patch
+#10 0.287 applying /opt/tf-patches/0019-dsv41-spill-kv-shard.patch
+#10 0.297 applying /opt/tf-patches/0020-dsv41-pair-broken.patch
+#10 0.304 applying /opt/tf-patches/0021-dsv41-spill-pictures.patch
+#10 0.313 applying /opt/tf-patches/0022-dsv41-kv-shard-ring.patch
+#10 0.319 applying /opt/tf-patches/0023-server-prepare-memory.patch
+#10 0.325 applying /opt/tf-patches/0024-mixed-pack.patch
+#10 0.328 applying /opt/tf-patches/0025-widen-bf16.patch
+#10 0.331 applying /opt/tf-patches/0026-plain-rows.patch
+#10 0.334 applying /opt/tf-patches/0027-tool-call-prose.patch
+#10 0.337 applying /opt/tf-patches/0028-plain-request-text.patch
+#10 0.340 applying /opt/tf-patches/0029-anthropic-budget-default.patch
+#10 0.343 applying /opt/tf-patches/0030-anthropic-context-management-lenient.patch
+#10 0.345 applying /opt/tf-patches/0031-anthropic-system-anywhere.patch
+#10 0.348 applying /opt/tf-patches/0032-stream-keepalive-ping.patch
+#10 0.351 applying /opt/tf-patches/0033-graph-cap.patch
+#10 0.355 applying /opt/tf-patches/0034-rebase-followups.patch
+#10 0.358 applying /opt/tf-patches/0035-engram-lead-failure-paths.patch
+#10 0.364 applying /opt/tf-patches/0036-metrics-cached-prompt-tokens.patch
+#10 0.367 applying /opt/tf-patches/0037-rendezvous-ports-early.patch
+#10 0.370 applying /opt/tf-patches/0038-aligned-index-views.patch
+#10 0.373 applying /opt/tf-patches/0040-restore-room.patch
+#10 0.378 applying /opt/tf-patches/0041-service-between-pieces.patch
+#10 0.381 applying /opt/tf-patches/0042-kv-shard-pieces.patch
+#10 0.385 applying /opt/tf-patches/0043-picture-resume-skip.patch
+#10 0.388 applying /opt/tf-patches/0045-cut-in-tail.patch
+#10 0.393 applying /opt/tf-patches/0046-server-get-delete-body-discard.patch
+#10 0.395 applying /opt/tf-patches/0047-replayed-reasoning.patch
+#10 0.398 applying /opt/tf-patches/0048-stream-tool-calls.patch
+#10 0.402 applying /opt/tf-patches/0049-first-draft-depth.patch
+#10 0.404 applying /opt/tf-patches/0050-draft-calibration.patch
+#10 0.409 applying /opt/tf-patches/0051-prompt-rows.patch
+#10 0.414 applying /opt/tf-patches/0052-prefill-slice.patch
+#10 0.420 applying /opt/tf-patches/0053-expert-prune-cap.patch
+#10 0.426 applying /opt/tf-patches/0054-keyed-draft.patch
+#10 0.431 applying /opt/tf-patches/0055-device-draw.patch
+#10 0.436 applying /opt/tf-patches/0056-server-picture-prepare-scratch.patch
+#10 0.438 applying /opt/tf-patches/0057-drop-reasoning-history.patch
+#10 0.442 applying /opt/tf-patches/0058-responses-include-encrypted.patch
+#10 0.446 applying /opt/tf-patches/0059-lane-thread-binds-context.patch
+#10 0.449 applying /opt/tf-patches/0064-dsml-opener-short-payload.patch
+#10 0.452 applying /opt/tf-patches/0065-dsml-value-holds-closer.patch
+#10 0.459 /opt/tf-patches/0065-dsml-value-holds-closer.patch:3454: new blank line at EOF.
+#10 0.459 +
+#10 0.461 warning: 1 line adds whitespace errors.
+#10 0.462 applying /opt/tf-patches/0066-load-prefetch.patch
+#10 0.464 applying /opt/tf-patches/0067-orphan-dsml-closer-diagnostic.patch
+#10 0.467 applying /opt/tf-patches/0068-rdma-proxy-cpus.patch
+#10 0.471 applying /opt/tf-patches/0069-engram-lookup-latency.patch
+#10 0.478 applying /opt/tf-patches/0070-request-timing-log.patch
+#10 0.480 applying /opt/tf-patches/0094-engram-trim.patch
+#10 0.483 applying /opt/tf-patches/0095-engram-scales-mapped.patch
+#10 0.487 applying /opt/tf-patches/0096-engram-dedupe.patch
+#10 0.491 applying /opt/tf-patches/0097-engram-fast.patch
+#10 0.495 applying /opt/tf-patches/0098-engram-strict.patch
+#10 0.499 applying /opt/tf-patches/0103-draft-depth2.patch
+#10 0.503 applying /opt/tf-patches/0104-draft-depth3.patch
+#10 0.506 applying /opt/tf-patches/0105-draft-depth4.patch
+#10 0.510 applying /opt/tf-patches/0106-draft-depth5.patch
+#10 0.513 applying /opt/tf-patches/0110-shared-cuts.patch
+#10 0.516 applying /opt/tf-patches/0111-edit-mark.patch
+#10 0.519 applying /opt/tf-patches/0112-eviction.patch
+#10 0.525 applying /opt/tf-patches/0113-spill-stride.patch
+#10 0.531 applying /opt/tf-patches/0114-engram-rowcache.patch
+#10 0.535 applying /opt/tf-patches/0115-shared-plan.patch
+#10 0.539 applying /opt/tf-patches/0116-cache-metrics.patch
+#10 0.544 applying /opt/tf-patches/0117-energy-request.patch
+#10 0.549 applying /opt/tf-patches/0118-draft-lora.patch
+#10 0.552 applying /opt/tf-patches/0119-token-cache.patch
+#10 0.556 applying /opt/tf-patches/0120-score.patch
+#10 0.562 applying /opt/tf-patches/0121-exact-resume.patch
+#10 0.569 applying /opt/tf-patches/0122-spec-sample.patch
+#10 0.574 applying /opt/tf-patches/0123-serve-round-profile.patch
+#10 0.577 applying /opt/tf-patches/0124-device-accept.patch
+#10 0.582 applying /opt/tf-patches/0125-compress-side.patch
+#10 0.586 applying /opt/tf-patches/0126-pdl.patch
+#10 0.595 applying /opt/tf-patches/0127-fused-compress2.patch
+#10 0.599 applying /opt/tf-patches/0128-engram-both.patch
+#10 0.602 applying /opt/tf-patches/0129-dsv41-tf-ds-engram-scales-map-warm-off-by-defaul.patch
+#10 0.606 applying /opt/tf-patches/0130-dsv41-tf-ds-engram-decode-threads-off-by-default.patch
+#10 0.610 applying /opt/tf-patches/0131-dsv41-tf-ds-engram-pool-off-by-default-sizes-the.patch
+#10 0.613 applying /opt/tf-patches/0132-dsv41-tf-ds-engram-cpus-off-by-default-pins-the.patch
+#10 0.617 applying /opt/tf-patches/0133-dsv41-tf-ds-engram-aio-batch-off-by-default-boun.patch
+#10 0.620 applying /opt/tf-patches/0134-dsv41-engram-host-ms-on-the-done-line-and-the-ba.patch
+#10 0.624 applying /opt/tf-patches/0135-dsv41-tf-ds-spill-shared-min-tokens-off-by-defau.patch
+#10 0.628 applying /opt/tf-patches/0136-dsv41-the-engram-row-cache-s-map-holds-no-tombst.patch
+#10 0.630 applying /opt/tf-patches/0137-dsv41-w10-c-core-rehashmap-rehashes-an-autohashm.patch
+#10 0.634 applying /opt/tf-patches/0138-server-queue-s-and-restore-s-on-the-done-line-tt.patch
+#10 0.637 applying /opt/tf-patches/0139-dsv41-tf-ds-fix-k-and-the-depth-pins-tf-ds-draft.patch
+#10 0.639 applying /opt/tf-patches/0140-dsv41-tf-ds-expert-bytes-1-off-by-default-counts.patch
+#10 0.642 applying /opt/tf-patches/0141-dsv41-tf-ds-prefill-profile-1-off-by-default-clo.patch
+#10 0.647 applying /opt/tf-patches/0142-dsv41-tf-dsv41-probe-the-moe-pure-read-probe-w4.patch
+#10 0.649 /opt/tf-patches/0142-dsv41-tf-dsv41-probe-the-moe-pure-read-probe-w4.patch:509: new blank line at EOF.
+#10 0.649 +
+#10 0.649 warning: 1 line adds whitespace errors.
+#10 0.649 applying /opt/tf-patches/0143-dsv41-tf-ds-allocate-learned-off-by-default-pric.patch
+#10 0.653 applying /opt/tf-patches/0144-dsv41-pass-send-ms-on-both-profile-lines-profile.patch
+#10 0.657 applying /opt/tf-patches/0145-dsv41-tf-ds-rdma-probes-off-by-default-gives-rin.patch
+#10 DONE 0.7s
+
+#11 [ 7/12] RUN cd /tensorfold && /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 -Doptimize=ReleaseFast       --prefix /opt/tensorfold -j"$(nproc)" install native &&     test -x /opt/tensorfold/native/bin/tensorfold-native && test -x /opt/tensorfold/bin/tf-dsv41-lanes &&     mkdir -p /opt/tensorfold/share/doc/tensorfold &&     for f in LICENSE NOTICE ATTRIBUTION.md THIRD_PARTY_NOTICES.md LICENSES; do       if [ -e "$f" ]; then cp -a "$f" /opt/tensorfold/share/doc/tensorfold/ || exit 1; fi; done &&     if [ -e tools/dsv41-zig/ATTRIBUTION.md ]; then cp -a tools/dsv41-zig/ATTRIBUTION.md /opt/tensorfold/share/doc/tensorfold/DSV41-ATTRIBUTION.md; fi &&     rm -rf /tensorfold /root/.cache/zig
+#11 59.07 native
+#11 59.07 +- install tensorfold-native
+#11 59.07    +- compile exe tensorfold-native safe native
+#11 59.07       +- run /usr/local/cuda/bin/nvcc (prefill_attention.fatbin) w
+#11 59.07 ./zig/kernels/cuda/prefill_attention.cu(18): warning #177-D: variable "tf_prefill_attention::SMEM_MAX" was declared but never referenced
+#11 59.07   constexpr int SMEM_MAX = 96 * 1024;
+#11 59.07                 ^
+#11 59.07 
+#11 59.07 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+#11 59.07 
+#11 59.07 
+#11 DONE 152.6s
+
+#12 [ 8/12] RUN git init -q /tf-inputs && cd /tf-inputs && git remote add origin "https://github.com/bertholomus/TensorFold.git" &&     git fetch -q --depth 1 origin "59402086381a42c74d53053443224eec2790b4c5" && git checkout -q --detach FETCH_HEAD &&     test "$(git rev-parse HEAD)" = "59402086381a42c74d53053443224eec2790b4c5"
+#12 DONE 1.1s
+
+#13 [ 9/12] COPY zig/patches-inputs /opt/tf-inputs-patches
+#13 DONE 0.0s
+
+#14 [10/12] RUN cd /tf-inputs &&     for p in /opt/tf-inputs-patches/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; git apply --check "$p" && git apply "$p" || exit 1; done
+#14 0.142 applying /opt/tf-inputs-patches/0001-mixed-pack-rank-cache.patch
+#14 0.147 applying /opt/tf-inputs-patches/0002-widen-bf16.patch
+#14 DONE 0.2s
+
+#15 [11/12] RUN cd /tf-inputs && /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 -Doptimize=ReleaseFast       --prefix /opt/inputs -j"$(nproc)" install &&     test -x /opt/inputs/bin/tf-dsv41-rank-cache &&     cp /opt/inputs/bin/tf-dsv41-rank-cache /opt/tensorfold/bin/ &&     mkdir -p /opt/tensorfold/tools/inputs &&     cp tools/dsv41-zig/inputs/make_token_map.py tools/dsv41-zig/kit/make_rope.py tools/dsv41-zig/kit/make_bias_vl.py        /opt/tensorfold/tools/inputs/ &&     cp LICENSE /opt/tensorfold/share/doc/tensorfold/LICENSE-inputs-branch &&     rm -rf /tf-inputs /opt/inputs /root/.cache/zig
+#15 57.35 install
+#15 57.35 +- install tf-dsv41-vit
+#15 57.35    +- compile exe tf-dsv41-vit fast native
+#15 57.35       +- run /usr/local/cuda/bin/nvcc (prefill_attention.fatbin) w
+#15 57.35 ./zig/kernels/cuda/prefill_attention.cu(18): warning #177-D: variable "tf_prefill_attention::SMEM_MAX" was declared but never referenced
+#15 57.35   constexpr int SMEM_MAX = 96 * 1024;
+#15 57.35                 ^
+#15 57.35 
+#15 57.35 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+#15 57.35 
+#15 57.35 
+#15 DONE 115.3s
+
+#16 [12/12] WORKDIR /workspace
+#16 DONE 0.0s
+
+#17 exporting to image
+#17 exporting layers
+#17 exporting layers 2.5s done
+#17 exporting manifest sha256:12dbce5b0b56358068ec5d307959663a7332721f821c454fc4f0036aecd64789 done
+#17 exporting config sha256:63a5690bc8858e0b8b50a7556b9ad0774e3281c3ef750b3e76f0c0f16e4545c6 done
+#17 exporting attestation manifest sha256:ac5ee765c55eae6de80649d6af0ddeab6433b826bd15fc85dba9b6572c3de09e done
+#17 exporting manifest list sha256:599c633807e2ac3e4032c09be738bc9a8e8f481a285cb008a58ec66034ac005f done
+#17 naming to docker.io/library/tensorfold-dsv41:exl3-tp2-bd9020f403bd done
+#17 unpacking to docker.io/library/tensorfold-dsv41:exl3-tp2-bd9020f403bd
+#17 unpacking to docker.io/library/tensorfold-dsv41:exl3-tp2-bd9020f403bd 0.7s done
+#17 DONE 3.4s
+[prepare.sh] Copying tensorfold-dsv41:exl3-tp2-bd9020f403bd to colum@10.50.0.11 (docker save | docker load; only missing layers are stored)
+[prepare.sh] Image tensorfold-dsv41:exl3-tp2-bd9020f403bd identical on both Sparks
+[prepare.sh] Downloading Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw @ 45ee5d0f into /nfs1/hub (196 GiB the first time; resumes)
+Fetching 64 files:   0%|          | 0/64 [00:00<?, ?it/s]Fetching 64 files: 100%|██████████| 64/64 [00:00<00:00, 4586.21it/s]
+[prepare.sh] Checkpoint: /nfs1/hub/models--Mia-AiLab--DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw/snapshots/45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b (197G)
+[prepare.sh] Downloading Engram's tables: model-00047-of-00048.safetensors, model-00048-of-00048.safetensors of deepseek-ai/DeepSeek-V4.1-Flash-1017 @ 1bae0e10 (~203 GB the first time; resumes)
+Fetching 4 files:   0%|          | 0/4 [00:00<?, ?it/s]Fetching 4 files: 100%|██████████| 4/4 [00:00<00:00, 1098.42it/s]
+[prepare.sh] Engram: /nfs1/hub/models--deepseek-ai--DeepSeek-V4.1-Flash-1017/snapshots/1bae0e1088993b9b82de08f59de5be5a34e42170 (190G)
+[prepare.sh] Matching Mia overlay checkpoint: ready
+every tensor already has its stock dtype
+[prepare.sh] Kit: 222 of 223 files match MANIFEST; the image bias is 1017's own
+[prepare.sh] Token map: the same bytes the kit's Engram fixtures were recorded with
+[prepare.sh] Weight file of rank 0: ready
+[prepare.sh] Served folder: /nfs1/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036/model (the checkpoint linked, the recipe's chat template)
+[prepare.sh] Worker (colum@10.50.0.11) reads the checkpoint, the kit and rank 0's files over NFS
+[prepare.sh] Worker: Engram tables on its disk
+[prepare.sh] Worker: weight file of rank 1 ready
+[prepare.sh] Done: both Sparks are ready. Start the server with ./start.sh (port 8000).

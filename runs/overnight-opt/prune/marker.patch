@@ -1,0 +1,17 @@
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -2164,6 +2164,14 @@
+ 
+     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
+         const self = of(ptr);
++        // The benchmark submits a one-token sentinel only between timed groups on an idle pair.
++        if (s.max_new == 1 and envOne("TF_DS_BENCH_PRUNE_REPORT")) {
++            if (self.m.pruneStats() catch null) |st| {
++                std.log.info("hard-prune snapshot {s} windows={d} rows={d} before={d} after={d} dropped={d} dropped_ppm={d}", .{ s.id, st.windows, st.rows, st.before, st.after, st.dropped, st.dropped_ppm });
++            } else {
++                std.log.info("hard-prune snapshot {s} off", .{s.id});
++            }
++        }
+         if (self.fill) |f| if (f.s == s) {
+             self.m.joinAhead();
+             self.m.dropChunk();

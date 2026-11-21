@@ -1,0 +1,14 @@
+--- a/zig/src/families/dsv41/parts.zig
++++ b/zig/src/families/dsv41/parts.zig
+@@ -2296,7 +2296,10 @@
+         const cy = carryOf(&p);
+         t.check("10 rescue: the carry names the hit's rows, all of them, part 0 to part 1", cy != null and cy.?.rows == 8 * C and cy.?.src == 24 * C and cy.?.src_part == 0 and cy.?.dst_part == 1);
+         t.check("10 rescue: the extent first, then the carry (the follower holds the ADMIT before the rows travel)", index(&p, .admit) != null and index(&p, .carry) != null and index(&p, .admit).? < index(&p, .carry).? and count(&p, .carry) == 1 and count(&p, .copy) == 0);
+-        t.check("10 counters: nothing counted at planning", f.pl.counters.hits == 0 and f.pl.counters.rescued == 0);
++        // The counted_at_plan mutant writes through a const observer. Read the actual counters
++        // here so an optimized test cannot fold the intended read-only plan into this check.
++        const observed: *const volatile Counters = &f.pl.counters;
++        t.check("10 counters: nothing counted at planning", observed.hits == 0 and observed.rescued == 0);
+         try f.apply(&p);
+         const c = f.pl.counters;
+         t.check("10 rescue: counted once at apply as rescued, no refusal, no no_part", c.hits == 1 and c.rescued == 1 and c.pressure == 0 and c.others == 0 and c.no_part == 0 and c.tokens == 8 * C and c.bytes == 8 * C * 720);

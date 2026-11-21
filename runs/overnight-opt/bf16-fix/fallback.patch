@@ -1,0 +1,20 @@
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1187,8 +1187,15 @@
+     }
+     prefill_prof.subEnd(e.s, .a_woa);
+     if (e.two) |t| return t.woB(e, ch, lay); // 2D: the column partner's groups first, then this pair's columns
+-    // TF_DS_BF16_PARTIALS: the partial rounded to bf16 as the GEMM writes it (RNE, as Baseten rounds it before the sum)
+-    if (e.bf16_partials) return mm(e, ch, lay.wo_b, ch.u, uw, ch.pb, .bf16, c.hidden);
++    // The pinned EXL3 kit has only the fp32-output wo_b GEMM for bulk prompts. Keep its fp32 result
++    // in pa and round once on the same stream before the bf16 gather. The short and plain linears write bf16 directly.
++    if (e.bf16_partials) {
++        if (lay.wo_b.plain == 0 and prompt_rows.denseOnGemm(n, e.gemm_rows)) {
++            try mm(e, ch, lay.wo_b, ch.u, uw, ch.pa, .fp32, c.hidden);
++            return e.ops.toBf16(e.s, ch.pa, ch.pb, n * c.hidden);
++        }
++        return mm(e, ch, lay.wo_b, ch.u, uw, ch.pb, .bf16, c.hidden);
++    }
+     try mm(e, ch, lay.wo_b, ch.u, uw, ch.pa, .fp32, c.hidden);
+ }
+ 

@@ -1,0 +1,84 @@
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -70,6 +70,9 @@
+     // and frees its extent (its kept state then resumes in place) instead of waiting out every queued pass, as the
+     // Python lane's fills leave decoding its share
+     finish_until: ?i96 = null,
++    finish_ns: i96 = 5 * std.time.ns_per_s,
++    adaptive_finish: bool = false,
++    logged_extension: bool = false,
+     filling: ?*Job = null, // the job whose prompt pass runs in pieces between rounds (core.filling's)
+     // prefill interleave (TF_DS_PREFILL_INTERLEAVE_MS, 0/unset: off): between two chunks of a long prompt pass, decode
+     // rounds for the other live streams for up to this many ms, their tokens delivered, so a cold long prompt slows a
+@@ -134,7 +137,6 @@
+     const Mark = struct { at: i96, tokens: u64 };
+     const full_retry_ns: i96 = std.time.ns_per_s;
+     const long_pass_ns: i96 = std.time.ns_per_s;
+-    const finish_ns: i96 = 5 * std.time.ns_per_s;
+     const finish_left: i64 = 256;
+     const window_ns: i96 = 2 * std.time.ns_per_s;
+     /// How often an idle host polls work in flight (restores, staged writes, deferred retries).
+@@ -315,7 +317,17 @@
+         var ms: i96 = 0;
+         if (std.c.getenv("TF_DS_PREFILL_INTERLEAVE_MS")) |v| ms = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
+         const metrics = cacheMetricsEnabled(if (std.c.getenv("TF_DS_CACHE_METRICS")) |v| std.mem.span(v) else null);
+-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced, .interleave_ns = ms * std.time.ns_per_ms, .cache_metrics = metrics };
++        var host: LaneHost = .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced, .interleave_ns = ms * std.time.ns_per_ms, .cache_metrics = metrics };
++        if (std.c.getenv("TF_DS_FINISH_GRACE_MS")) |value| {
++            const grace_ms = std.fmt.parseInt(u32, std.mem.span(value), 10) catch return host;
++            host.finish_ns = @as(i96, grace_ms) * std.time.ns_per_ms;
++            std.debug.print("lane host finish grace: {d} ms\n", .{grace_ms});
++        }
++        if (std.c.getenv("TF_DS_FINISH_ADAPTIVE")) |v| {
++            host.adaptive_finish = std.mem.eql(u8, std.mem.span(v), "1");
++            if (host.adaptive_finish) std.debug.print("lane host adaptive finish: on\n", .{});
++        }
++        return host;
+     }
+ 
+     /// The tier's switches (before start). Telemetry is published from here on when either is on: a tier on the cache
+@@ -756,9 +768,10 @@
+         }
+         h.prefilled(job, began);
+         const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
+-        if (now - began >= long_pass_ns) {
++        if (h.finish_ns > 0 and now - began >= long_pass_ns) {
+             h.lock();
+-            h.finish_until = now + finish_ns;
++            h.finish_until = now + h.finish_ns;
++            h.logged_extension = false;
+             h.unlock();
+         }
+         if (h.deliver(job)) h.remove(job);
+@@ -831,7 +844,30 @@
+ 
+     /// Whether an admitted stream decodes within finish_left tokens of its max_tokens (the lock held).
+     fn nearEnd(h: *LaneHost) bool {
+-        for (h.admitted.items) |job| if (job.started and !job.stream.finished and job.stream.budgetLeft() <= finish_left) return true;
++        if (!h.adaptive_finish) {
++            for (h.admitted.items) |job| if (job.started and !job.stream.finished and job.stream.budgetLeft() <= finish_left) return true;
++            return false;
++        }
++        const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
++        const initial = now < h.finish_until.? - h.finish_ns + 500 * std.time.ns_per_ms;
++        for (h.admitted.items) |job| {
++            if (!job.started or job.stream.finished) continue;
++            const left = job.stream.budgetLeft();
++            if (left > finish_left) continue;
++            if (initial) return true;
++            const began = job.prefilled orelse continue;
++            const generated = job.stream.emitted().len -| 1;
++            if (generated < 4) continue;
++            // Budget left divided by this stream's observed wall-time decode rate.
++            // Compare products to avoid rounding the token rate before the decision.
++            if (@as(i96, left) * @max(0, now - began) <= @as(i96, @intCast(generated)) * std.time.ns_per_s) {
++                if (!h.logged_extension) {
++                    std.debug.print("adaptive finish extension: left={d} generated={d}\n", .{ left, generated });
++                    h.logged_extension = true;
++                }
++                return true;
++            }
++        }
+         return false;
+     }
+ 

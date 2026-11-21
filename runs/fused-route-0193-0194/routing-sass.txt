@@ -1,0 +1,69 @@
+Installed kit abe07c7d, kit/aot/aot.json SHA256 29dccbcfdfc327a2ca83f40eb88c2bad83f9f61128e0cd27c29a1243d6fcd603
+Disassembler: Build cuda_13.1.r13.1/compiler.36836380_0
+Command: nvdisasm -c kit/aot/cubins/<manifest hash>.cubin
+
+_route {'NE': 384, 'NB': 512, 'TOPK': 6, 'SLOTS': 7, 'SP': 8, 'PDL': 1}
+Kit cubin filename: a52c99fbc7f9f6dcb665bbcebfefc22e99a1d31131eb1a5723825d9d18b59bb0.cubin
+Cubin SHA256: e6977f98e54f63acfda5f6fa41f705af5398b2ad9300041c88ec1676319db88e
+.target	sm_121a
+/*0200*/                   FMUL R0, R32, 1.4426950216293334961 ;
+/*02c0*/                   MUFU.EX2 R29, R0 ;
+/*0400*/                   FFMA.FTZ R8, R9, -R36, 0.14084610342979431152 ;
+/*0c40*/                   MUFU.SQRT R25, R32 ;
+/*5700*/                   FADD R10, R2, 9.999999682655225389e-21 ;
+/*5730*/                   FSETP.GT.AND P3, PT, |R10|.reuse, 8.50705917302346158658e+37, PT ;
+/*5750*/                   FSETP.GEU.AND P1, PT, |R10|, 1.175494350822287508e-38, PT ;
+/*57b0*/               @P3 FMUL R10, R10, 0.25 ;
+/*57e0*/              @!P1 FMUL R10, R10, 16777216 ;
+/*5820*/                   MUFU.RCP R10, R10 ;
+/*5870*/               @P3 FMUL R13, R13, 0.25 ;
+/*58b0*/              @!P1 FMUL R13, R13, 16777216 ;
+/*58f0*/                   FMUL R10, R10, R13 ;
+/*5910*/                   FMUL R10, R10, UR6 ;
+/*5940*/                   SEL R7, R10, 0x3f800000, !P1 ;
+/*5960*/                   STG.E desc[UR4][R2.64], R7 ;
+
+_route_parts {'NE': 384, 'NB': 512, 'TOPK': 6, 'SLOTS': 7, 'SP': 8, 'KC': 20, 'PDL': 1}
+Kit cubin filename: 5a4b9b7b0691ac635eb94dbafd12f1ce7f436819bac0be519b715d074ac35d46.cubin
+Cubin SHA256: 552fbe3da6db460f5ebf03e12a5327d179baa421bb1a58f27159a50d88430e2f
+.target	sm_121a
+/*6a80*/               @P3 FMUL R6, R6, 0.25 ;
+/*6ac0*/              @!P1 FMUL R6, R6, 16777216 ;
+/*6af0*/                   MUFU.RCP R7, R6 ;
+/*6b30*/                   IMAD R69, R69, 0x7, RZ ;
+/*6b80*/              @!P1 FMUL R0, R0, 16777216 ;
+/*6bb0*/                   FMUL R7, R7, R0 ;
+/*6be0*/                   FMUL R7, R7, UR6 ;
+/*6c10*/                   SEL R7, R7, 0x3f800000, !P1 ;
+/*6c30*/                   STG.E desc[UR4][R2.64], R7 ;
+
+_rowmm_parts {'K': 5120, 'N': 384, 'BN': 8, 'BK': 256, 'CPG': 1, 'RB': 16, 'PDL': 1}
+Kit cubin filename: d9a14b681c3c754ae6b66f1f4593449153c69170d9ae4c300101523c650cd9b4.cubin
+Cubin SHA256: 7924ffeef2207d182169b8f45edea1432e467771bb6e5cbc2946526a6c13bfd8
+.target	sm_121a
+/*05f0*/                   FMUL R50, R48.reuse, R17 ;
+/*0630*/                   FFMA R50, R44.reuse, R11, R50 ;
+/*0670*/                   FFMA R52, R49.reuse, R21, R50 ;
+/*06b0*/                   FFMA R52, R40.reuse, R23, R52 ;
+/*06f0*/                   FFMA R52, R51.reuse, R19, R52 ;
+/*0740*/                   FFMA R52, R46.reuse, R15, R52 ;
+/*0790*/                   FFMA R47, R63, R13, R52 ;
+/*07e0*/                   FFMA R48, R65, R10, R47 ;
+
+_rowmm_parts {'rows': 1, 'K': 5120, 'N': 384, 'BN': 16, 'BK': 256, 'CPG': 1, 'RB': 1, 'PDL': 1}
+Kit cubin filename: eb07ac98075a8472cfcd21ac0cea5325763c1a408d27be6fa0cf25529f3565ea.cubin
+Cubin SHA256: ebd49943eabcc2d4c8af9eea9f341df2d553f6e19f89be8405903235baff25d1
+.target	sm_121a
+/*0550*/                   LDG.E.128 R36, desc[UR4][R38.64] ;
+/*05d0*/                   FMUL R3, R40.reuse, R3 ;
+/*05f0*/                   FFMA R43, R36, R43, R3 ;
+/*0790*/                   FFMA R24, R16.reuse, R24, R43 ;
+/*0880*/                   FFMA R36, R37, R28, R24 ;
+/*0930*/                   FFMA R20, R9, R24, R36 ;
+/*0b50*/                   FFMA R37, R33, R13, R20 ;
+/*0c50*/                   FFMA R4, R20.reuse, R7, R37 ;
+/*0d30*/                   FFMA R32, R33, R32, R27 ;
+/*0dd0*/                   SHFL.BFLY PT, R3, R4, 0x10, 0x1f ;
+/*0e80*/                   FADD R3, R4, R3 ;
+/*0ec0*/                   SHFL.BFLY PT, R4, R3, 0x8, 0x1f ;
+

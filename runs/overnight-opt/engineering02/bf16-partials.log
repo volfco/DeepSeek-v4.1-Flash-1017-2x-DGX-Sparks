@@ -1,0 +1,29 @@
+2026-11-18T13:50:04.062680+00:00 restart bench
+2026-11-18T13:52:08.266683+00:00 restart production
+2026-11-18T13:54:07.184357+00:00 production start rc=1, smoke retry passed
+Traceback (most recent call last):
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/screen.py", line 344, in <module>
+    p.add_argument("--append-cold",action="store_true")
+            ^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/screen.py", line 266, in run
+    elif args.mode=="resend-gate":
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/screen.py", line 48, in decode
+    client.cell(depth,"chat-prime",[context+"Prime this history."],[7310],budget=16)
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/engine-followup/client/sample.py", line 178, in cell
+    out = [f.result() for f in futures]
+           ^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/screen.py", line 42, in request
+    result = ordinary_request(prompt,seed,budget,gate,effective,**kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/engine-followup/client/sample.py", line 128, in request
+    raise RuntimeError("Incomplete streamed reply")
+RuntimeError: Incomplete streamed reply

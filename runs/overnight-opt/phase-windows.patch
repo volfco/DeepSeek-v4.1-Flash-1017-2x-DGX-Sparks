@@ -1,0 +1,129 @@
+--- /dev/null
++++ b/zig/src/families/dsv41/phase_windows.zig
+@@ -0,0 +1,36 @@
++//! Benchmark-only phase ranges, in CLOCK_MONOTONIC nanoseconds. One bounded buffer per host thread.
++const std = @import("std");
++const Record = extern struct { start: u64, end: u64, kind: u32, phase: u32 };
++threadlocal var fd: c_int = -2;
++threadlocal var used: usize = 0;
++threadlocal var buffer: [512]Record = undefined;
++pub fn enabled() bool {
++    if (fd == -2) {
++        fd = -1;
++        const value = std.c.getenv("TF_DS_PHASE_WINDOWS") orelse return false;
++        if (std.mem.eql(u8, std.mem.span(value), "1")) fd = std.c.open("/tmp/dsv41-phase-windows.bin", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(c_uint, 0o600));
++    }
++    return fd >= 0;
++}
++pub fn clock() u64 {
++    var ts: std.c.timespec = undefined;
++    _ = std.c.clock_gettime(.MONOTONIC, &ts);
++    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
++}
++pub fn flush() void {
++    if (used == 0) return;
++    const bytes = std.mem.sliceAsBytes(buffer[0..used]);
++    var at: usize = 0;
++    while (at < bytes.len) {
++        const n = std.c.write(fd, bytes.ptr + at, bytes.len - at);
++        if (n <= 0) @panic("phase trace write failed");
++        at += @intCast(n);
++    }
++    used = 0;
++}
++pub fn record(kind: u32, phase: u32, start: u64, end: u64) void {
++    if (!enabled() or end < start) return;
++    if (used == buffer.len) flush();
++    buffer[used] = .{ .kind = kind, .phase = phase, .start = start, .end = end };
++    used += 1;
++}
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -11,6 +11,7 @@
+ //! made on the host. A node of the four-node 2D split takes its column parts and their exchanges through round2d.zig's
+ //! hooks (Engine.two).
+ const std = @import("std");
++const phase_windows = @import("phase_windows.zig");
+ const cuda = @import("cuda");
+ const prompt = @import("prompt.zig");
+ const weights = @import("weights.zig");
+@@ -1606,6 +1607,7 @@
+         return @intFromEnum(p) >= @intFromEnum(Phase.sh_fetch) or p == .a_q or p == .a_idx or p == .a_core;
+     }
+     const max_marks = 1024;
++    trace_anchor: u64 = 0,
+     events: []cuda.Event,
+     phase: [max_marks]Phase = undefined,
+     n: usize = 0,
+@@ -1635,6 +1637,10 @@
+     pub fn mark(t: *PhaseTimer, s: cuda.Stream, p: Phase) !void {
+         if (t.n == max_marks) return;
+         try t.events[t.n].record(s);
++        if (t.n == 0 and phase_windows.enabled()) {
++            try t.events[0].synchronize();
++            t.trace_anchor = phase_windows.clock();
++        }
+         t.phase[t.n] = p;
+         t.n += 1;
+     }
+@@ -1643,7 +1649,21 @@
+     pub fn finish(t: *PhaseTimer) !void {
+         if (t.n == 0) return;
+         try t.events[t.n - 1].synchronize();
+-        for (1..t.n) |i| t.ms[@backingInt(t.phase[i])] += try cuda.Event.elapsedMs(t.events[i - 1], t.events[i]);
++        const finish_stamp = if (t.trace_anchor != 0) phase_windows.clock() else 0;
++        var cursor = t.trace_anchor;
++        for (1..t.n) |i| {
++            const ms = try cuda.Event.elapsedMs(t.events[i - 1], t.events[i]);
++            t.ms[@backingInt(t.phase[i])] += ms;
++            if (t.trace_anchor != 0) {
++                const end = cursor + @as(u64, @intFromFloat(@round(ms * 1e6)));
++                phase_windows.record(0, @intFromEnum(t.phase[i]), cursor, end);
++                cursor = end;
++            }
++        }
++        if (t.trace_anchor != 0) {
++            phase_windows.record(3, 0, t.trace_anchor, finish_stamp);
++            phase_windows.flush();
++        }
+         t.n = 0;
+         t.rounds += 1;
+     }
+--- a/zig/src/families/dsv41/prefill_prof.zig
++++ b/zig/src/families/dsv41/prefill_prof.zig
+@@ -13,6 +13,7 @@
+ //! The line prints at the end of the run next to prefill_engram_ms (lanes_main.zig) as "prefill_profile_ms": every
+ //! mark's average ms a chunk, and the chunks counted. Unset, every mark is one load and a branch.
+ const std = @import("std");
++const phase_windows = @import("phase_windows.zig");
+ const cuda = @import("cuda");
+ 
+ pub const Phase = enum(u8) {
+@@ -64,6 +65,7 @@
+     const c = @intFromEnum(classOf(ph));
+     if (p.sub[c] == 0) return;
+     const now = p.stamp(s);
++    phase_windows.record(2, @intFromEnum(ph), p.sub[c], now);
+     p.ns[@backingInt(ph)] += now - p.sub[c];
+     p.sub[c] = now;
+ }
+@@ -75,6 +77,7 @@
+     p.cursor = 0;
+     p.sub = @splat(0);
+     p.chunks += 1;
++    phase_windows.flush();
+ }
+ 
+ /// The run's line, next to prefill_engram_ms: each mark's average ms a chunk.
+@@ -101,7 +104,10 @@
+ 
+     fn cut(p: *Profiler, now: u64, ph: Phase) void {
+         // start opens a chunk's interval: a chunk that failed mid-way leaves no open one to charge it
+-        if (p.cursor != 0 and ph != .start) p.ns[@backingInt(ph)] += now - p.cursor;
++        if (p.cursor != 0 and ph != .start) {
++            phase_windows.record(1, @intFromEnum(ph), p.cursor, now);
++            p.ns[@backingInt(ph)] += now - p.cursor;
++        }
+         p.cursor = now;
+     }
+ };

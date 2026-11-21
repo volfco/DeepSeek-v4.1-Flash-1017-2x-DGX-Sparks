@@ -1,0 +1,13 @@
+# bench-only (head): forward-declare tf_ds_block_argmax_v - 0186 calls it at its new kernel (~line 383) before its definition (~line 778)
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -371,6 +371,8 @@
+     for (int i = threadIdx.x; i < k; i += blockDim.x) o[i] = cols[i] < v ? cols[i] : -1;
+ }
+ 
++__device__ unsigned tf_ds_block_argmax_v(const float* row, int n, float* out_v);
++
+ // TF_DS_GREEDY_ARGMAX: a round whose rows are all greedy consumes only the pick, so each rank's (value, index) a row
+ // travels instead of its vocabulary half. The argmax is tf_ds_block_argmax_v's (NaN skipped, ties to the lower column);
+ // its row[0] rule is NOT applied here - the reduce applies rank 0's, which is the whole row's first value - and that

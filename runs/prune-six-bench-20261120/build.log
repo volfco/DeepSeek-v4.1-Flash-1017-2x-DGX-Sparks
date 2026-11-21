@@ -1,0 +1,63 @@
+== build tensorfold-dsv41:bench-prune-six-20261120 22:29:01
+#0 building with "default" instance using docker driver
+
+#1 [internal] load remote build context
+#1 DONE 0.6s
+
+#1 [internal] load remote build context
+#1 DONE 0.6s
+
+#2 copy /context /
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626
+#3 DONE 0.0s
+
+#4 [build 1/4] FROM docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626@sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee
+#4 resolve docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626@sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee 0.0s done
+#4 CACHED
+
+#5 [build 2/4] COPY . /tensorfold
+#5 DONE 0.1s
+
+#6 [build 3/4] WORKDIR /tensorfold
+#6 DONE 0.0s
+
+#7 [build 4/4] RUN /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 -Doptimize=ReleaseFast --prefix /stage -j4 install native
+#7 59.56 install
+#7 59.56 +- install tf-dsv41-engram-check
+#7 59.56    +- compile exe tf-dsv41-engram-check fast native
+#7 59.56       +- run /usr/local/cuda/bin/nvcc (prefill_attention.fatbin) w
+#7 59.56 ./zig/kernels/cuda/prefill_attention.cu(18): warning #177-D: variable "tf_prefill_attention::SMEM_MAX" was declared but never referenced
+#7 59.56   constexpr int SMEM_MAX = 96 * 1024;
+#7 59.56                 ^
+#7 59.56 
+#7 59.56 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+#7 59.56 
+#7 59.56 
+#7 DONE 232.5s
+
+#8 [stage-1 2/3] COPY --from=build /stage/native/bin/tensorfold-native /opt/tensorfold/native/bin/tensorfold-native
+#8 DONE 0.0s
+
+#9 [stage-1 3/3] COPY --from=build /stage/bin/tf-dsv41-lanes /opt/tensorfold/bin/tf-dsv41-lanes
+#9 DONE 0.0s
+
+#10 exporting to image
+#10 exporting layers
+#10 exporting layers 0.8s done
+#10 exporting manifest sha256:f97311dd3bb18e1ea63f867866ced9980ca266204f85672ab7e929c1c09fa86c done
+#10 exporting config sha256:44830902f835c39f713d19e6a92e8bfdbe8df174d98ebafbd7ba72d9c8281361 done
+#10 exporting attestation manifest sha256:fd7b525bbe8b9ba94ba40055aec16e7767901789dab7acc7205635cdf72097d6 done
+#10 exporting manifest list sha256:dd5f307e6a239f1c636a9a6fe495a1c8842d64308bee443529426b6aed10a707 done
+#10 naming to docker.io/library/tensorfold-dsv41:bench-prune-six-20261120 done
+#10 unpacking to docker.io/library/tensorfold-dsv41:bench-prune-six-20261120
+#10 unpacking to docker.io/library/tensorfold-dsv41:bench-prune-six-20261120 0.3s done
+#10 DONE 1.3s
+== ship tensorfold-dsv41:bench-prune-six-20261120 22:32:57
+Loaded image: tensorfold-dsv41:bench-prune-six-20261120
+37322478035ad7276cf16aa42b02b182b7f6694b147dd963d9882eec9a9ad325  /opt/tensorfold/native/bin/tensorfold-native
+6dc98b7384cf003af7c8c6ad06c75716c43ffde43fe6f8bba54b22e9f3321ac7  /opt/tensorfold/bin/tf-dsv41-lanes
+37322478035ad7276cf16aa42b02b182b7f6694b147dd963d9882eec9a9ad325  /opt/tensorfold/native/bin/tensorfold-native
+6dc98b7384cf003af7c8c6ad06c75716c43ffde43fe6f8bba54b22e9f3321ac7  /opt/tensorfold/bin/tf-dsv41-lanes
+== done 22:35:34

@@ -1,0 +1,974 @@
+From d77a70d3049dc057fe6ba9f4fea435b1b499aaef Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Thu, 19 Nov 2026 11:28:25 -0800
+Subject: [PATCH 1/6] 0193+0194 (recipe patches, fixed versions)
+
+---
+ zig/kernels/cuda/dsv41_ops.cu           | 354 ++++++++++++++++++++++++
+ zig/src/families/dsv41/dsv41.zig        |   2 +
+ zig/src/families/dsv41/exl3_experts.zig |  14 +-
+ zig/src/families/dsv41/moe_route.zig    | 209 ++++++++++++++
+ zig/src/families/dsv41/ops.zig          | 137 +++++++++
+ zig/src/families/dsv41/prompt.zig       |  32 ++-
+ zig/src/families/dsv41/round.zig        |  43 ++-
+ 7 files changed, 776 insertions(+), 15 deletions(-)
+ create mode 100644 zig/src/families/dsv41/moe_route.zig
+
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index a04c894..432f779 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -302,6 +302,360 @@ extern "C" __global__ void tf_ds_dead_rows_kernel(int* pick, float* wts, const u
+     }
+ }
+ 
++// The fused route (TF_DS_FUSED_ROUTE): a decode window's gate, routing and prune in one launch, one block a row.
++// With kc > 0 the block computes the gate's chunk sums itself (rowmm_gate's _rowmm_parts arithmetic: each output's
++// chunk of 256 columns as 8 columns a lane, the same butterfly over 32 lanes as in rowmm2, chunks in order from
++// zero into the fp32 accumulator - the bits rowmm_gate's S and _route_parts' chunk loop are written to keep), then
++// the routing (_route_parts' _route_row: sqrt(softplus(lg)) with the lg > 20 shortcut, selection by sc + bias with
++// ties to the lower id, weights (sc * reciprocal(tot + 1e-20f)) * scale) in the same block. With kc == 0 the gate
++// phase is skipped and logits (a prompt chunk's cuBLAS output) are read instead: this is _route with kc == 0. When
++// do_prune the prune's rule is applied after the routing (expert_prune.zig's pruneRow, op for op; renorm arithmetic
++// and the stats counters as the prune kernel makes them). When `dead` is not null and dead[r] is set, every slot
++// becomes pick -1, weight 0 (0177, after the prune, as deadRows runs). The window-wide prune cap (cap > 0) needs all
++// rows in one block and is refused at the wrapper. stats (nullable) is the prune kernel's u64 [6]; scratch (required
++// iff stats) is u32[64] owned by the caller: 2x16 before/after bitmask words, then one ticket word for the
++// last-block reduce; on the stats path the last block resets the 33 words before it returns.
++//
++// The bit-level claim: each lane's 8-element chunk partial is a sequential fp32 chain (the products rounded as
++// written), the 32-lane reduce is the xor butterfly, each gate accumulator and the chunk loop are the same adds in
++// the same order, and every rounding is IEEE (this file is built --fmad=false --ftz=false). expf/logf/sqrtf are the
++// libdevice functions tl.exp/tl.log/tl.sqrt lower to, compiled without fast math. Whether the result is bit for bit
++// the kit's on a GB10 is a hardware question (UNVERIFIED-BUILD here: no nvcc on this machine): it is gated on the
++// exact suite on a Spark before the switch is trusted.
++//
++// The 0194 extension (same switch): the decode window's decode_prep folded in - the rotation of the input rows per
++// pick (rot_in_kernel's arithmetic: x * suh0/suh1 per gate / up matrix, FWHT128, x HAD_SCALE, to fp16), this row's half
++// of the unrouted-row combine (decode_prep's block-0 combine, done per row), and, in block 0 after a grid-wide barrier,
++// the grouping (uids / ucount / members) - all op for op from the upstream source (deepseek-v41-tp2, experts.cu). What
++// remains of a decode window after a fused launch: the two kit grouped_decode launches. UNVERIFIED-BUILD like the
++// rest; gated on the exact suite with the switch on.
++__device__ __forceinline__ void fwht128(float (&v)[4], int lane) {
++    float a = v[0] + v[1], b = v[0] - v[1], c = v[2] + v[3], d = v[2] - v[3];
++    v[0] = a + c; v[1] = b + d; v[2] = a - c; v[3] = b - d;
++#pragma unroll
++    for (int m = 1; m < 32; m <<= 1) {
++#pragma unroll
++        for (int j = 0; j < 4; ++j) {
++            float o = __shfl_xor_sync(0xffffffffu, v[j], m);
++            v[j] = (lane & m) ? o - v[j] : v[j] + o;
++        }
++    }
++}
++constexpr float HAD_SCALE = 0.08838834764831845f;   // 1 / sqrt(128)
++struct TfDsFused {
++    float scale;      // routed scaling (1.5)
++    float topp;       // prune rule (TfDsPrune shares these)
++    int shared_id;    // the shared expert's id (routing fills slots >= topk with it, weight 1)
++    int rows, ne, nb; // nb: pow2(ne), the routing's lane bound
++    int topk, slots, kc, k, xs;
++    int do_prune, cap, cap_min, min_k, renorm, apply, pdl;
++    int prep;         // 0194: 0 - the launch only routes (the prompt path); 1 - also the experts' prep (decode windows)
++    int e_count;      // 0194: the experts pack's size (the rotation's and grouping's pick bound; the gate only has ne)
++    int maxm;         // 0194: the member lists' stride (the rows)
++};
++extern "C" __global__ void __launch_bounds__(256) tf_ds_fused_route_kernel(
++    const __nv_bfloat16* __restrict__ x,  // [rows, xs] bf16; null iff kc == 0
++    const __half* __restrict__ w,         // [ne, k] fp16; null iff kc == 0
++    const float* __restrict__ logits,     // [rows, ne] fp32 (kc == 0); null iff kc > 0
++    const float* __restrict__ bias,       // [ne] fp32
++    int* pick, float* wts,                // [rows, slots]
++    const unsigned char* dead,            // [rows] or null (0177)
++    unsigned long long* stats,            // nullable u64 [6]
++    unsigned* scratch,                    // required iff stats or prep: u32[64], see above
++    __half* __restrict__ xg,              // 0194: [rows*slots, k] fp16 zeros (rot_in's out); null iff !prep
++    __half* __restrict__ xu,              // 0194: [rows*slots, k] fp16 zeros (rot_in's out); null iff !prep
++    const __half* __restrict__ suh0,      // 0194: fp16 [e_count, k] gate's signs; null iff !prep
++    const __half* __restrict__ suh1,      // 0194: fp16 [e_count, k] up's signs; null iff !prep
++    int* __restrict__ ids,                // 0194: [maxu] int32 out: the window's distinct experts; null iff !prep
++    int* __restrict__ ucount,             // 0194: [1] int32 out: how many; null iff !prep
++    int* __restrict__ members,            // 0194: [maxu, maxm] int32 out: member (row * 32 + slot) lists; null iff !prep
++    const float* __restrict__ y,          // 0194: [rows*slots, k] fp32 scratch the unrouted-row combine reads (zero first use)
++    const float* __restrict__ add,        // 0194: [rows, k] fp32 add for the unrouted-row combine, or null
++    float* __restrict__ out,              // 0194: [rows, k] fp32 out for the unrouted-row combine; null iff !prep
++    int* __restrict__ epoch,              // 0194: [1] int32, incremented once a launch (grouped_decode's readiness); null iff !prep
++    const TfDsFused a) {
++#define TF_DS_FUSED_EXPERTS 512
++    const int r = blockIdx.x, tid = threadIdx.x;
++    pdl_enter(a.pdl);
++    if (r >= a.rows) return;
++    if (a.prep && r == 0 && tid == 0 && epoch) epoch[0] += 1;
++    __shared__ float lg[512];
++    __shared__ int s_pick[8];
++    __shared__ float s_wts[8];
++    __shared__ unsigned mb[16], ma[16], acc[3];
++    for (int i = tid; i < 16; i += blockDim.x) { mb[i] = 0; ma[i] = 0; }
++    if (tid < 3) acc[tid] = 0;
++    // the gate: chunk sums added in order from zero (rowmm2's accumulator; _route_parts' chunk loop)
++    if (a.kc > 0) {
++        const int lane = tid & 31, warp = tid >> 5, nwarps = blockDim.x >> 5;
++        const int kk = a.k;
++        for (int n = warp; n < a.ne; n += nwarps) {
++            float accv = 0.f;
++            for (int t = 0; t < a.kc; ++t) {
++                const int off = t * 256 + lane * 8;
++                const uint4 xv = *reinterpret_cast<const uint4*>(x + (size_t)r * a.xs + off);
++                const uint4 wv = *reinterpret_cast<const uint4*>(w + (size_t)n * kk + off);
++                float part = 0.f;
++                const __nv_bfloat162* xp = reinterpret_cast<const __nv_bfloat162*>(&xv);
++                const __half2* wp = reinterpret_cast<const __half2*>(&wv);
++#pragma unroll
++                for (int j2 = 0; j2 < 4; ++j2) {
++                    const float2 xf = __bfloat1622float2(xp[j2]);
++                    const float2 wf = __half22float2(wp[j2]);
++                    part = __fadd_rn(part, __fmul_rn(xf.x, wf.x));
++                    part = __fadd_rn(part, __fmul_rn(xf.y, wf.y));
++                }
++#pragma unroll
++                for (int o = 16; o > 0; o >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xffffffffu, part, o));
++                accv = __fadd_rn(accv, part);
++            }
++            if (lane == 0) lg[n] = accv;
++        }
++        // the route phase's masked read covers e up to nb; keep the tail defined (the value is never used past the
++        // `ok` mask, so this is belt and braces, not semantics)
++        for (int e = a.ne + tid; e < a.nb; e += blockDim.x) lg[e] = 0.f;
++    } else {
++        for (int e = tid; e < a.nb; e += blockDim.x) lg[e] = e < a.ne ? logits[(size_t)r * a.ne + e] : 0.f;
++    }
++    __syncthreads();
++    // the routing (_route_parts' _route_row: its reductions are an extremum, a lowest-index tie break and a one-hot
++    // sum, so the result is independent of how the experts are laid out across the warp)
++    if (tid < 32) {
++        const int lane = tid;
++        const int stride = 32;              // e = lane + j * 32 covers nb <= 512 with j < 16
++        float sel[16], sc[16];
++        int ids[16];
++#pragma unroll
++        for (int j = 0; j < 16; ++j) {
++            const int e = lane + j * stride;
++            const bool ok = e < a.ne;
++            const float l = ok ? lg[e] : 0.f;
++            const float sp = l > 20.f ? l : logf(1.f + expf(l));
++            const float scv = sqrtf(sp);
++            sc[j] = scv;
++            ids[j] = e;
++            sel[j] = ok ? __fadd_rn(scv, bias[e]) : __int_as_float(0xff800000); // -inf
++        }
++        float tots = 0.f;
++        int picks[8];
++        float ws[8];
++#pragma unroll
++        for (int s = 0; s < 8; ++s) { picks[s] = a.shared_id; ws[s] = 1.f; }
++        for (int n = 0; n < a.topk; ++n) {
++            float best = __int_as_float(0xff800000);
++            int bid = lane;                 // ties (including all -inf) to the lowest id, as tl.min(tl.where(sel == best, e, NB))
++#pragma unroll
++            for (int j = 0; j < 16; ++j) {
++                const float v = sel[j];
++                if (v > best || (v == best && ids[j] < bid)) { best = v; bid = ids[j]; }
++            }
++#pragma unroll
++            for (int o = 16; o > 0; o >>= 1) {
++                const float ob = __shfl_xor_sync(0xffffffffu, best, o);
++                const int oi = __shfl_xor_sync(0xffffffffu, bid, o);
++                if (ob > best || (ob == best && oi < bid)) { best = ob; bid = oi; }
++            }
++            float v = 0.f;
++#pragma unroll
++            for (int j = 0; j < 16; ++j) v += ids[j] == bid ? sc[j] : 0.f;
++#pragma unroll
++            for (int o = 16; o > 0; o >>= 1) v = __fadd_rn(v, __shfl_xor_sync(0xffffffffu, v, o));
++            picks[n] = bid;
++            ws[n] = v;
++            tots = __fadd_rn(tots, v);
++#pragma unroll
++            for (int j = 0; j < 16; ++j) sel[j] = ids[j] == bid ? __int_as_float(0xff800000) : sel[j];
++        }
++        const float denom = __fadd_rn(tots, 1e-20f);
++        // The kit uses MUFU.RCP and two separately rounded multiplies. The
++        // score sum plus epsilon is normal and far below the reciprocal's
++        // overflow/underflow scaling thresholds for finite logits.
++        float inv_denom;
++        asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(inv_denom) : "f"(denom));
++#pragma unroll
++        for (int s = 0; s < 8; ++s) ws[s] = s < a.topk ? __fmul_rn(__fmul_rn(ws[s], inv_denom), a.scale) : 1.f;
++        if (lane == 0) {
++            for (int s = 0; s < a.slots; ++s) { s_pick[s] = picks[s]; s_wts[s] = ws[s]; }
++        }
++        if (stats && lane == 0) { // before the rule (the prune kernel's load-time mask)
++            for (int s = 0; s < a.topk; ++s) {
++                const int p = picks[s];
++                if (p >= 0 && p < TF_DS_FUSED_EXPERTS) atomicOr(&mb[p >> 5], 1u << (p & 31));
++            }
++        }
++        __syncwarp();
++    }
++    // the prune's rule (expert_prune.zig's pruneRow, op for op; the cap is refused at the wrapper)
++    if (a.do_prune && tid == 0) {
++        int p[8], rank[8], live = 0;
++        float f[8], ex[8], w[8], tot = 0.f;
++        bool keep[8];
++        for (int i = 0; i < a.topk; ++i) {
++            p[i] = s_pick[i]; w[i] = s_wts[i]; keep[i] = true;
++            if (p[i] < 0) continue;
++            ++live; tot = __fadd_rn(tot, w[i]);
++        }
++        const bool ok = live > 0 && tot > 0.f && !isinf(tot);
++        if (ok) {
++            for (int i = 0; i < a.topk; ++i) f[i] = p[i] >= 0 ? __fdiv_rn(w[i], tot) : 0.f;
++            for (int i = 0; i < a.topk; ++i) {
++                rank[i] = 0;
++                if (p[i] < 0) continue;
++                for (int j = 0; j < a.topk; ++j) rank[i] += p[j] >= 0 && (f[j] > f[i] || (f[j] == f[i] && j < i));
++            }
++            float run = 0.f;
++            for (int k = 0; k < live; ++k)
++                for (int i = 0; i < a.topk; ++i)
++                    if (p[i] >= 0 && rank[i] == k) { ex[i] = run; run = __fadd_rn(run, f[i]); }
++            const int floor_k = a.min_k > 1 ? a.min_k : 1;
++            for (int i = 0; i < a.topk; ++i)
++                if (p[i] >= 0) keep[i] = rank[i] < floor_k || ex[i] < a.topp;
++            int kept = 0;
++            float ks = 0.f, mass = 0.f;
++            for (int i = 0; i < a.topk; ++i) {
++                if (p[i] < 0) continue;
++                if (keep[i]) { ++kept; ks = __fadd_rn(ks, w[i]); } else mass = __fadd_rn(mass, f[i]);
++            }
++            if (kept < live) {
++                if (a.apply) {
++                    const float g = __fdiv_rn(tot, ks);
++                    for (int i = 0; i < a.topk; ++i) {
++                        if (p[i] < 0) continue;
++                        if (keep[i]) { if (a.renorm) w[i] = __fmul_rn(w[i], g); }
++                        else { p[i] = -1; w[i] = 0.f; }
++                    }
++                }
++                if (stats) { atomicAdd(&acc[0], (unsigned)(live - kept)); atomicAdd(&acc[2], (unsigned)(mass * 1e6f + 0.5f)); }
++            }
++        }
++        if (stats) {
++            atomicAdd(&acc[1], 1u);
++            for (int i = 0; i < a.topk; ++i)
++                if (p[i] >= 0 && keep[i] && p[i] < TF_DS_FUSED_EXPERTS) atomicOr(&ma[p[i] >> 5], 1u << (p[i] & 31));
++        }
++        if (a.apply) {
++            for (int i = 0; i < a.topk; ++i) { s_pick[i] = p[i]; s_wts[i] = w[i]; }
++        }
++    }
++    if (tid < 32) __syncwarp();
++    // 0177's dead rows: no slot routes (after the prune, as deadRows runs)
++    if (dead && dead[r]) {
++        if (tid < a.slots) { s_pick[tid] = -1; s_wts[tid] = 0.f; }
++        __syncwarp();
++    }
++    if (tid < a.slots) {
++        pick[(size_t)r * a.slots + tid] = s_pick[tid];
++        wts[(size_t)r * a.slots + tid] = s_wts[tid];
++    }
++    __syncthreads();
++    // --- 0194: this row's rotation of its picks (rot_in_kernel's arithmetic: x * suh, FWHT128, x HAD_SCALE, fp16) ---
++    if (a.prep) {
++        const int lane = tid & 31, warp = tid >> 5, nwarps = blockDim.x >> 5;
++        const int nblk = a.k >> 7; // K / 128
++        const int items = a.slots * nblk * 2;
++        for (int item = warp; item < items; item += nwarps) {
++            const int slot = item / (nblk * 2);
++            const int mat = (item / nblk) & 1;
++            const int blk = item % nblk;
++            const int e = s_pick[slot];
++            if (e < 0 || e >= a.e_count) continue;
++            const int p = r * a.slots + slot;
++            const __half* suh = (mat ? suh1 : suh0) + (size_t)e * a.k + blk * 128 + 4 * lane;
++            const __nv_bfloat16* xr = x + (size_t)r * a.xs + blk * 128 + 4 * lane;
++            float v[4];
++#pragma unroll
++            for (int j = 0; j < 4; ++j) v[j] = __bfloat162float(xr[j]) * __half2float(suh[j]);
++            fwht128(v, lane);
++            __half* o = (mat ? xu : xg) + (size_t)p * a.k + blk * 128 + 4 * lane;
++#pragma unroll
++            for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
++        }
++        // this row's unrouted-slot combine (decode_prep's block-0 combine, this row's own share)
++        int routed = 0;
++#pragma unroll
++        for (int q = 0; q < 8; ++q) routed += (q < a.slots && s_pick[q] >= 0 && s_pick[q] < a.e_count);
++        if (routed == 0) {
++            for (int d = tid * 4; d < a.k; d += blockDim.x * 4) {
++                float slot_acc[4] = { 0.f, 0.f, 0.f, 0.f };
++                for (int q = 0; q < a.slots; ++q) {
++                    const float w = s_wts[q];
++#pragma unroll
++                    for (int j = 0; j < 4; ++j) slot_acc[j] = fmaf(w, y ? y[((size_t)r * a.slots + q) * a.k + d + j] : 0.f, slot_acc[j]);
++                }
++#pragma unroll
++                for (int j = 0; j < 4; ++j) out[(size_t)r * a.k + d + j] = add ? __fadd_rn(slot_acc[j], add[(size_t)r * a.k + d + j]) : slot_acc[j];
++            }
++        }
++    }
++    // the window's masks into scratch; the last block pops them into stats and resets scratch for the next launch
++    if (stats) {
++        __syncthreads();
++        if (tid == 0) {
++            // the per-block counters go straight to stats (every block contributes); the window's before/after masks
++            // need the launch-wide OR, so only the last block pops them and bumps the window count
++            atomicAdd(stats + 3, (unsigned long long)acc[0]);
++            atomicAdd(stats + 4, (unsigned long long)acc[1]);
++            atomicAdd(stats + 5, (unsigned long long)acc[2]);
++            unsigned* sc = scratch;
++            for (int i = 0; i < 16; ++i) { atomicOr(&sc[i], mb[i]); atomicOr(&sc[16 + i], ma[i]); }
++            __threadfence();
++            const unsigned t = atomicAdd(&sc[32], 1u);
++            if (t == gridDim.x - 1) {
++                int before = 0, after = 0;
++                for (int i = 0; i < 16; ++i) { before += __popc(__ldcg(&sc[i])); after += __popc(__ldcg(&sc[16 + i])); }
++                atomicAdd(stats, 1ull);
++                atomicAdd(stats + 1, (unsigned long long)before);
++                atomicAdd(stats + 2, (unsigned long long)after);
++                for (int i = 0; i < 33; ++i) atomicExch(&sc[i], 0u);
++            }
++        }
++    }
++    // --- 0194: grid-wide barrier; block 0 groups the window's picks (kit decode_prep's block-0 grouping) ---
++    if (a.prep) {
++        __threadfence();
++        __syncthreads();
++        if (tid == 0) atomicAdd(&scratch[33], 1u);
++        if (blockIdx.x == 0) {
++            __shared__ int s_sp[128], s_first[128], s_used;
++            const int n = a.rows * a.slots;
++            if (tid == 0) s_used = 0;
++            __syncthreads();
++            while (__ldcg(&scratch[33]) != gridDim.x) __nanosleep(64);
++            for (int i = tid; i < n; i += blockDim.x) s_sp[i] = pick[i];
++            __syncthreads();
++            for (int i = tid; i < n; i += blockDim.x) {
++                const int e = s_sp[i];
++                int f = e >= 0 && e < a.e_count;
++                for (int j = 0; f && j < i; ++j) f = s_sp[j] != e;
++                s_first[i] = f;
++            }
++            __syncthreads();
++            int used = 0;
++            for (int i = tid; i < n; i += blockDim.x) {
++                const int e = s_sp[i];
++                if (e < 0 || e >= a.e_count) continue;
++                int place = 0, pos = 0, tot = 0;
++                for (int j = 0; j < n; ++j) {
++                    const int ej = s_sp[j];
++                    place += s_first[j] && ej < e;
++                    tot += ej == e;
++                    pos += ej == e && j < i;
++                }
++                if (pos < a.maxm) members[place * a.maxm + pos] = (i / a.slots) * 32 + (i % a.slots);
++                if (s_first[i]) {
++                    ids[place] = e;
++                    for (int k = tot; k < a.maxm; ++k) members[place * a.maxm + k] = -1;
++                    ++used;
++                }
++            }
++            if (used) atomicAdd(&s_used, used);
++            __syncthreads();
++            if (tid == 0) { ucount[0] = s_used; scratch[33] = 0; }
++        }
++        return;
++    }
++}
++
+ // Routed-expert top-p prune of a decode window (expert_prune.zig's pruneWindow, op for op), in place on the router's
+ // output, one thread a row. A slot the rule drops becomes pick -1, weight 0; the kept weights are scaled by total / kept
+ // sum (renorm). With cap > 0 the window then keeps only its cap heaviest experts (the rows' kept shares summed in row
+diff --git a/zig/src/families/dsv41/dsv41.zig b/zig/src/families/dsv41/dsv41.zig
+index 290f9c1..4190082 100644
+--- a/zig/src/families/dsv41/dsv41.zig
++++ b/zig/src/families/dsv41/dsv41.zig
+@@ -53,6 +53,7 @@ pub const model = @import("model.zig");
+ pub const prompt_rows = @import("prompt_rows.zig");
+ pub const prefill_prof = @import("prefill_prof.zig");
+ pub const expert_prune = @import("expert_prune.zig");
++pub const moe_route = @import("moe_route.zig");
+ pub const lanes = @import("lanes.zig");
+ pub const pool = @import("pool.zig");
+ pub const spill_state = @import("spill_state.zig");
+@@ -113,6 +114,7 @@ test {
+     refAll(prompt_rows);
+     refAll(prefill_prof);
+     refAll(expert_prune);
++    refAll(moe_route);
+     refAll(lanes);
+     refAll(pool);
+     refAll(spill_state);
+diff --git a/zig/src/families/dsv41/exl3_experts.zig b/zig/src/families/dsv41/exl3_experts.zig
+index f6182fe..caaa1d1 100644
+--- a/zig/src/families/dsv41/exl3_experts.zig
++++ b/zig/src/families/dsv41/exl3_experts.zig
+@@ -360,13 +360,23 @@ pub const DecodeLaunch = struct {
+ /// dependents.
+ pub fn decode(k: *const Kernels, s: cuda.Stream, ex: weights.Experts, sc: DecodeScratch, x: u64, x_stride: usize, pick: u64, wts: u64, out: u64, r: usize, limit: f32, places: ?usize) !void {
+     var ls = try decodeLaunches(ex, sc, x, x_stride, pick, wts, out, r, limit, places);
++    try launchDecode(k, s, &ls);
++}
++
++/// Decode after the fused router has populated the expert scratch and advanced its epoch.
++pub fn decodePrepared(k: *const Kernels, s: cuda.Stream, ex: weights.Experts, sc: DecodeScratch, x: u64, x_stride: usize, pick: u64, wts: u64, out: u64, r: usize, limit: f32, places: ?usize) !void {
++    var ls = try decodeLaunches(ex, sc, x, x_stride, pick, wts, out, r, limit, places);
++    try launchDecode(k, s, ls[1..]);
++}
++
++fn launchDecode(k: *const Kernels, s: cuda.Stream, ls: []DecodeLaunch) !void {
+     var fs: [3]cuda.Function = undefined;
+-    for (&ls, &fs) |*l, *f| f.* = switch (l.kernel) {
++    for (ls, fs[0..ls.len]) |*l, *f| f.* = switch (l.kernel) {
+         .prep => k.decode_prep,
+         .gate_up => k.cp[l.range][0] orelse return error.MissingKernel,
+         .down => k.cp[l.range][1] orelse return error.MissingKernel,
+     };
+-    for (&ls, fs) |*l, f| try cuda.launch.launch(f, l.cfg, s, &l.args);
++    for (ls, fs[0..ls.len]) |*l, f| try cuda.launch.launch(f, l.cfg, s, &l.args);
+ }
+ 
+ /// Whether `r` rows are a decode window of `sc`: under exact_rows rows, or under the scratch's rows when it holds more
+diff --git a/zig/src/families/dsv41/moe_route.zig b/zig/src/families/dsv41/moe_route.zig
+new file mode 100644
+index 0000000..b5c5225
+--- /dev/null
++++ b/zig/src/families/dsv41/moe_route.zig
+@@ -0,0 +1,209 @@
++//! TF_DS_FUSED_ROUTE (off by default): one launch a layer for a decode window's routing - the gate (rowmm_gate's chunk
++//! sums, kc > 0) or the prompt path's cuBLAS logits (kc == 0), the routing and, when TF_DS_T13_EXPERT_PRUNE is on, the
++//! prune's rule (its cap is refused), plus 0177's dead-row override when it is on. Pure: no cuda import; the launcher
++//! is Ops.moeRoute and the call sites are round.zig's and prompt.zig's moe functions.
++//!
++//! The kernel's bit-level arithmetic is written to reproduce the kit's _rowmm_parts / _route_parts and the prune
++//! kernel op for op (see the kernel in zig/kernels/cuda/dsv41_ops.cu and upstream kernels.py, deepseek-v41-tp2). That
++//! reproduction is UNVERIFIED-BUILD on this machine (no nvcc): it is gated on the exact suite on a Spark before the
++//! switch is trusted. cap > 0, two ranks' 2D split and a decode gate wider than decode_rows refuse the fusion at the
++//! call site, which keeps the unfused launches.
++const std = @import("std");
++
++pub const env_name: [:0]const u8 = "TF_DS_FUSED_ROUTE";
++
++/// The switch's value: unset, "" or "0" off; "1" on; anything else is a refusal to start (the message is on stderr).
++pub fn parse(text: ?[]const u8) ?bool {
++    const t = text orelse return false;
++    if (t.len == 0 or std.mem.eql(u8, t, "0")) return false;
++    if (std.mem.eql(u8, t, "1")) return true;
++    std.debug.print("{s}: expected 1 or 0\n", .{env_name});
++    return null;
++}
++
++pub fn fromText(text: ?[]const u8) error{BadFusedRoute}!bool {
++    return parse(text) orelse error.BadFusedRoute;
++}
++
++/// The most rows the chunk-sum gate supports (rowmm_gate's bound; wider windows fall back to the cuBLAS path).
++pub const decode_rows = 16;
++pub const max_topk = 8;
++pub const max_experts = 512;
++pub const max_slots = 8;
++
++/// Whether the fused path supports this configuration. The call sites fall back to the unfused launches when it does
++/// not (never with cap set: that is the caller's error, refused at start-up). `two` is the four-node split.
++pub fn fuseOk(fused: bool, two: bool, rows: usize, topk: usize, experts: usize, slots: usize) bool {
++    return fused and !two and rows > 0 and rows <= decode_rows and topk >= 1 and topk <= max_topk and slots >= topk and slots <= max_slots and experts >= 32 and experts <= max_experts;
++}
++
++/// Whether the prompt path's kc == 0 routing can be fused for `rows` rows: any row count (the GEMM is cuBLAS's and
++/// is not replaced), same bounds on the routing itself.
++pub fn fuseOkLogits(fused: bool, two: bool, rows: usize, topk: usize, experts: usize, slots: usize) bool {
++    return fused and !two and rows > 0 and topk >= 1 and topk <= max_topk and slots >= topk and slots <= max_slots and experts >= 32 and experts <= max_experts;
++}
++
++// -- host reference -------------------------------------------------------------------------------------------------
++//
++// The kernel's arithmetic on the host, written to the same spec (used by the tests below and by a future GPU port
++// harness). fp32 with IEEE semantics; every operation in the order the kernel makes it. This is NOT a model of
++// Triton's code generation: agreement with the compiled kit kernels is a hardware question.
++
++fn softplusSqrt(lg: f32) f32 {
++    const sp = if (lg > 20.0) lg else @log(1.0 + @exp(lg));
++    return @sqrt(sp);
++}
++
++/// _route_parts'/_route's arithmetic, op for op. `lg` is the row's logits (kc == 0) or chunk sums combined by the
++/// caller into `combined`. pick/wts are [slots]; the shared expert keeps slots >= topk with weight 1.
++pub fn routeRow(logits: []const f32, bias: []const f32, topk: usize, scale: f32, shared_id: usize, pick: []i32, wts: []f32) void {
++    std.debug.assert(logits.len == bias.len and pick.len == wts.len and pick.len >= topk);
++    const ne = logits.len;
++    var sel: [max_experts]f32 = undefined;
++    var sc: [max_experts]f32 = undefined;
++    for (0..ne) |e| {
++        sc[e] = softplusSqrt(logits[e]);
++        sel[e] = sc[e] + bias[e];
++    }
++    var tot: f32 = 0;
++    var p: [max_topk]i32 = undefined;
++    var v: [max_topk]f32 = undefined;
++    for (0..topk) |n| {
++        var best: f32 = -std.math.inf(f32);
++        var bid: usize = ne; // ties to the lowest id
++        for (0..ne) |e| {
++            if (sel[e] > best or (sel[e] == best and e < bid)) {
++                best = sel[e];
++                bid = e;
++            }
++        }
++        p[n] = @intCast(bid);
++        v[n] = sc[bid];
++        tot += v[n];
++        sel[bid] = -std.math.inf(f32);
++    }
++    // The CPU's rounded reciprocal stands in for the kit's approximate GPU reciprocal.
++    const inv_denom: f32 = 1.0 / (tot + 1e-20);
++    for (0..pick.len) |s| {
++        if (s < topk) {
++            pick[s] = p[s];
++            wts[s] = (v[s] * inv_denom) * scale;
++        } else {
++            pick[s] = @intCast(shared_id);
++            wts[s] = 1.0;
++        }
++    }
++}
++
++/// The chunk sums the gate computes, combined in order from zero (the route kernel's chunk loop), for reference
++/// tests. `S` is [kc][ne] (the gate's output layout).
++pub fn combineChunks(s: []const f32, kc: usize, ne: usize, out: []f32) void {
++    std.debug.assert(s.len == kc * ne and out.len == ne);
++    for (0..ne) |e| {
++        var acc: f32 = 0;
++        for (0..kc) |t| acc += s[t * ne + e];
++        out[e] = acc;
++    }
++}
++
++// -- tests -----------------------------------------------------------------------------------------------------------
++
++const expectEqual = std.testing.expectEqual;
++const expectApproxEqAbs = std.testing.expectApproxEqAbs;
++
++test "the switch parses its forms and nothing else" {
++    try expectEqual(false, parse(null).?);
++    try expectEqual(false, parse("").?);
++    try expectEqual(false, parse("0").?);
++    try expectEqual(true, parse("1").?);
++    try expectEqual(@as(?bool, null), parse("2"));
++    try expectEqual(@as(?bool, null), parse("yes"));
++    try expectEqual(@as(?bool, null), parse("01"));
++    try std.testing.expectEqual(@as(bool, true), try fromText("1"));
++    try std.testing.expectError(error.BadFusedRoute, fromText("2"));
++}
++
++test "fuseOk takes the decode bounds; logits takes any rows" {
++    try std.testing.expect(fuseOk(true, false, 16, 6, 384, 7));
++    try std.testing.expect(fuseOk(true, false, 1, 6, 384, 7));
++    try std.testing.expect(!fuseOk(true, false, 17, 6, 384, 7));
++    try std.testing.expect(!fuseOk(true, true, 4, 6, 384, 7));
++    try std.testing.expect(!fuseOk(false, false, 4, 6, 384, 7));
++    try std.testing.expect(!fuseOk(true, false, 4, 9, 384, 7));
++    try std.testing.expect(!fuseOk(true, false, 4, 6, 384, 5)); // slots < topk must fail
++    try std.testing.expect(!fuseOk(true, false, 4, 6, 16, 7));
++    try std.testing.expect(!fuseOk(true, false, 0, 6, 384, 7));
++    try std.testing.expect(fuseOkLogits(true, false, 2048, 6, 384, 7));
++    try std.testing.expect(!fuseOkLogits(true, true, 1, 6, 384, 7));
++    try std.testing.expect(!fuseOkLogits(true, false, 0, 6, 384, 7));
++}
++
++test "routeRow picks the top-k by sc + bias, ties to the lower id, shared expert last with weight 1" {
++    // logits comfortably above softplus^-1(ln(2)) (lg > 0): the picks must follow the logits exactly
++    var lg: [384]f32 = @splat(0);
++    var bias: [384]f32 = @splat(0);
++    lg[5] = 9; lg[7] = 8; lg[9] = 7; lg[300] = 6; lg[11] = 5; lg[200] = 4.5;
++    var pick: [7]i32 = undefined;
++    var wts: [7]f32 = undefined;
++    routeRow(&lg, &bias, 6, 1.5, 383, &pick, &wts);
++    try expectEqual([_]i32{ 5, 7, 9, 300, 11, 200, 383 }, pick);
++    try expectEqual(@as(f32, 1.0), wts[6]);
++    // weights are sc normalized to the picked sum, scaled
++    var tot: f32 = 0;
++    var sc: [6]f32 = undefined;
++    for (0..6) |i| {
++        sc[i] = softplusSqrt(lg[@intCast(pick[i])]);
++        tot += sc[i];
++    }
++    for (0..6) |i| try expectApproxEqAbs((sc[i] / (tot + 1e-20)) * 1.5, wts[i], 1e-6);
++}
++
++test "routeRow takes the shared expert at index ne too (the shared slot sits after the routed ones)" {
++    var lg: [384]f32 = @splat(0);
++    var bias: [384]f32 = @splat(0);
++    var pick: [7]i32 = undefined;
++    var wts: [7]f32 = undefined;
++    routeRow(&lg, &bias, 6, 1.5, 384, &pick, &wts); // the shared pick sits at ne, not ne - 1
++    try expectEqual(@as(i32, 384), pick[6]);
++    try expectEqual(@as(f32, 1.0), wts[6]);
++}
++
++test "routeRow ties to the lower id" {
++    var lg: [384]f32 = @splat(0); // every sc identical
++    var bias: [384]f32 = @splat(0);
++    var pick: [7]i32 = undefined;
++    var wts: [7]f32 = undefined;
++    routeRow(&lg, &bias, 6, 1.5, 383, &pick, &wts);
++    try expectEqual([_]i32{ 0, 1, 2, 3, 4, 5, 383 }, pick);
++}
++
++test "routeRow's bias can outrank the logits" {
++    var lg: [384]f32 = @splat(0);
++    var bias: [384]f32 = @splat(0);
++    lg[300] = 100; // huge logit, no bias
++    bias[42] = 10; // moderate logit, big bias
++    var pick: [7]i32 = undefined;
++    var wts: [7]f32 = undefined;
++    routeRow(&lg, &bias, 6, 1.5, 383, &pick, &wts);
++    // sc(100) = 10, sc(0) + 10 = 10.83: the bias wins for slot 0, the big logit takes slot 1
++    try expectEqual(@as(i32, 42), pick[0]);
++    try expectEqual(@as(i32, 300), pick[1]);
++}
++
++test "routeRow normalizes with one shared reciprocal before scaling" {
++    const logits = [_]f32{ 121, 81, 81, 81, 81, 81 };
++    const bias: [logits.len]f32 = @splat(0);
++    var pick: [7]i32 = undefined;
++    var wts: [7]f32 = undefined;
++    routeRow(&logits, &bias, 6, 1.5, 6, &pick, &wts);
++    // With the CPU's rounded reciprocal, score 9 / total 56 uses this
++    // weight. Rounding division directly would produce 0x3e76db6e.
++    try expectEqual(@as(u32, 0x3e76db6f), @as(u32, @bitCast(wts[1])));
++}
++
++test "combineChunks adds the chunks in order from zero" {
++    var s = [_]f32{ 1, 2, 3, 4, 5, 6 }; // kc=3, ne=2
++    var out: [2]f32 = undefined;
++    combineChunks(&s, 3, 2, &out);
++    try expectEqual([_]f32{ 1 + 3 + 5, 2 + 4 + 6 }, out);
++}
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 89b8a7f..328839a 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -7,6 +7,11 @@
+ const std = @import("std");
+ const cuda = @import("cuda");
+ const expert_prune = @import("expert_prune.zig");
++const moe_route = @import("moe_route.zig");
++
++/// The fused route's stats scratch, allocated (zeroed) only when both switches are on: u32[64] - 2x16 before/after
++/// bitmask words and one ticket word for the last-block reduce.
++const zero_scratch: [64]u32 = @splat(0);
+ 
+ /// launch_shape.h's tf_launch_blocks: a block a `threads` elements, at most 65535.
+ fn blocks(count: usize, threads: usize) u32 {
+@@ -109,6 +114,9 @@ pub const Ops = struct {
+     gpu_clock: cuda.Function,
+     prune: ?expert_prune.Mode = null, // TF_DS_T13_EXPERT_PRUNE and _EXPERT_CAP, read at load
+     prune_fn: ?cuda.Function = null, // looked up only when the switch is on
++    fused_route: bool = false, // TF_DS_FUSED_ROUTE, read at load; a cap turns it off (printed there)
++    fused_route_fn: ?cuda.Function = null, // looked up only when the switch is on
++    fused_scratch: ?cuda.DeviceBuffer = null, // u32[64] the stats reduce and the prep barrier need; freed at unload
+     dead_rows: cuda.Function, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' picks emptied
+     hot_track: cuda.Function, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picks counted per layer for the prefetch
+     keyed_noise: ?cuda.Function = null, // TF_DS_T26_KEYED_DRAFT or TF_DS_SPEC_SAMPLE, looked up only when on
+@@ -128,6 +136,11 @@ pub const Ops = struct {
+         var fm = try cuda.Module.load(d, family);
+         errdefer fm.unload();
+         const prune = try expert_prune.fromEnv();
++        var fused = try moe_route.fromText(envSpan(moe_route.env_name));
++        if (fused) if (prune) |m| if (m.cap != null) {
++            std.debug.print("{s}: TF_DS_T13_EXPERT_CAP is set; the fused route is off (the cap needs one block for the window)\n", .{moe_route.env_name});
++            fused = false;
++        };
+         const spec = specSample(envSpan(spec_env), envSpan(keyed_env)) catch |err| {
+             std.log.err("dsv41: {s}", .{spec_keyed_why});
+             return err;
+@@ -158,6 +171,12 @@ pub const Ops = struct {
+             .gpu_clock = try fm.function("tf_ds_clock_kernel"),
+             .prune = prune,
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
++            .fused_route = fused,
++            .fused_route_fn = if (fused) try fm.function("tf_ds_fused_route_kernel") else null,
++            .fused_scratch = if (fused) cuda.DeviceBuffer.fromHost(d, std.mem.asBytes(&zero_scratch)) catch |err| {
++                std.debug.print("{s}: the stats scratch did not allocate ({s})\n", .{ moe_route.env_name, @errorName(err) });
++                return err;
++            } else null,
+             .dead_rows = try fm.function("tf_ds_dead_rows_kernel"),
+             .hot_track = try fm.function("tf_ds_hot_track_kernel"),
+             .keyed_noise = if (envOn(keyed_env) or spec) try fm.function("tf_ds_keyed_noise_kernel") else null,
+@@ -171,6 +190,7 @@ pub const Ops = struct {
+     }
+ 
+     pub fn unload(o: *Ops) void {
++        if (o.fused_scratch) |*sc| sc.free();
+         o.pointwise.unload();
+         o.movement.unload();
+         o.family.unload();
+@@ -319,6 +339,114 @@ pub const Ops = struct {
+         try cuda.launch.launch(o.prune_fn orelse return error.ExpertPruneOff, .{ .grid = .{ .x = 1 }, .block = .{ .x = expert_prune.max_rows }, .pdl = o.pdl }, s, &a);
+     }
+ 
++    /// tf_ds_fused_route_kernel's scalar argument (matches the C struct field for field).
++    pub const FusedArgs = extern struct {
++        scale: f32,
++        topp: f32,
++        shared_id: c_int,
++        rows: c_int,
++        ne: c_int,
++        nb: c_int,
++        topk: c_int,
++        slots: c_int,
++        kc: c_int,
++        k: c_int,
++        xs: c_int,
++        do_prune: c_int,
++        cap: c_int,
++        cap_min: c_int,
++        min_k: c_int,
++        renorm: c_int,
++        apply: c_int,
++        pdl: c_int,
++        prep: c_int,
++        e_count: c_int,
++        maxm: c_int,
++    };
++
++    /// The experts' prep the fused decode window does in the same launch (0194): the rotation's outputs xg / xu (fp16
++    /// [rows * slots, k]), the per-expert signs suh0 / suh1 (fp16 [e_count, k]), the grouping's outputs ids / ucount /
++    /// members (int32) and its scratch y / out, and epoch (int32 [1], incremented once a launch). `add` may be 0
++    /// (the decode window passes none). Set for decode windows, null for the prompt path.
++    pub const Prep = struct {
++        xg: u64,
++        xu: u64,
++        suh0: u64,
++        suh1: u64,
++        ids: u64,
++        ucount: u64,
++        members: u64,
++        y: u64,
++        add: u64,
++        out: u64,
++        epoch: u64,
++        e_count: usize,
++        maxm: usize,
++    };
++
++    /// 0193 (TF_DS_FUSED_ROUTE): the routing in one launch - a decode window's gate (x/w, kc > 0) or a prompt chunk's
++    /// cuBLAS logits (kc == 0), the top-k routing, the prune's rule when `prune` is set (a cap is refused above) and
++    /// 0177's dead rows (`dead` a u64, 0: none). `stats` the prune's u64[6] or 0 (0: no counters). The kernel is
++    /// UNVERIFIED-BUILD on this machine; it replaces the launches only when the call sites have checked moe_route's
++    /// support rules.
++    pub fn moeRoute(o: *const Ops, s: cuda.Stream, x: u64, xs: usize, w: u64, logits: u64, bias: u64, pick: u64, wts: u64, dead: u64, stats: u64, rows: usize, ne: usize, topk: usize, slots: usize, kc: usize, k: usize, shared_id: usize, scale: f32, prune: ?expert_prune.Mode, prep: ?Prep) !void {
++        if (rows == 0) return;
++        if (bias == 0 or pick == 0 or wts == 0) return error.BadFusedRouteArgs;
++        if (kc > 0) {
++            if (x == 0 or w == 0 or k % 256 != 0 or kc != k / 256 or xs == 0 or xs % 8 != 0 or xs != k) return error.BadFusedRouteArgs;
++        } else if (logits == 0) return error.BadFusedRouteArgs;
++        if (prep != null and kc == 0) return error.BadFusedRouteArgs; // the prep rotates x: it needs the gate path
++        if ((stats != 0 or prep != null) and o.fused_scratch == null) return error.BadFusedRouteArgs;
++        if (prep) |p| {
++            if (p.xg == 0 or p.xu == 0 or p.suh0 == 0 or p.suh1 == 0 or p.ids == 0 or p.ucount == 0 or p.members == 0 or p.y == 0 or p.out == 0 or p.epoch == 0) return error.BadFusedRouteArgs;
++            if (p.e_count < 1 or p.maxm < 1 or p.maxm > 64 or k % 128 != 0) return error.BadFusedRouteArgs;
++        }
++        if (prune) |m| if (m.cap != null) return error.BadFusedRouteArgs; // refused at load; defensive
++        // shared_id may equal ne: the shared expert sits right after the routed ones in the experts pack (the gate
++        // only has routed outputs), so requiring shared_id < ne would refuse every routing call on the served model
++        if (topk < 1 or topk > expert_prune.max_topk or slots < topk or slots > moe_route.max_slots or ne < 32 or ne > moe_route.max_experts) return error.BadFusedRouteArgs;
++        var nb: usize = 1;
++        while (nb < ne) nb <<= 1;
++        const m: ?expert_prune.Mode = prune;
++        const a: FusedArgs = .{
++            .scale = scale,
++            .topp = if (m) |p| p.rule.topp else 0,
++            .shared_id = @intCast(shared_id),
++            .rows = @intCast(rows),
++            .ne = @intCast(ne),
++            .nb = @intCast(nb),
++            .topk = @intCast(topk),
++            .slots = @intCast(slots),
++            .kc = @intCast(kc),
++            .k = @intCast(k),
++            .xs = @intCast(xs),
++            .do_prune = if (m != null) 1 else 0,
++            .cap = 0,
++            .cap_min = 0,
++            .min_k = if (m) |p| @intCast(p.rule.min_k) else 0,
++            .renorm = if (m) |p| @intFromEnum(p.rule.renorm) else 0,
++            .apply = if (m) |p| @intFromBool(p.apply) else 0,
++            .pdl = @intFromBool(o.pdl),
++            .prep = if (prep != null) 1 else 0,
++            .e_count = if (prep) |p| @intCast(p.e_count) else 0,
++            .maxm = if (prep) |p| @intCast(p.maxm) else 0,
++        };
++        var args: cuda.Args = .{};
++        args.add(x);
++        args.add(w);
++        args.add(logits);
++        args.add(bias);
++        args.add(pick);
++        args.add(wts);
++        args.add(dead);
++        args.add(stats);
++        args.add(if (stats != 0 or prep != null) @as(u64, @intCast(o.fused_scratch.?.ptr)) else 0);
++        const pp: Prep = prep orelse .{ .xg = 0, .xu = 0, .suh0 = 0, .suh1 = 0, .ids = 0, .ucount = 0, .members = 0, .y = 0, .add = 0, .out = 0, .epoch = 0, .e_count = 0, .maxm = 0 };
++        for ([_]u64{ pp.xg, pp.xu, pp.suh0, pp.suh1, pp.ids, pp.ucount, pp.members, pp.y, pp.add, pp.out, pp.epoch }) |v| args.add(v);
++        args.add(a);
++        try cuda.launch.launch(o.fused_route_fn orelse return error.FusedRouteOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &args);
++    }
++
+     /// 0177 (TF_DS_DRAFT_TRIAGE): the dead draft rows' picks emptied - every slot of a dead row becomes pick -1,
+     /// weight 0 (the prune's dropped-slot convention), so the experts' decode combines those rows with no reads.
+     /// `dead`: u8 a row on the device (1: dead; it rides the verify frame, so both ranks mark the same rows).
+@@ -611,3 +739,12 @@ test "TF_DS_PDL parses like the series' switches" {
+     try std.testing.expect(onValue("1") and onValue("on"));
+     for ([_]?[]const u8{ null, "0", "off", "", "ON", "yes", "01", "true" }) |v| try std.testing.expect(!onValue(v));
+ }
++
++test "TF_DS_FUSED_ROUTE parses: unset/0/empty off, 1 on, else refused" {
++    try std.testing.expectEqualStrings("TF_DS_FUSED_ROUTE", moe_route.env_name);
++    try std.testing.expectEqual(@as(bool, false), try moe_route.fromText(null));
++    try std.testing.expectEqual(@as(bool, false), try moe_route.fromText(""));
++    try std.testing.expectEqual(@as(bool, false), try moe_route.fromText("0"));
++    try std.testing.expectEqual(@as(bool, true), try moe_route.fromText("1"));
++    try std.testing.expectError(error.BadFusedRoute, moe_route.fromText("2"));
++}
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 5485265..1803bc1 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -39,6 +39,7 @@ const shard = @import("shard.zig");
+ const shard_ops = @import("shard_ops.zig");
+ const prompt_rows = @import("prompt_rows.zig");
+ const prefill_prof = @import("prefill_prof.zig");
++const moe_route = @import("moe_route.zig");
+ 
+ comptime {
+     std.debug.assert(prompt_rows.default_window == exl3_experts.exact_rows and prompt_rows.max_window == exl3_experts.max_window_rows);
+@@ -1480,15 +1481,26 @@ pub fn moe(e: *const Engine, ch: *Chunk, li: usize) !void {
+     const shared_id = lay.experts.count - 1;
+     var kc: usize = 0;
+     prefill_prof.subBegin(e.s, .m_rt);
++    const fused_ok = moe_route.fuseOk(e.ops.fused_route, e.two != null, n, c.top_k, c.experts, sl);
++    const fused_logits = moe_route.fuseOkLogits(e.ops.fused_route, e.two != null, n, c.top_k, c.experts, sl);
+     if (n <= tri.decode_rows) {
+         // a decode-sized chunk: the row-invariant gate (rowmm_gate's chunk sums) and its routing
+-        kc = try tri_norm.rowmmGate(e.t, ch.x, d, lay.gate_w, ch.gl, n, d, c.experts);
+-        try tri_norm.route(e.t, ch.gl, kc, lay.gate_b, c.top_k, c.routed_scaling, shared_id, ch.pick, ch.wts, n, c.experts, sl);
++        if (fused_ok) {
++            kc = 0; // the chunk sums never materialize; the VL spans recompute them with the image bias if any
++            try e.ops.moeRoute(e.s, ch.x, d, lay.gate_w, 0, lay.gate_b, ch.pick, ch.wts, 0, 0, n, c.experts, c.top_k, sl, c.hidden / 256, c.hidden, shared_id, c.routed_scaling, null, null);
++        } else {
++            kc = try tri_norm.rowmmGate(e.t, ch.x, d, lay.gate_w, ch.gl, n, d, c.experts);
++            try tri_norm.route(e.t, ch.gl, kc, lay.gate_b, c.top_k, c.routed_scaling, shared_id, ch.pick, ch.wts, n, c.experts, sl);
++        }
+     } else {
+         try e.ops.toF32(e.s, ch.x, ch.xf, n * d);
+         try e.ops.f16ToF32(e.s, lay.gate_w, ch.gate_f, c.experts * d);
+         try e.blas.xwT(ch.xf, ch.gate_f, ch.logits, n, d, c.experts);
+-        try tri_norm.route(e.t, ch.logits, 0, lay.gate_b, c.top_k, c.routed_scaling, shared_id, ch.pick, ch.wts, n, c.experts, sl);
++        if (fused_logits) {
++            try e.ops.moeRoute(e.s, 0, 0, 0, ch.logits, lay.gate_b, ch.pick, ch.wts, 0, 0, n, c.experts, c.top_k, sl, 0, c.hidden, shared_id, c.routed_scaling, null, null);
++        } else {
++            try tri_norm.route(e.t, ch.logits, 0, lay.gate_b, c.top_k, c.routed_scaling, shared_id, ch.pick, ch.wts, n, c.experts, sl);
++        }
+     }
+     try routeSpans(e, ch, lay, shared_id, sl, kc);
+     prefill_prof.subEnd(e.s, .m_rt);
+@@ -1501,7 +1513,9 @@ pub fn moe(e: *const Engine, ch: *Chunk, li: usize) !void {
+ /// The VL routing (Gate.forward's bias = where(image_mask, bias_vl, bias)) as the served build runs it (recording v0's
+ /// launches): every row routed with the text bias, then each span's rows of the gate's output (the logits, or a
+ /// decode-sized chunk's chunk sums [n, kc, NE]) routed again with the image bias in a launch of their own, their picks and
+-/// weights put over the text ones. Row by row the routing is independent, so the text rows keep theirs.
++/// weights put over the text ones. Row by row the routing is independent, so the text rows keep theirs. With the fused
++/// route, a decode-sized span recomputes its rows' gate with the image bias (the same kernel and inputs as the main
++/// pass, so the pre-bias values are identical); a wider chunk re-routes from the cuBLAS logits.
+ fn routeSpans(e: *const Engine, ch: *Chunk, lay: weights.Layer, shared_id: usize, sl: usize, kc: usize) !void {
+     if (ch.spans.len == 0) return;
+     if (lay.gate_b_vl == 0) return error.NoImageRoutingBias;
+@@ -1512,7 +1526,15 @@ fn routeSpans(e: *const Engine, ch: *Chunk, lay: weights.Layer, shared_id: usize
+     for (ch.spans) |sp| {
+         const o = overlap(sp, ch.start, n) orelse continue;
+         const rows = o[1] - o[0];
+-        try tri_norm.route(e.t, src + o[0] * row, kc, lay.gate_b_vl, c.top_k, c.routed_scaling, shared_id, ch.pick_vl, ch.wts_vl, rows, c.experts, sl);
++        if (n <= tri.decode_rows and moe_route.fuseOk(e.ops.fused_route, e.two != null, rows, c.top_k, c.experts, sl)) {
++            try e.ops.moeRoute(e.s, ch.x + o[0] * c.hidden * 2, c.hidden, lay.gate_w, 0, lay.gate_b_vl, ch.pick_vl, ch.wts_vl, 0, 0, rows, c.experts, c.top_k, sl, c.hidden / 256, c.hidden, shared_id, c.routed_scaling, null, null);
++        } else if (n > tri.decode_rows and moe_route.fuseOkLogits(e.ops.fused_route, e.two != null, rows, c.top_k, c.experts, sl)) {
++            try e.ops.moeRoute(e.s, 0, 0, 0, src + o[0] * row, lay.gate_b_vl, ch.pick_vl, ch.wts_vl, 0, 0, rows, c.experts, c.top_k, sl, 0, c.hidden, shared_id, c.routed_scaling, null, null);
++        } else {
++            // invariant: the fallback only ever runs when the chunk's main pass materialized the gate output (the
++            // kit decode gate writes ch.gl on 2D, the cuBLAS path writes ch.logits): kc is real and `src` is live
++            try tri_norm.route(e.t, src + o[0] * row, kc, lay.gate_b_vl, c.top_k, c.routed_scaling, shared_id, ch.pick_vl, ch.wts_vl, rows, c.experts, sl);
++        }
+         const dd = e.d;
+         try dd.check(dd.api.cuMemcpyDtoDAsync_v2(ch.pick + o[0] * sl * 4, ch.pick_vl, rows * sl * 4, e.s.handle), "cuMemcpyDtoDAsync");
+         try dd.check(dd.api.cuMemcpyDtoDAsync_v2(ch.wts + o[0] * sl * 4, ch.wts_vl, rows * sl * 4, e.s.handle), "cuMemcpyDtoDAsync");
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 30e16ab..7421c5a 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -32,6 +32,7 @@ const shard_ops = @import("shard_ops.zig");
+ const shard_ring = @import("shard_ring.zig");
+ const graph_cache = @import("graph_cache.zig");
+ const expert_prune = @import("expert_prune.zig");
++const moe_route = @import("moe_route.zig");
+ 
+ const Engine = prompt.Engine;
+ const Chunk = prompt.Chunk;
+@@ -1536,13 +1537,35 @@ fn moe(e: *const Engine, rd: *Round, ch: *const Chunk, li: usize) !void {
+     const c = e.c;
+     const R = rd.r;
+     const sl = e.slots();
+-    const kc = try tri_norm.rowmmGate(e.t, rd.x, c.hidden, lay.gate_w, rd.gl, R, c.hidden, c.experts);
+-    try tri_norm.route(e.t, rd.gl, kc, lay.gate_b, c.top_k, c.routed_scaling, lay.experts.count - 1, rd.pick, rd.mw, R, c.experts, sl);
+-    if (rd.prune) |m| try e.ops.expertPrune(e.s, m, rd.pick, rd.mw, rd.pstat, R, c.top_k, sl);
+-    // 0177 (TF_DS_DRAFT_TRIAGE): the dead draft rows route nothing - their outputs are never emitted
+-    if (rd.dead != 0) {
+-        if (e.two != null) return error.TriageUnsupported2D; // (the 2D split is not checked to take pick -1)
+-        try e.ops.deadRows(e.s, rd.pick, rd.mw, rd.dead, R, sl);
++    const prep: ?ops_mod.Ops.Prep = if (e.two == null) .{
++        .xg = ch.xsd.xg,
++        .xu = ch.xsd.xu,
++        .suh0 = lay.experts.suh_g,
++        .suh1 = lay.experts.suh_u,
++        .ids = ch.xsd.ids,
++        .ucount = ch.xsd.count,
++        .members = ch.xsd.members,
++        .y = ch.xsd.y,
++        .add = 0,
++        .out = rd.pm,
++        .epoch = ch.xsd.epoch,
++        .e_count = lay.experts.count,
++        .maxm = R,
++    } else null;
++    const fused = moe_route.fuseOk(e.ops.fused_route, e.two != null, R, c.top_k, c.experts, sl);
++    if (fused) {
++        // 0193/0194: the gate, the routing, the prune's rule, 0177's dead rows and the experts' prep in one launch
++        // (UNVERIFIED-BUILD: gated on the exact suite before it is trusted)
++        try e.ops.moeRoute(e.s, rd.x, c.hidden, lay.gate_w, 0, lay.gate_b, rd.pick, rd.mw, if (rd.dead != 0) rd.dead else 0, rd.pstat, R, c.experts, c.top_k, sl, c.hidden / 256, c.hidden, lay.experts.count - 1, c.routed_scaling, rd.prune, prep);
++    } else {
++        const kc = try tri_norm.rowmmGate(e.t, rd.x, c.hidden, lay.gate_w, rd.gl, R, c.hidden, c.experts);
++        try tri_norm.route(e.t, rd.gl, kc, lay.gate_b, c.top_k, c.routed_scaling, lay.experts.count - 1, rd.pick, rd.mw, R, c.experts, sl);
++        if (rd.prune) |m| try e.ops.expertPrune(e.s, m, rd.pick, rd.mw, rd.pstat, R, c.top_k, sl);
++        // 0177 (TF_DS_DRAFT_TRIAGE): the dead draft rows route nothing - their outputs are never emitted
++        if (rd.dead != 0) {
++            if (e.two != null) return error.TriageUnsupported2D; // (the 2D split is not checked to take pick -1)
++            try e.ops.deadRows(e.s, rd.pick, rd.mw, rd.dead, R, sl);
++        }
+     }
+     try rd.mark(e, .m_rt);
+     if (e.two) |tw| {
+@@ -1552,7 +1575,11 @@ fn moe(e: *const Engine, rd: *Round, ch: *const Chunk, li: usize) !void {
+         try tw.catRank(e, ch.xsd.xd, tw.xd_full, R * ch.xsd.slots, tw.gu, 2);
+         try rd.mark(e, .m_x);
+         try exl3_experts2d.decodeDown(e.ex, e.s, lay.experts, ch.xsd, tw.xd_full, rd.pick, rd.mw, rd.pm, R);
+-    } else try exl3_experts.decode(e.ex, e.s, lay.experts, ch.xsd, rd.x, c.hidden, rd.pick, rd.mw, rd.pm, R, c.swiglu_limit, if (rd.place_bound) expert_prune.placeBound(rd.prune.?, R) else null);
++    } else {
++        const places = if (rd.place_bound) expert_prune.placeBound(rd.prune.?, R) else null;
++        const decode: *const @TypeOf(exl3_experts.decode) = if (fused) exl3_experts.decodePrepared else exl3_experts.decode;
++        try decode(e.ex, e.s, lay.experts, ch.xsd, rd.x, c.hidden, rd.pick, rd.mw, rd.pm, R, c.swiglu_limit, places);
++    }
+     // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picks counted for the prefetch's hot set (1D only; counts only)
+     if (rd.hot) |h| if (e.two == null) try e.ops.hotTrack(e.s, ch.xsd.ids, ch.xsd.count, h.hist, li, h.stride);
+     // TF_DS_EXPERT_BYTES: the window the experts just read, counted (a profile; null unless the switch is on)
+-- 
+2.56.1
+

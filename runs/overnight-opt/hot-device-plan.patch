@@ -1,0 +1,229 @@
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -427,7 +427,7 @@
+ // wave_ns, the ranges in order, so DRAM's queue holds about a wave and the latency-bound kernels running beside keep
+ // most of their load latency. Each range starts on a chunk of its own; its bytes are cut to whole 16-byte units.
+ // wave_ns 0: every chunk at once from the grid's blocks. Writes nothing.
+-extern "C" __global__ void __launch_bounds__(128) tf_ds_l2_prefetch_kernel(TfDsPrefetch a, long long delay_ns, long long wave_ns) {
++__device__ __forceinline__ void tf_ds_prefetch_ranges(const TfDsPrefetch& a, long long delay_ns, long long wave_ns) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+     const long long chunk = 8 << 10;
+     if (delay_ns > 0) {
+@@ -479,6 +479,14 @@
+             asm volatile("prefetch.global.L2 [%0];" ::"l"(a.ptr[t] + off));
+     }
+ #endif
++}
++
++extern "C" __global__ void __launch_bounds__(128) tf_ds_l2_prefetch_kernel(TfDsPrefetch a, long long delay_ns, long long wave_ns) {
++    tf_ds_prefetch_ranges(a, delay_ns, wave_ns);
++}
++// Optional hot-expert ranges live at a stable device address even when the graph is replayed.
++extern "C" __global__ void __launch_bounds__(128) tf_ds_l2_prefetch_plan_kernel(const TfDsPrefetch* plan, long long delay_ns, long long wave_ns) {
++    if (plan->n) tf_ds_prefetch_ranges(*plan, delay_ns, wave_ns);
+ }
+ 
+ // The indexer's selection when its top-k takes every key it scans (nb <= index_topk): kernels.topk_indices of all nb
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -103,6 +103,7 @@
+     cand_fast: cuda.Function,
+     iota_vis: cuda.Function,
+     l2_prefetch: cuda.Function,
++    l2_prefetch_plan: cuda.Function,
+     block_max: cuda.Function,
+     pool_pick: cuda.Function,
+     apply_pool: cuda.Function,
+@@ -157,6 +158,7 @@
+             .cand_fast = try fm.function("tf_ds_cand_fast_kernel"),
+             .iota_vis = try fm.function("tf_ds_iota_vis_kernel"),
+             .l2_prefetch = try fm.function("tf_ds_l2_prefetch_kernel"),
++            .l2_prefetch_plan = try fm.function("tf_ds_l2_prefetch_plan_kernel"),
+             .block_max = try fm.function("tf_ds_block_max_kernel"),
+             .pool_pick = try fm.function("tf_ds_pool_pick_kernel"),
+             .apply_pool = try fm.function("tf_ds_apply_pool_kernel"),
+@@ -338,6 +340,14 @@
+     /// Every 128-byte line of `pf`'s ranges touched into L2 (one block of 128 threads); writes nothing.
+     pub fn l2Prefetch(o: *const Ops, s: cuda.Stream, pf: Prefetch) !void {
+         if (pf.n == 0) return;
++        try launchPrefetch(s, o.l2_prefetch, pf);
++    }
++
++    pub fn l2PrefetchPlan(o: *const Ops, s: cuda.Stream, plan: u64) !void {
++        try launchPrefetch(s, o.l2_prefetch_plan, plan);
++    }
++
++    fn launchPrefetch(s: cuda.Stream, kernel: cuda.Function, pf: anytype) !void {
+         // the served decode settings (exl3/prefetch.py): 3 us before the first wave, waves of 128 chunks of 8 KiB
+         // at 230 GB/s (TF_EXL3_L2_DELAY_NS, TF_EXL3_L2_RATE_GBPS), one block
+         const delay_ns: c_longlong = 3000;
+@@ -346,7 +356,7 @@
+         a.add(pf);
+         a.add(delay_ns);
+         a.add(wave_ns);
+-        try cuda.launch.launch(o.l2_prefetch, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, s, &a);
++        try cuda.launch.launch(kernel, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, s, &a);
+     }
+ 
+     /// The routed-expert prune of `pick` / `wts` [rows, slots] in place (m.apply: else it only counts); `stats`: the
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -817,16 +817,7 @@
+     /// bytes (the served launches move at most 16 MiB, 8 MiB behind wo_b).
+     fn prefetch(rd: *Round, e: *const Engine, ranges: []const [2]u64, budget: u64) !void {
+         const s = rd.pf orelse return;
+-        var a: ops_mod.Prefetch = .{};
+-        var left = budget;
+-        for (ranges) |r| {
+-            if (r[1] == 0 or a.n == 16 or left == 0) continue;
+-            const take = @min(r[1], left);
+-            a.ptr[@intCast(a.n)] = r[0];
+-            a.bytes[@intCast(a.n)] = take;
+-            a.n += 1;
+-            left -= take;
+-        }
++        const a = packPrefetch(ranges, budget);
+         if (a.n == 0) return;
+         try rd.pf_fork.?.record(e.s);
+         try s.wait(rd.pf_fork.?);
+@@ -1524,11 +1515,26 @@
+     stride: usize, // the histogram's experts a layer (the largest count; ids are bounds-checked against it)
+     layers: usize,
+     k: usize, // the plan's experts a layer (1..5: 3 ranges a piece, the prefetch's 16-entry cap)
++    plans: u64, // Prefetch[layers] on the device
+     hist: u64, // u32 [layers, stride] on the device
+     counts: []u32, // the same, host
+     ranges: [][2]u64, // [layers, k * 3]: gate, up, down of each chosen expert
+     n: []u8, // [layers] how many the plan holds
+ };
++
++pub fn packPrefetch(ranges: []const [2]u64, budget: u64) ops_mod.Prefetch {
++    var a: ops_mod.Prefetch = .{};
++    var left = budget;
++    for (ranges) |r| {
++        if (r[1] == 0 or a.n == 16 or left == 0) continue;
++        const take = @min(r[1], left);
++        a.ptr[@intCast(a.n)] = r[0];
++        a.bytes[@intCast(a.n)] = take;
++        a.n += 1;
++        left -= take;
++    }
++    return a;
++}
+ 
+ /// 0179: a layer's top `k` picked experts from its counts (ties to the lower id), their gate/up/down trellis ranges
+ /// from the host copy (`ranges`: 3 * E, expert e's at [e], [E + e], [2E + e]) into `out`; returns how many.
+@@ -1595,7 +1601,13 @@
+         }
+         // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): beside the linears, the next layer's hot experts' trellis - the
+         // review's routed-expert prefetch, which its own section 7 rules out without the decoded-cache premise
+-        if (rd.hot) |h| if (h.n[li + 1] > 0) try rd.prefetch(e, h.ranges[(li + 1) * h.k * 3 ..][0 .. h.n[li + 1] * 3], prefetch_budget / 2);
++        if (rd.hot) |h| if (rd.pf) |stream| {
++            try rd.pf_fork.?.record(e.s);
++            try stream.wait(rd.pf_fork.?);
++            try e.ops.l2PrefetchPlan(stream, h.plans + (li + 1) * @sizeOf(ops_mod.Prefetch));
++            try rd.pf_join.?.record(stream);
++            rd.pf_out = true;
++        };
+     } else try rd.prefetch(e, &.{linearBytes(e.w.head)}, prefetch_budget);
+ }
+ 
+@@ -1608,7 +1620,7 @@
+ 
+ /// A paced prefetch launch's most bytes (the served launch trace: 16 MiB; 8 MiB behind wo_b, 4 MiB before an Engram
+ /// layer).
+-const prefetch_budget: u64 = 16 << 20;
++pub const prefetch_budget: u64 = 16 << 20;
+ 
+ /// An mHC mix's weights hc_*_fn: fp32 [24, hc * d].
+ fn hcFnBytes(c: anytype) u64 {
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -214,6 +214,7 @@
+     draw_tab: u64 = 0, // ops.DrawRow [round.max_rows] (TF_DS_T27_DEVICE_DRAW; 0: off)
+     triage: ?f64 = null, // 0177 (TF_DS_DRAFT_TRIAGE): the conf rule's survival threshold (null: off)
+     hot_k: ?u8 = null, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot:<n>): the prefetch's hot experts a layer (null: off)
++    hot_reported: bool = false,
+     hot_age: u32 = 0, // rounds since the hot plan was rebuilt (32: the first round rebuilds)
+     endstate: ?u8 = null, // 0178 (TF_DS_PROMPT_ENDSTATE=N): end states kept for an identical resend (null: off)
+     tail_batch: ?u8 = null, // 0180 (TF_DS_TAIL_BATCH=N): end states continue a longer prompt (the new rows only)
+@@ -532,7 +533,8 @@
+             for (m.eng.w.layers) |lay| stride = @max(stride, lay.experts.count);
+             const h = try m.gpa.create(round.Hot);
+             errdefer m.gpa.destroy(h);
+-            h.* = .{ .stride = stride, .layers = layers, .k = k, .hist = try m.arena.take(layers * stride * 4), .counts = try m.gpa.alloc(u32, layers * stride), .ranges = try m.gpa.alloc([2]u64, layers * k * 3), .n = try m.gpa.alloc(u8, layers) };
++            h.* = .{ .stride = stride, .layers = layers, .k = k, .hist = try m.arena.take(layers * stride * 4), .plans = try m.arena.take(layers * @sizeOf(ops_mod.Prefetch)), .counts = try m.gpa.alloc(u32, layers * stride), .ranges = try m.gpa.alloc([2]u64, layers * k * 3), .n = try m.gpa.alloc(u8, layers) };
++            try d.check(d.api.cuMemsetD8Async(h.plans, 0, layers * @sizeOf(ops_mod.Prefetch), m.stream.handle), "cuMemsetD8Async");
+             @memset(h.counts, 0);
+             @memset(h.n, 0);
+             const zeros = try m.gpa.alloc(u8, layers * stride * 4);
+@@ -540,6 +542,7 @@
+             @memset(zeros, 0);
+             try d.check(d.api.cuMemcpyHtoD_v2(h.hist, zeros.ptr, zeros.len), "cuMemcpyHtoD");
+             m.rd.hot = h;
++            m.hot_reported = false;
+             m.hot_age = 32; // the first round builds the plan
+         }
+         m.draw_rows = 0;
+@@ -1819,14 +1822,34 @@
+ 
+     /// 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the hot plan from the histogram's host copy (read after the round's own
+     /// sync - the track kernel wrote it during the forward). Called every 32 rounds from verifyFn.
+-    pub fn updateHot(m: *Model) void {
++    pub fn tickHot(m: *Model) !void {
++        if (m.rd.hot == null) return;
++        m.hot_age += 1;
++        if (m.hot_age < 32) return;
++        m.hot_age = 0;
++        try m.updateHot();
++    }
++
++    fn updateHot(m: *Model) !void {
+         const h = m.rd.hot orelse return;
+         const d = m.ctx.d;
+-        if (d.api.cuMemcpyDtoH_v2(h.counts.ptr, h.hist, h.counts.len * 4) != 0) return; // (the plan stays what it was)
++        try m.stream.synchronize();
++        try d.check(d.api.cuMemcpyDtoH_v2(h.counts.ptr, h.hist, h.counts.len * 4), "cuMemcpyDtoH");
++        var plans: [spill.max_layers]ops_mod.Prefetch = undefined;
+         for (0..h.layers) |li| {
+             const ex = m.eng.w.layers[li].experts;
+             const e_count: usize = @intCast(ex.count);
+             h.n[li] = @intCast(round.hotPick(h.counts[li * h.stride ..][0..e_count], ex.ranges, h.k, h.ranges[li * h.k * 3 ..][0 .. h.k * 3]));
++            plans[li] = round.packPrefetch(h.ranges[li * h.k * 3 ..][0 .. @as(usize, h.n[li]) * 3], round.prefetch_budget / 2);
++        }
++        try d.check(d.api.cuMemcpyHtoD_v2(h.plans, &plans, h.layers * @sizeOf(ops_mod.Prefetch)), "cuMemcpyHtoD");
++        if (!m.hot_reported and std.c.getenv("TF_DS_HOT_PLAN_TRACE") != null) {
++            var armed: usize = 0;
++            for (plans[0..h.layers]) |plan| if (plan.n > 0) { armed += 1; };
++            if (armed > 0) {
++                std.log.info("hot plan rank={d} active_layers={d}", .{m.rank, armed});
++                m.hot_reported = true;
++            }
+         }
+     }
+ 
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1515,13 +1515,7 @@
+         }
+         const logits: []const f32 = if (path == .host_draw) try m.roundLogits(n_rows) else &.{};
+         if (m.absorb_after_pick) try m.absorbRows(rows, self.built.absorb[0..windows.len]); // (0160: after the pick's read; runs under the host's accept and the frame send)
+-        if (m.rd.hot != null) { // (0179: the hot plan rebuilds every 32 rounds, on the pick's own sync)
+-            m.hot_age += 1;
+-            if (m.hot_age >= 32) {
+-                m.hot_age = 0;
+-                m.updateHot();
+-            }
+-        }
++        try m.tickHot();
+         if (m.ringFailed()) return error.RingFailed; // (robustness: a graph's collect gave up on a dead peer's flags)
+         const t3 = m.now();
+         defer if (self.prof) |*p| {
+@@ -2693,6 +2687,7 @@
+                     continue;
+                 };
+                 m.absorbRows(rows, built.absorb[0..nw]) catch |err| try roundRefused(err);
++                try m.tickHot();
+                 if (m.prof) {
+                     follow_prof.rounds += 1;
+                     follow_prof.enqueue += m.t_enqueue;

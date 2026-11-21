@@ -1,0 +1,58 @@
+norm D=128 R=4096: previous=0 differing bytes, follow-up=0
+decode compressor witness D=128: previous=0 differing bytes, follow-up=0
+norm D=512 R=4096: previous=0 differing bytes, follow-up=0
+decode compressor witness D=512: previous=256 differing bytes, follow-up=0
+compress decode R=1 D=512 graph us [unfused, 0127, old, new] [11.225, 3.411, 1.62, 1.812]
+compress decode R=7 D=512 graph us [unfused, 0127, old, new] [11.235, 4.11, 1.877, 2.132]
+compress decode R=32 D=512 graph us [unfused, 0127, old, new] [11.873, 6.99, 1.868, 2.135]
+compress prompt R=1 D=512 graph us [reference, old, new] [3.155, 2.772, 2.003]
+compress prompt R=8 D=512 graph us [reference, old, new] [4.049, 4.5, 2.004]
+compress prompt R=128 D=512 graph us [reference, old, new] [6.423, 7.895, 2.641]
+compress prompt R=1024 D=512 graph us [reference, old, new] [13.653, 15.381, 10.001]
+compress prompt R=1 D=2048 graph us [reference, old, new] [3.441, 3.291, 3.817]
+key fold R=7 nb=8 width=61: keys and tile maxima match scoreKey
+pool R=7 nb=8 width=61 k=8 mask=False ties graph us [unfused, old, new] [26.701, 2.067, 2.414]
+key fold R=7 nb=8 width=64: keys and tile maxima match scoreKey
+pool R=7 nb=8 width=64 k=8 mask=False ties graph us [unfused, old, new] [26.641, 2.066, 2.326]
+key fold R=7 nb=2049 width=16384: keys and tile maxima match scoreKey
+pool R=7 nb=2049 width=16384 k=2048 mask=False ties graph us [unfused, old, new] [35.16, 4.457, 23.505]
+key fold R=32 nb=8192 width=65533: keys and tile maxima match scoreKey
+pool R=32 nb=8192 width=65533 k=2048 mask=False ties graph us [unfused, old, new] [62.147, 21.357, 143.069]
+key fold R=128 nb=4096 width=32768: keys and tile maxima match scoreKey
+pool R=128 nb=4096 width=32768 k=2048 mask=True ties graph us [unfused, old, new] [162.805, 39.667, 317.484]
+key fold R=7 nb=4096 width=32765: keys and tile maxima match scoreKey
+pool R=7 nb=4096 width=32765 k=2048 mask=False random graph us [unfused, old, new] [46.162, 9.816, 49.679]
+key fold R=7 nb=8192 width=65533: keys and tile maxima match scoreKey
+pool R=7 nb=8192 width=65533 k=2048 mask=True flat graph us [unfused, old, new] [46.997, 19.923, 103.759]
+key fold R=3 nb=513 width=4101: keys and tile maxima match scoreKey
+pool R=3 nb=513 width=4101 k=17 mask=False random graph us [unfused, old, new] [26.971, 4.238, 8.846]
+rope key R=7 D=128 graph us [reference, old, new] [3.029, 2.213, 1.895]
+key nonfinite/denormal/zero bytes match; 1 scratch buffer(s) unwritten
+rope latent R=7 D=512 graph us [reference, old, new] [2.129, 2.195, 1.619]
+latent nonfinite/denormal/zero bytes match; 1 scratch buffer(s) unwritten
+rope query R=7 D=128 graph us [reference, old, new] [2.2, 1.694, 1.684]
+query nonfinite/denormal/zero bytes match; 1 scratch buffer(s) unwritten
+rope prompt key R=128 D=128 graph us [reference, old, new] [4.373, 3.028, 2.195]
+prompt key nonfinite/denormal/zero bytes match; 1 scratch buffer(s) unwritten
+Traceback (most recent call last):
+  File "/home/colum/tf-bench/followup/probe.py", line 654, in run
+    fn(*args)
+  File "/home/colum/tf-bench/followup/probe.py", line 509, in rotary
+    after = [b.read() for b in (x, rotated, dequant, codes, scales)]
+             ^^^^^^^^
+  File "/home/colum/tf-bench/followup/probe.py", line 59, in read
+    cu("cuMemcpyDtoH_v2", P(host.ctypes.data), self.addr, ct.c_size_t(host.nbytes))
+  File "/home/colum/tf-bench/followup/probe.py", line 45, in cu
+    raise RuntimeError(f"{name}: {err} {msg.value}")
+RuntimeError: cuMemcpyDtoH_v2: 700 b'an illegal memory access was encountered'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/colum/tf-bench/followup/probe.py", line 700, in <module>
+    run(rotary, 7 if not path.startswith("prompt") else 128, path)
+  File "/home/colum/tf-bench/followup/probe.py", line 657, in run
+    cu("cuMemFree_v2", addr)
+  File "/home/colum/tf-bench/followup/probe.py", line 45, in cu
+    raise RuntimeError(f"{name}: {err} {msg.value}")
+RuntimeError: cuMemFree_v2: 700 b'an illegal memory access was encountered'

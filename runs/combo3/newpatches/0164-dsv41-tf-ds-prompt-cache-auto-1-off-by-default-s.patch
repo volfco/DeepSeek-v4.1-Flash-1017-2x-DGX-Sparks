@@ -1,0 +1,98 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits ab19ac885888..4da089585bd0)
+# dsv41: TF_DS_PROMPT_CACHE_AUTO=1 (off by default) sizes the kept prompt states' budget from what 70% of RAM leaves past the loaded server - the CUDA path's 0.5 GiB was a fixed constant
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 814bde1fe016080e9704d5d655c7cb4fe09389e8..cd162518cca7832e9079eb163e4696077c403171 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -26,6 +26,9 @@
+ //!   TF_DS_ABSORB_AFTER_PICK=1 (or 'on')         the round's pick launches before the drafter taps' absorb, which then
+ //!                                               runs under the host's accept and the pass frame's send (0160; bit-identical:
+ //!                                               the two read different buffers of one forward; unset: the served order)
++//!   TF_DS_PROMPT_CACHE_AUTO=1                     the kept prompt states' budget is what 70% of RAM leaves past the loaded
++//!                                               server (native/cuda.zig cache_fit), read after the weights land, at least
++//!                                               0.5 GiB (0170; unset: 0.5 GiB; --prompt-cache-gib still overrides)
+ //!   TF_DS_ROUND_ROWS, TF_DS_STREAMS             a round's rows at most (16; the four-node lane's 48) and the pool's
+ //!                                               streams (4; its 16): --parallel at most the streams
+ //!   TF_DS_PROMPT_WINDOW_ROWS=<rows>             a prompt chunk under these rows (64 .. 128; 64 unset) takes the MoE decode window
+diff --git a/zig/src/native/cache_fit.zig b/zig/src/native/cache_fit.zig
+index 2af8aeea973364633cf856536117961b531f868f..fe69c4f431561a449327cf27a33ab16639489d71 100644
+--- a/zig/src/native/cache_fit.zig
++++ b/zig/src/native/cache_fit.zig
+@@ -42,6 +42,21 @@ pub fn gibs(bytes: u64) f64 {
+     return @as(f64, @floatFromInt(bytes)) / GiB;
+ }
+ 
++/// The CUDA path's auto budget (TF_DS_PROMPT_CACHE_AUTO, 0170): what 70% of RAM leaves past the loaded server, at
++/// least `floor` (the served 0.5 GiB default - auto can grow the cache where the machine has real room, never
++/// shrink it). The pair's unified memory is nearly all weights, so there auto stays at the floor.
++pub fn autoBudget(total: u64, ready: u64, floor: u64) u64 {
++    const f = fit(total, ready, null, false) catch return floor;
++    return @max(floor, f.budget);
++}
++
++test "the CUDA auto budget grows only past the floor" {
++    const floor = GiB / 2;
++    try std.testing.expectEqual(GiB / 2, autoBudget(128 * GiB, 110 * GiB, floor)); // the pair: no room past the weights, the floor
++    try std.testing.expectEqual((256 * GiB) / 100 * 70 - 174 * GiB, autoBudget(256 * GiB, 172 * GiB, floor)); // the M5: grows
++    try std.testing.expectEqual(GiB / 2, autoBudget(64 * GiB, 63 * GiB, floor)); // past the cap: the floor, never less
++}
++
+ test "the default budget is what 70% of RAM leaves past the footprint at ready and the margin" {
+     const ram256: u64 = 256 * GiB;
+     const f = try fit(ram256, 172 * GiB, null, false); // this tip on a 256 GB M5 Ultra
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index 99e84a1d70187008312a461e6d2ed4e2a4d7e1eb..a8e131cf935e4c01f1b268b1a34864ecf845ffcc 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -7,6 +7,7 @@ const nemotron = @import("nemotron");
+ const dsv41 = @import("dsv41");
+ const Allocator = std.mem.Allocator;
+ const budget = @import("cuda_memory.zig");
++const cache_fit = @import("cache_fit.zig");
+ const Pool = budget.Pool;
+ 
+ /// CUDA families provide metadata, open their lane backend and explain their refusals.
+@@ -106,6 +107,20 @@ fn procText(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
+     return r.interface.allocRemaining(a, .limited(1 << 20)) catch null;
+ }
+ 
++/// The kept prompt states' budget: `--prompt-cache-gib` when given (0: none; past the room kept or refused as the
++/// flag says); else the served 0.5 GiB; with TF_DS_PROMPT_CACHE_AUTO=1 ("1" or "on") what 70% of RAM leaves past the
++/// loaded server (cache_fit, the sizing --prompt-cache-gib's comment promises) - read after the weights land, never
++/// below 0.5 GiB: auto grows the cache where the machine has real room and never shrinks it (0170).
++fn promptCacheBudget(a: Allocator, io: std.Io, gib_opt: ?f64) u64 {
++    const base: u64 = @intFromFloat(0.5 * gib);
++    if (gib_opt) |g| return @intFromFloat(g * gib);
++    const v = getenv("TF_DS_PROMPT_CACHE_AUTO") orelse return base;
++    if (!std.mem.eql(u8, std.mem.span(v), "1") and !std.mem.eql(u8, std.mem.span(v), "on")) return base;
++    const text = procText(a, io, "/proc/meminfo") orelse return base;
++    const info = budget.meminfo(text) orelse return base;
++    return cache_fit.autoBudget(info.total, info.total -| info.available, base);
++}
++
+ /// The pool now, read on the thread whose context is current; `problem` names a bad variable.
+ fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
+     const unified = (try ctx.attribute(.integrated)) != 0;
+@@ -461,7 +476,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+     };
+     // a family that keeps prompt states (its snapshots) gets the prompt cache: states at its chunk ends
+     if (@hasField(@TypeOf(loaded), "snaps")) if (loaded.snaps) |sn| {
+-        const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 0.5) * gib);
++        const want: u64 = promptCacheBudget(a, io, o.prompt_cache_gib);
+         if (want > 0) {
+             h.snap_vt = .{ .bytes = sn.bytes, .save = sn.save, .restore = sn.restore, .drop = sn.drop };
+             if (@hasField(@TypeOf(sn), "share")) h.snap_vt.share = sn.share;
+diff --git a/zig/src/server/cli.zig b/zig/src/server/cli.zig
+index ea14e3118fb83c0a087d99ee5b9c040dd983b1ef..abace2232c20ea9fe8f7d0fc2f178509b3ee9016 100644
+--- a/zig/src/server/cli.zig
++++ b/zig/src/server/cli.zig
+@@ -123,7 +123,7 @@ pub const Args = struct {
+     dashboard: bool = false,
+     context: ?i64 = null,
+     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next)
+-    prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
++    prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: 0.5 GiB, or with TF_DS_PROMPT_CACHE_AUTO=1 what 70% of RAM leaves past the loaded server)
+     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
+     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
+     learn_dir: ?[]const u8 = null,

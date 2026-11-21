@@ -1,0 +1,51 @@
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1534,18 +1534,22 @@
+ /// from the host copy (`ranges`: 3 * E, expert e's at [e], [E + e], [2E + e]) into `out`; returns how many.
+ pub fn hotPick(counts: []const u32, ranges: []const [2]u64, k: usize, out: [][2]u64) usize {
+     const e_count = counts.len;
+-    if (e_count == 0 or k == 0 or out.len < 3 * k) return 0;
+-    var taken: [8]bool = @splat(false);
++    if (ranges.len / 3 < e_count) return 0;
++    const limit = @min(k, out.len / 3, e_count);
++    var previous: ?usize = null;
+     var n: usize = 0;
+-    while (n < k) : (n += 1) {
++    while (n < limit) : (n += 1) {
+         var best: ?usize = null;
+         for (0..e_count) |i| {
+-            if (taken[i]) continue;
++            // Walk the stable ranking in descending count and ascending expert ID.
++            if (previous) |last| {
++                if (counts[i] > counts[last] or (counts[i] == counts[last] and i <= last)) continue;
++            }
+             if (best == null or counts[i] > counts[best.?]) best = i; // (ties to the lower id)
+         }
+         const i = best orelse break;
+         if (counts[i] == 0) break;
+-        taken[i] = true;
++        previous = i;
+         out[n * 3 + 0] = ranges[i];
+         out[n * 3 + 1] = ranges[e_count + i];
+         out[n * 3 + 2] = ranges[2 * e_count + i];
+@@ -2206,6 +2210,20 @@
+     return error.NotPortedYet;
+ }
+ 
++test "hotPick accepts every routed expert ID and a bounded output" {
++    var counts: [385]u32 = @splat(0);
++    counts[384] = 9;
++    counts[128] = 9;
++    counts[8] = 3;
++    var ranges: [3 * counts.len][2]u64 = undefined;
++    for (&ranges, 0..) |*row, i| row.* = .{ i, 1 };
++    var out: [6][2]u64 = undefined;
++    try std.testing.expectEqual(@as(usize, 2), hotPick(&counts, &ranges, 5, &out));
++    try std.testing.expectEqual([2]u64{ 128, 1 }, out[0]);
++    try std.testing.expectEqual([2]u64{ 384, 1 }, out[3]);
++    try std.testing.expectEqual([2]u64{ 2 * counts.len + 384, 1 }, out[5]);
++}
++
+ test "TF_DS_EXPERT_HOT_CACHE: hotPick takes the top counts' ranges, ties to the lower id" {
+     // two experts of three, each with gate/up/down ranges (3 * E in id order)
+     const ranges = [_][2]u64{ .{ 10, 1 }, .{ 20, 2 }, .{ 30, 3 }, .{ 11, 1 }, .{ 21, 2 }, .{ 31, 3 }, .{ 12, 1 }, .{ 22, 2 }, .{ 32, 3 } };

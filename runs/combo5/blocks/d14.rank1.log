@@ -1,0 +1,126 @@
+2026-11-17T15:10:38.048918442Z 
+2026-11-17T15:10:38.048956698Z =============
+2026-11-17T15:10:38.048958826Z == PyTorch ==
+2026-11-17T15:10:38.048960058Z =============
+2026-11-17T15:10:38.051630597Z 
+2026-11-17T15:10:38.051651670Z NVIDIA Release 26.07 (build 373437299)
+2026-11-17T15:10:38.051653094Z PyTorch Version 2.13.0a0+9186a08
+2026-11-17T15:10:38.052825274Z Container image Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+2026-11-17T15:10:38.053886783Z Copyright (c) 2014-2024 Facebook Inc.
+2026-11-17T15:10:38.053906239Z Copyright (c) 2011-2014 Idiap Research Institute (Ronan Collobert)
+2026-11-17T15:10:38.053907759Z Copyright (c) 2012-2014 Deepmind Technologies    (Koray Kavukcuoglu)
+2026-11-17T15:10:38.053908991Z Copyright (c) 2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+2026-11-17T15:10:38.053910047Z Copyright (c) 2011-2013 NYU                      (Clement Farabet)
+2026-11-17T15:10:38.053911199Z Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+2026-11-17T15:10:38.053912431Z Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
+2026-11-17T15:10:38.053913519Z Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+2026-11-17T15:10:38.053914559Z Copyright (c) 2015      Google Inc.
+2026-11-17T15:10:38.053915615Z Copyright (c) 2015      Yangqing Jia
+2026-11-17T15:10:38.053916575Z Copyright (c) 2013-2016 The Caffe contributors
+2026-11-17T15:10:38.053917695Z All rights reserved.
+2026-11-17T15:10:38.055225525Z 
+2026-11-17T15:10:38.055245349Z Various files include modifications (c) NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+2026-11-17T15:10:38.055247093Z 
+2026-11-17T15:10:38.055248277Z GOVERNING TERMS: The software and materials are governed by the NVIDIA Software License Agreement
+2026-11-17T15:10:38.055249349Z (found at https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
+2026-11-17T15:10:38.055250533Z and the Product-Specific Terms for NVIDIA AI Products
+2026-11-17T15:10:38.055251573Z (found at https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+2026-11-17T15:10:38.225841473Z 
+2026-11-17T15:10:38.225864289Z NOTE: CUDA Forward Compatibility mode ENABLED.
+2026-11-17T15:10:38.225865729Z   Using CUDA 13.3 driver version 610.43.02 with kernel driver version 580.159.03.
+2026-11-17T15:10:38.225867105Z   See https://docs.nvidia.com/deploy/cuda-compatibility/ for details.
+2026-11-17T15:10:38.233989843Z 
+2026-11-17T15:11:05.544773343Z info: rank cache: 95.1 GiB of expert entries read whole in 20.7 s
+2026-11-17T15:12:15.432078321Z RDMA rank 1 peer 0 rail 0: gid_index=3 path_mtu=5
+2026-11-17T15:12:15.433073893Z RDMA rank 1 peer 0 rail 1: gid_index=3 path_mtu=5
+2026-11-17T15:12:16.715960174Z info: engram-lead: on (rank 1): each Engram layer's prompt rows read a chunk ahead
+2026-11-17T15:12:16.717852773Z {"rank": 1, "loaded_s": 98.2, "pool": 2101248, "drafts": true, "arena_used": 4760760937, "arena_reserved": 4836871168}
+2026-11-17T15:12:16.717890230Z info: dsv41: pool 2101248 positions, fetch 1050624 a part; a conversation may use up to 1048576 tokens; compressed planes 1062 MiB a rank (1783 MiB replicated); arena 4540 MiB used
+2026-11-17T15:17:24.347203591Z info: dsv41: CUDA graphs: 64 kept
+2026-11-17T15:17:58.926014356Z error: no captured Triton variant of _index_score for this launch:
+2026-11-17T15:17:58.926042468Z error:   Q: *bf16 at f915365d5200 (16-aligned true)
+2026-11-17T15:17:58.926044372Z error:   K: *u8 at f8fb68200000 (16-aligned true)
+2026-11-17T15:17:58.926045956Z error:   KS: *u8 at f9152be08700 (16-aligned true)
+2026-11-17T15:17:58.926047684Z error:   Wt: *bf16 at f915365f5200 (16-aligned true)
+2026-11-17T15:17:58.926049092Z error:   VIS: *i64 at f91536377f80 (16-aligned true)
+2026-11-17T15:17:58.926050564Z error:   OUT: *i64 at f8fb2c200000 (16-aligned true)
+2026-11-17T15:17:58.926052020Z error:   n: i32 1536
+2026-11-17T15:17:58.926053412Z error:   KB: *i64 at f91536377b00 (16-aligned true)
+2026-11-17T15:17:58.926054964Z error:   CAND: *i64 at f91536377f80 (16-aligned true)
+2026-11-17T15:17:58.926056324Z error:   cs: i32 0
+2026-11-17T15:17:58.926058052Z error:   TMAX: *i64 at f8fb2c200000 (16-aligned true)
+2026-11-17T15:17:58.926059540Z error:   nt: i32 24
+2026-11-17T15:17:58.926061028Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_UNJOINED (904) capturing stream has unjoined work
+2026-11-17T15:17:58.926062676Z {"follow_refused": "MissingTritonVariant"}
+2026-11-17T15:18:00.004098307Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:00.004121411Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:00.004123779Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:02.032362987Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:02.032384107Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:02.032386011Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:03.712605346Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:03.712627842Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:03.712629746Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:05.475650516Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:05.475682916Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:05.475684436Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:06.812313981Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:06.812334765Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:06.812336317Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:07.718023419Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:07.718045660Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:07.718047340Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:08.402803309Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:08.402825549Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:08.402827101Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:09.863487982Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:09.863509950Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:09.863511342Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:11.040850316Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:11.040875005Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:11.040876605Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:12.110906746Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:12.110928794Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:12.110930314Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:13.090744671Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:13.090765935Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:13.090767631Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:14.067302181Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:14.067324053Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:14.067325557Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:15.030485252Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:15.030508052Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:15.030520900Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:18.574265153Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:18.574288161Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:18.574289745Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:19.911870863Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:19.911891071Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:19.911892639Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:20.759944364Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:20.759965740Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:20.759967132Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:24.901439327Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:24.901460607Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:24.901462031Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:25.482658431Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:25.482679871Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:25.482681359Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:26.302361765Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:26.302382981Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:26.302384437Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:27.466918110Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:27.466939406Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:27.466941486Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:27.966735114Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:27.966757530Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:27.966758954Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:29.071888875Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:29.071910155Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:29.071924299Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:30.155973347Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:30.155994339Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:30.155996163Z {"follow_refused": "CudaFailed"}
+2026-11-17T15:18:31.253086626Z error: cuStreamWaitEvent: CUDA_ERROR_INVALID_VALUE (1) invalid argument
+2026-11-17T15:18:31.253107394Z error: cuStreamEndCapture: CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (901) operation failed due to a previous error during capture
+2026-11-17T15:18:31.253109058Z {"follow_refused": "CudaFailed"}

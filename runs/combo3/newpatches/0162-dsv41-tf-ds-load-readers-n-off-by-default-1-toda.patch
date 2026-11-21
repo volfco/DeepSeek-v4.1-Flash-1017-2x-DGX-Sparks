@@ -1,0 +1,122 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits 7842e206d50a..e8ac9d3a3daa)
+# dsv41: TF_DS_LOAD_READERS=N (off by default, 1 = today) reads a layer's expert span with N parallel O_DIRECT readers - the rank cache's 95 GiB was one serial stream
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/weights.zig b/zig/src/families/dsv41/weights.zig
+index 0ae97455f237968578d4e4dff09780781c540ea7..c02d9aea474e01d74c3eb0852c3bf1370a3ef8fd 100644
+--- a/zig/src/families/dsv41/weights.zig
++++ b/zig/src/families/dsv41/weights.zig
+@@ -157,6 +157,60 @@ fn readWhole(f: dio.File, buf: dio.Buffer, base: u64, piece: usize) !void {
+     }
+ }
+ 
++/// TF_DS_LOAD_READERS=N (1..8; unset, non-numeric or out of range: 1) - how many parallel O_DIRECT readers fill a
++/// span (0162). 1 is the old serial readWhole, byte for byte.
++fn readers() usize {
++    const v = std.c.getenv("TF_DS_LOAD_READERS") orelse return 1;
++    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return 1;
++    return if (n >= 1 and n <= 8) n else 1;
++}
++
++/// The buffer's `n` regions as [lo, hi) byte ranges, every boundary a multiple of `dio.alignment` so each reader's
++/// own reads stay aligned: contiguous and covering, a region empty when the total is under n * alignment.
++fn splitRegions(out: [][2]usize, total: usize, n: usize) void {
++    for (0..n) |i| {
++        const lo = std.mem.alignBackward(usize, total * i / n, dio.alignment);
++        const hi = if (i + 1 == n) total else std.mem.alignBackward(usize, total * (i + 1) / n, dio.alignment);
++        out[i] = .{ lo, hi };
++    }
++}
++
++/// readWhole from up to `n` threads over the disjoint regions of `buf` (TF_DS_LOAD_READERS > 1, 0162): the O_DIRECT
++/// preads queue side by side on the file instead of one at a time. `f.read` is one positional pread, safe on a
++/// shared fd; a spawn failure reads that region on this thread. The bytes and the buffer are readWhole's own.
++fn readWholeParallel(f: dio.File, buf: dio.Buffer, base: u64, piece: usize, n: usize) !void {
++    const Args = struct {
++        f: dio.File,
++        buf: dio.Buffer,
++        base: u64,
++        piece: usize,
++        lo: usize,
++        hi: usize,
++        err: ?anyerror = null,
++        fn run(a: *@This()) void {
++            // the region's start is a dio.alignment multiple (splitRegions), so the cast keeps readWhole's promise
++            readWhole(a.f, @alignCast(a.buf[a.lo..a.hi]), a.base + a.lo, a.piece) catch |err| {
++                a.err = err;
++            };
++        }
++    };
++    var regions: [8][2]usize = undefined;
++    splitRegions(regions[0..n], buf.len, n);
++    var args: [8]Args = undefined;
++    var threads: [8]?std.Thread = @splat(null);
++    for (regions[0..n], 0..) |r, i| {
++        args[i] = .{ .f = f, .buf = buf, .base = base, .piece = piece, .lo = r[0], .hi = r[1] };
++        if (r[0] >= r[1]) continue;
++        threads[i] = std.Thread.spawn(.{}, Args.run, .{&args[i]}) catch null;
++    }
++    var failed: ?anyerror = null;
++    for (0..n) |i| {
++        if (threads[i]) |t| t.join() else args[i].run();
++        if (args[i].err) |err| failed = failed orelse err;
++    }
++    if (failed) |err| return err;
++}
++
+ /// The rank cache read ahead of the loader (TF_DS_LOAD_PREFETCH=0 turns it off; `0046` of the 4-Spark recipe, by
+ /// shalk3). The loader reads the entries it does not read as a span one at a time, in file order, each read waiting on
+ /// the disk. A few threads pread those parts of the file in chunks up to `lead` bytes past the loader's furthest read
+@@ -354,7 +408,12 @@ const Loader = struct {
+             L.span_buf = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(dio.alignment), need);
+         }
+         const t0 = std.Io.Timestamp.now(c.io, .awake);
+-        try readWhole(L.direct.?, L.span_buf.?[0..need], base, span_piece);
++        // TF_DS_LOAD_READERS > 1 (0162): the span's pieces read from several threads instead of one serial stream
++        const nr = readers();
++        if (nr > 1)
++            try readWholeParallel(L.direct.?, L.span_buf.?[0..need], base, span_piece, nr)
++        else
++            try readWhole(L.direct.?, L.span_buf.?[0..need], base, span_piece);
+         L.span_ns += @intCast(t0.durationTo(std.Io.Timestamp.now(c.io, .awake)).nanoseconds);
+         L.span_bytes += need;
+         L.span = L.span_buf.?[@intCast(lo - base)..][0..@intCast(hi - lo)];
+@@ -683,7 +742,10 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, src: Source, c: Confi
+         };
+     }
+     if (L.plain_count > 0) std.log.info("mixed pack: {d} float linears", .{L.plain_count});
+-    if (L.span_bytes > 0) std.log.info("rank cache: {d:.1} GiB of expert entries read whole in {d:.1} s", .{ @as(f64, @floatFromInt(L.span_bytes)) / (1 << 30), @as(f64, @floatFromInt(L.span_ns)) / 1e9 });
++    if (L.span_bytes > 0) {
++        const nr_note: []const u8 = if (readers() > 1) " (parallel readers)" else "";
++        std.log.info("rank cache: {d:.1} GiB of expert entries read whole in {d:.1} s{s}", .{ @as(f64, @floatFromInt(L.span_bytes)) / (1 << 30), @as(f64, @floatFromInt(L.span_ns)) / 1e9, nr_note });
++    }
+     return w;
+ }
+ 
+@@ -698,6 +760,27 @@ test "strips: each 128-column block's tiles in k order" {
+     try std.testing.expectEqualSlices(u8, &want, &out);
+ }
+ 
++test "TF_DS_LOAD_READERS: splitRegions is contiguous, covering and 4 KiB-aligned at any reader count" {
++    var regions: [8][2]usize = undefined;
++    for ([_]usize{ 1, 2, 3, 5, 8 }) |n| {
++        splitRegions(regions[0..n], 100 << 20, n);
++        var at: usize = 0;
++        for (regions[0..n]) |r| {
++            try std.testing.expectEqual(at, r[0]); // contiguous, no gap or overlap
++            try std.testing.expectEqual(@as(usize, 0), r[0] % dio.alignment);
++            try std.testing.expectEqual(@as(usize, 0), r[1] % dio.alignment);
++            try std.testing.expect(r[0] <= r[1]);
++            at = r[1];
++        }
++        try std.testing.expectEqual(@as(usize, 100 << 20), at); // covering
++    }
++    // a total under the alignment spread leaves empty regions but stays aligned and covering
++    splitRegions(regions[0..8], 2 * dio.alignment, 8);
++    try std.testing.expectEqual(@as(usize, 0), regions[0][0]);
++    try std.testing.expectEqual(@as(usize, 2 * dio.alignment), regions[7][1]);
++    for (regions[0..8]) |r| try std.testing.expect(r[1] - r[0] <= 2 * dio.alignment);
++}
++
+ test "rank cache span: entries read whole come back byte for byte, the rest one by one" {
+     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+     defer arena.deinit();

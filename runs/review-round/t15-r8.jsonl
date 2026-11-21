@@ -1,0 +1,28 @@
+{"time": 1794959267.359555, "parallel": 8, "waves": [32, 128, 128, 128], "request_sha256": "08e63ada4ca1f69e9290cd12b2a5165e76f4ea448749d50a56f5651117006e66", "schedule": [0, 1, 1, 0], "grids": [56, 21], "rounds_per_load": 412}
+{"time": 1794959268.1737638, "original": ["0b65e9fe8ec12fc1dddfce3982b06334bc45d53c3e467a3d85a80fad48ccb04a", "8acd784a4fd605e811963c009c4292918ce91c18c2a2e7545d7f7e148cb4a1ea"]}
+{"time": 1794959274.2784379, "cell": "a1", "runtime": [{"image_id": "sha256:894e1b041b14c7559e60d382063221e1d576b5d412a2922819b3e382997a9108", "runtime_signature_except_bound": "0894732ebb786cfbb077de80e4e15362e3833ec02f8ef0a14da861f1136c6f6f", "model": {"TF_DS_ENGINE_ID": "tensorfold@fbbc97132cd0+234f9080b326", "TF_DS_MODEL_REVISION": "Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw@45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b,quant=exl3-2.9bpw,ablit=1@0bdc2036113c4fdda38ef6005b3cbc0bc0dfa0f0", "TF_DS_RANK_CACHE_SHA": "sha256:813f27dbe5509b7fac433aaac9e8e90159e9b58eeb691911d87f0b10fbdf43df"}, "flags": {"TF_DS_T13_EXPERT_PRUNE": "1", "TF_DS_T13_EXPERT_CAP": "12,1", "TF_DS_FIX_K": "0", "TF_DS_T15_PLACE_BOUND": "0"}, "graphs": 1, "profile": 0}, {"image_id": "sha256:894e1b041b14c7559e60d382063221e1d576b5d412a2922819b3e382997a9108", "runtime_signature_except_bound": "f11764b67943c8a861d1c69832cf7aa9b636c850c8300ad9a217f43800f7558a", "model": {"TF_DS_ENGINE_ID": "tensorfold@fbbc97132cd0+234f9080b326", "TF_DS_MODEL_REVISION": "Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw@45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b,quant=exl3-2.9bpw,ablit=1@0bdc2036113c4fdda38ef6005b3cbc0bc0dfa0f0", "TF_DS_RANK_CACHE_SHA": "sha256:88ad5503567937fe0f602f1e63c850022082a7633a7a7dd8e51af6e63e2d109e"}, "flags": {"TF_DS_T13_EXPERT_PRUNE": "1", "TF_DS_T13_EXPERT_CAP": "12,1", "TF_DS_FIX_K": "0", "TF_DS_T15_PLACE_BOUND": "0"}, "graphs": 1, "profile": 0}], "logical_grid": 56}
+Traceback (most recent call last):
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/review-round/t15.py", line 288, in run
+    proof, record = run_cell(n,mode,label,files,dest,pre,reqfile["requests"])
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/review-round/t15.py", line 191, in run_cell
+    metrics = stats(logs[0],reqs,n)
+              ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/review-round/t15.py", line 124, in stats
+    require(summary["requests"] == len(requests) == len(inputs) == len(replies) and
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/review-round/t15.py", line 42, in require
+    raise RuntimeError(message)
+RuntimeError: Requests did not run at the fixed concurrent shape
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/review-round/t15.py", line 311, in <module>
+    run(a.parallel,a.out,a.plan)
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/review-round/t15.py", line 301, in run
+    restore(pre,dest)
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/review-round/t15.py", line 241, in restore
+    require([signature(c) for c in pre] == [signature(c) for c in post], "Restored running identities changed")
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/review-round/t15.py", line 42, in require
+    raise RuntimeError(message)
+RuntimeError: Restored running identities changed

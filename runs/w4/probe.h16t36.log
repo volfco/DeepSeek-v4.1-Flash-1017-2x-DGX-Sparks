@@ -1,0 +1,51 @@
+
+=============
+== PyTorch ==
+=============
+
+NVIDIA Release 26.07 (build 373437299)
+PyTorch Version 2.13.0a0+9186a08
+Container image Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Copyright (c) 2014-2024 Facebook Inc.
+Copyright (c) 2011-2014 Idiap Research Institute (Ronan Collobert)
+Copyright (c) 2012-2014 Deepmind Technologies    (Koray Kavukcuoglu)
+Copyright (c) 2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+Copyright (c) 2011-2013 NYU                      (Clement Farabet)
+Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
+Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+Copyright (c) 2015      Google Inc.
+Copyright (c) 2015      Yangqing Jia
+Copyright (c) 2013-2016 The Caffe contributors
+All rights reserved.
+
+Various files include modifications (c) NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+
+GOVERNING TERMS: The software and materials are governed by the NVIDIA Software License Agreement
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
+and the Product-Specific Terms for NVIDIA AI Products
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+
+NOTE: CUDA Forward Compatibility mode ENABLED.
+  Using CUDA 13.3 driver version 610.43.02 with kernel driver version 580.159.03.
+  See https://docs.nvidia.com/deploy/cuda-compatibility/ for details.
+
+NOTE: The SHMEM allocation limit is set to the default of 64MB.  This may be
+   insufficient for PyTorch.  NVIDIA recommends the use of the following flags:
+   docker run --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 ...
+
+# synthetic: 16 ranges of 6469984 bytes, stride 6469984 (one cudaMalloc'd buffer of 103519744 bytes)
+# kernels: grid=(16, 36) block=128; reps=50; seed=324
+# repeat-first: the address-sorted first range read 16 times
+RESULT probe kernel=ldg case=distinct-sorted prefetch=off experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=252.2 best_gbs=254.6 worst_gbs=247.9 checksum=0xff8570eff16b80
+RESULT probe kernel=ldg case=distinct-sorted prefetch=on experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=219.0 best_gbs=223.5 worst_gbs=211.3 checksum=0xff8570eff16b80
+RESULT probe kernel=ldg case=distinct-shuffled prefetch=off experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=250.1 best_gbs=251.5 worst_gbs=245.7 checksum=0xff8570eff16b80
+RESULT probe kernel=ldg case=distinct-shuffled prefetch=on experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=226.6 best_gbs=231.7 worst_gbs=222.1 checksum=0xff8570eff16b80
+RESULT probe kernel=ldg case=repeat-first prefetch=off experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=1554.5 best_gbs=1630.5 worst_gbs=1403.5 checksum=0xff8570eff16b80
+RESULT probe kernel=ldg case=repeat-first prefetch=on experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=1508.9 best_gbs=1581.9 worst_gbs=1453.9 checksum=0xff8570eff16b80
+RESULT probe kernel=cpasync case=distinct-sorted prefetch=off experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=210.9 best_gbs=215.1 worst_gbs=165.4 checksum=0xff8570eff16b80
+RESULT probe kernel=cpasync case=distinct-sorted prefetch=on experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=153.9 best_gbs=157.2 worst_gbs=121.7 checksum=0xff8570eff16b80
+RESULT probe kernel=cpasync case=distinct-shuffled prefetch=off experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=211.0 best_gbs=212.9 worst_gbs=206.7 checksum=0xff8570eff16b80
+RESULT probe kernel=cpasync case=distinct-shuffled prefetch=on experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=156.9 best_gbs=159.6 worst_gbs=153.4 checksum=0xff8570eff16b80
+RESULT probe kernel=cpasync case=repeat-first prefetch=off experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=1018.3 best_gbs=1043.5 worst_gbs=980.6 checksum=0xff8570eff16b80
+RESULT probe kernel=cpasync case=repeat-first prefetch=on experts=16 tiles=36 bytes=103519744 reps=50 median_gbs=953.2 best_gbs=1026.7 worst_gbs=681.1 checksum=0xff8570eff16b80

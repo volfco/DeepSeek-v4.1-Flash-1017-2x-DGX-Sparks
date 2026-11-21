@@ -1,0 +1,45 @@
+norm D=128 R=4096: previous=0 differing bytes, follow-up=0
+decode compressor witness D=128: previous=0 differing bytes, follow-up=0
+norm D=512 R=4096: previous=0 differing bytes, follow-up=0
+decode compressor witness D=512: previous=186 differing bytes, follow-up=0
+compress decode R=1 D=512 graph us [unfused, 0127, old, new] [10.51, 3.415, 1.612, 1.809]
+compress decode R=7 D=512 graph us [unfused, 0127, old, new] [11.282, 4.119, 1.871, 2.133]
+compress decode R=32 D=512 graph us [unfused, 0127, old, new] [12.188, 7.053, 1.874, 2.191]
+compress prompt R=1 D=512 graph us [reference, old, new] [3.168, 2.79, 1.998]
+compress prompt R=8 D=512 graph us [reference, old, new] [4.048, 4.497, 2.0]
+compress prompt R=128 D=512 graph us [reference, old, new] [6.483, 8.016, 2.64]
+compress prompt R=1024 D=512 graph us [reference, old, new] [13.455, 15.051, 9.871]
+compress prompt R=1 D=2048 graph us [reference, old, new] [3.366, 3.222, 3.789]
+key fold R=7 nb=8 width=61: keys and tile maxima match scoreKey
+pool R=7 nb=8 width=61 k=8 mask=False ties graph us [unfused, old, new, new-nofold] [26.699, 2.088, 2.427, 2.303]
+key fold R=7 nb=8 width=64: keys and tile maxima match scoreKey
+pool R=7 nb=8 width=64 k=8 mask=False ties graph us [unfused, old, new, new-nofold] [26.657, 2.062, 2.345, 2.258]
+key fold R=7 nb=2049 width=16384: keys and tile maxima match scoreKey
+pool R=7 nb=2049 width=16384 k=2048 mask=False ties graph us [unfused, old, new, new-nofold] [35.197, 4.495, 23.466, 4.428]
+key fold R=32 nb=8192 width=65533: keys and tile maxima match scoreKey
+pool R=32 nb=8192 width=65533 k=2048 mask=False ties graph us [unfused, old, new, new-nofold] [62.035, 21.347, 142.384, 20.271]
+key fold R=128 nb=4096 width=32768: keys and tile maxima match scoreKey
+pool R=128 nb=4096 width=32768 k=2048 mask=True ties graph us [unfused, old, new, new-nofold] [159.052, 41.035, 316.632, 38.542]
+key fold R=7 nb=4096 width=32765: keys and tile maxima match scoreKey
+pool R=7 nb=4096 width=32765 k=2048 mask=False random graph us [unfused, old, new, new-nofold] [46.101, 9.806, 49.679, 9.425]
+key fold R=7 nb=8192 width=65533: keys and tile maxima match scoreKey
+pool R=7 nb=8192 width=65533 k=2048 mask=True flat graph us [unfused, old, new, new-nofold] [46.93, 19.923, 103.696, 18.661]
+key fold R=3 nb=513 width=4101: keys and tile maxima match scoreKey
+pool R=3 nb=513 width=4101 k=17 mask=False random graph us [unfused, old, new, new-nofold] [26.97, 4.237, 8.79, 4.371]
+rope key R=7 D=128 graph us [reference, old, new] [3.014, 2.189, 1.867]
+key nonfinite/denormal/zero bytes match; 1 scratch buffer(s) unwritten
+rope latent R=7 D=512 graph us [reference, old, new] [2.151, 2.184, 1.61]
+latent nonfinite/denormal/zero bytes match; 1 scratch buffer(s) unwritten
+rope query R=7 D=128 graph us [reference, old, new] [2.195, 1.696, 1.683]
+query nonfinite/denormal/zero bytes match; 1 scratch buffer(s) unwritten
+rope prompt key R=128 D=128 graph us [reference, old, new] [4.363, 3.029, 2.195]
+prompt key nonfinite/denormal/zero bytes match; 1 scratch buffer(s) unwritten
+rope prompt latent R=128 D=512 graph us [reference, old, new] [3.596, 3.279, 1.809]
+prompt latent nonfinite/denormal/zero bytes match; 2 scratch buffer(s) unwritten
+all 65,536 bf16 input encodings through the latent store match the kit; the input row stays unrotated
+norm D=128: all bf16 exponents and mantissas in constant-magnitude rows match
+norm D=512: all bf16 exponents and mantissas in constant-magnitude rows match
+pair softmax: 8516 score pairs, both operand orders, ties, signed zeros, underflow, infinities and NaNs match the full rule
+six-slot drop: 4111 share vectors (threshold, crossing ranks, ties, negatives, NaN, infinities) match the full rule
+8,257,536 bf16/E4M3 input-scale pairs match the RN division and tie rules
+PASS

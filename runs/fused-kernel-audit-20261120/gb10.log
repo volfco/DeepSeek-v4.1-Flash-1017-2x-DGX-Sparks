@@ -1,0 +1,32 @@
+norm D=128 R=4096: old=2 differing bytes, root-only=0, new=0
+decode compressor witness D=128: old=1 differing bytes, new=0
+norm D=512 R=4096: old=9 differing bytes, root-only=0, new=0
+decode compressor witness D=512: old=1 differing bytes, new=0
+compress decode R=1 D=512 graph us [unfused, 0127, old, new] [11.074, 3.412, 4.053, 3.415]
+compress decode R=7 D=512 graph us [unfused, 0127, old, new] [11.258, 4.113, 4.752, 3.669]
+compress decode R=32 D=512 graph us [unfused, 0127, old, new] [12.062, 7.052, 7.636, 3.686]
+compress prompt R=1 D=512 graph us [reference, old, new] [3.163, 2.952, 1.807]
+compress prompt R=8 D=512 graph us [reference, old, new] [4.11, 4.623, 1.753]
+compress prompt R=128 D=512 graph us [reference, old, new] [6.546, 7.824, 2.386]
+compress prompt R=1024 D=512 graph us [reference, old, new] [13.465, 14.936, 7.824]
+compress prompt R=1 D=2048 graph us [reference, old, new] [3.412, 3.412, 3.28]
+pool R=7 nb=8 k=8 mask=False ties graph us [reference, old, new] [26.516, 25.042, 2.065]
+pool R=7 nb=2049 k=2048 mask=False ties graph us [reference, old, new] [37.177, 36.541, 6.046]
+pool R=7 nb=4096 k=2048 mask=False ties graph us [reference, old, new] [52.244, 53.044, 12.878]
+pool R=32 nb=8192 k=2048 mask=False ties graph us [reference, old, new] [61.91, 61.06, 21.275]
+pool R=128 nb=4096 k=2048 mask=True ties graph us [reference, old, new] [159.115, 154.58, 39.128]
+pool R=7 nb=4096 k=2048 mask=False random graph us [reference, old, new] [44.757, 45.588, 9.811]
+pool R=7 nb=8192 k=2048 mask=True flat graph us [reference, old, new] [46.867, 51.152, 19.922]
+pool R=3 nb=513 k=17 mask=False random graph us [reference, old, new] [25.557, 24.214, 4.175]
+rope key R=7 D=128 graph us [reference, old, new] [2.966, 3.344, 2.126]
+key nonfinite/denormal/zero bytes match
+rope latent R=7 D=512 graph us [reference, old, new] [2.131, 3.031, 1.618]
+latent nonfinite/denormal/zero bytes match
+rope query R=7 D=128 graph us [reference, old, new] [2.201, 9.3, 1.683]
+query nonfinite/denormal/zero bytes match
+rope prompt key R=128 D=128 graph us [reference, old, new] [4.247, 3.541, 3.019]
+prompt key nonfinite/denormal/zero bytes match
+rope prompt latent R=128 D=512 graph us [reference, old, new] [3.545, 4.114, 1.875]
+prompt latent nonfinite/denormal/zero bytes match
+all 65,536 bf16 input encodings through the latent store match the kit
+PASS

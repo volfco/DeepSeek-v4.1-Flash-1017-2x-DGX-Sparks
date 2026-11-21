@@ -1,0 +1,36 @@
+From 99f5aae4884ce14c80de41b699b539b0ff3cf87a Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Thu, 19 Nov 2026 11:31:25 -0800
+Subject: [PATCH 6/6] draft.zig: fused drafter gate only where the kit gate
+ fits (keeps the cuBLAS gate on other row counts, as production)
+
+---
+ zig/src/families/dsv41/draft.zig | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/zig/src/families/dsv41/draft.zig b/zig/src/families/dsv41/draft.zig
+index 083389c..6f240f9 100644
+--- a/zig/src/families/dsv41/draft.zig
++++ b/zig/src/families/dsv41/draft.zig
+@@ -806,11 +806,13 @@ pub const Drafter = struct {
+         // RB 5, 10, 15); a pass of other rows takes the wide passes' cuBLAS gate, which every row count has
+         const fused_ok = moe_route.fuseOk(e.ops.fused_route, e.two != null, R, dr.topk, ne, sl);
+         const fused_logits = moe_route.fuseOkLogits(e.ops.fused_route, e.two != null, R, dr.topk, ne, sl);
+-        if (R <= tri.decode_rows and fused_ok) {
+-            try e.ops.moeRoute(e.s, dr.x, c.hidden, lay.gate_w, 0, lay.gate_b, dr.pick, dr.mw, 0, 0, R, ne, dr.topk, sl, c.hidden / 256, c.hidden, shared_id, c.routed_scaling, null, null);
+-        } else if (R <= tri.decode_rows and tri_norm.rowmmGateFits(e.t, dr.x, c.hidden, lay.gate_w, dr.gl, R, c.hidden, ne)) {
+-            kc = try tri_norm.rowmmGate(e.t, dr.x, c.hidden, lay.gate_w, dr.gl, R, c.hidden, ne);
+-            try tri_norm.route(e.t, dr.gl, kc, lay.gate_b, dr.topk, c.routed_scaling, shared_id, dr.pick, dr.mw, R, ne, sl);
++        if (R <= tri.decode_rows and tri_norm.rowmmGateFits(e.t, dr.x, c.hidden, lay.gate_w, dr.gl, R, c.hidden, ne)) {
++            if (fused_ok) {
++                try e.ops.moeRoute(e.s, dr.x, c.hidden, lay.gate_w, 0, lay.gate_b, dr.pick, dr.mw, 0, 0, R, ne, dr.topk, sl, c.hidden / 256, c.hidden, shared_id, c.routed_scaling, null, null);
++            } else {
++                kc = try tri_norm.rowmmGate(e.t, dr.x, c.hidden, lay.gate_w, dr.gl, R, c.hidden, ne);
++                try tri_norm.route(e.t, dr.gl, kc, lay.gate_b, dr.topk, c.routed_scaling, shared_id, dr.pick, dr.mw, R, ne, sl);
++            }
+         } else {
+             // x.float() @ gate_w.float().t() through cuBLAS, then the routing
+             try e.ops.toF32(e.s, dr.x, dr.xf, R * c.hidden);
+-- 
+2.56.1
+

@@ -1,0 +1,398 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits acbcf7caafeb..35eb43522fa2)
+# dsv41: TF_DS_DRAFT_TRIAGE=conf:<t> (off by default, M3, sequential) marks the draft rows their predecessor will reject dead - they route nothing and are treated as rejected
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index 08a2176d59a3d3ffd74c5266f6fd946808933a46..728cd80ce430359ed1cfa930d1e92598f1f929c7 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -291,6 +291,17 @@ extern "C" __global__ void tf_ds_iota_vis_kernel(const long long* vis, long long
+     }
+ }
+ 
++// Dead draft rows (0177, TF_DS_DRAFT_TRIAGE): a row the probe says its predecessor will reject routes nothing -
++// every slot becomes pick -1, weight 0 (the prune kernel's dropped-slot convention; decode_prep combines rows that
++// route no slot). The mask is one byte a row, computed identically on both ranks (it rides the verify frame).
++extern "C" __global__ void tf_ds_dead_rows_kernel(int* pick, float* wts, const unsigned char* dead, int rows, int slots, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x * blockDim.x + threadIdx.x;
++    if (r < rows && dead[r]) {
++        for (int i = 0; i < slots; ++i) { pick[r * slots + i] = -1; wts[r * slots + i] = 0.f; }
++    }
++}
++
+ // Routed-expert top-p prune of a decode window (expert_prune.zig's pruneWindow, op for op), in place on the router's
+ // output, one thread a row. A slot the rule drops becomes pick -1, weight 0; the kept weights are scaled by total / kept
+ // sum (renorm). With cap > 0 the window then keeps only its cap heaviest experts (the rows' kept shares summed in row
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 3c5be28deb88eea7866412cdaa169989ce22687c..6ea90778b99f8238d6717bd93fc53ffa8fffb93b 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -110,6 +110,7 @@ pub fn writeWin(w: *Wire, gpa: std.mem.Allocator, win: Win, sharded: bool) !void
+     try w.int(gpa, u64, win.end);
+     try w.int(gpa, u64, win.start);
+     try w.int(gpa, u8, @intFromBool(win.absorb));
++    try w.int(gpa, u8, win.live); // (0177: the live-row count from the window's start; 0: no dead rows)
+     try w.ids(gpa, win.ids);
+     if (sharded) {
+         if (win.part < 0 or win.part >= parts.max_parts) return error.BadPart;
+@@ -125,8 +126,9 @@ pub fn readWin(r: *Reader, gpa: std.mem.Allocator, ids: *std.ArrayList(i32), sha
+     const end: usize = @intCast(try r.int(u64));
+     const start: usize = @intCast(try r.int(u64));
+     const absorb = try r.int(u8) != 0;
++    const live: u8 = try r.int(u8);
+     try r.ids(gpa, ids);
+-    var win: Win = .{ .slot = slot, .base = base, .end = end, .start = start, .absorb = absorb, .ids = ids.items };
++    var win: Win = .{ .slot = slot, .base = base, .end = end, .start = start, .absorb = absorb, .ids = ids.items, .live = live };
+     if (sharded) {
+         win.part = try r.int(u8);
+         win.gen = try r.int(u64);
+@@ -166,7 +168,7 @@ pub const Reader = struct {
+ /// taps go into the drafter, its rows' ids; TF_DS_KV_SHARD: its extent's part (the rank holding its compressed rows;
+ /// -1: its base's, which round.Rows.ownerOf derives and checks) and its extent's generation (parts.zig: a follower
+ /// refuses a round naming a reused extent).
+-pub const Win = struct { slot: usize, base: usize, end: usize, start: usize, absorb: bool, ids: []const i32, part: i64 = -1, gen: u64 = 0 };
++pub const Win = struct { slot: usize, base: usize, end: usize, start: usize, absorb: bool, ids: []const i32, part: i64 = -1, gen: u64 = 0, live: u8 = 0 };
+ 
+ /// The rows of a round (round.Rows' slices point here).
+ pub const Built = struct {
+@@ -701,6 +703,11 @@ pub const Lanes = struct {
+         var ln: Lanes = .{ .gpa = gpa, .m = m, .peer = if (m.world > 1) m.peer() else null };
+         ln.keep_protect = api.prompt_cache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null); // every rank alike
+         ln.accept_chain = envOne("TF_DS_DEVICE_ACCEPT"); // every rank alike; an uneven pair is still bit-identical (the follower never reads the keep)
++        if (m.triage != null and ln.accept_chain) {
++            // (0177: the dead rows' device keep counts would count garbage picks; the host's accept treats them as rejected)
++            ln.accept_chain = false;
++            std.log.warn("dsv41: TF_DS_DEVICE_ACCEPT is off under TF_DS_DRAFT_TRIAGE", .{});
++        }
+         // the round costs by rows: ROUND_MS[min(rows, len) - 1] (the served table, or TF_DS_ROUND_MS)
+         const t = m.round_ms;
+         for (&ln.wc, 0..) |*c, i| c.* = .{ .width = @intCast(i + 1), .ms = t[@min(i, t.len - 1)] };
+@@ -1405,6 +1412,12 @@ fn chunkRows(start: usize, len: usize) usize {
+         var ids: [max_streams][max_rows]i32 = undefined;
+         var wins: [max_streams]Win = undefined;
+         try self.roundWins(windows, &ids, &wins);
++        // 0177 (TF_DS_DRAFT_TRIAGE): the conf rule's dead rows (a chain survival under the threshold) ride the frame
++        // as each window's live-row count, so both ranks mark the same rows. Row 0 (the pending token) never dies;
++        // forced/tree rows are left alone (their rows' fate rides their parents).
++        if (m.triage) |t| for (windows, wins[0..windows.len]) |w, *win| {
++            win.live = if (w.parents != null or w.tokens.len > 0) 0 else @intCast(triageLive(self.streams.getPtr(w.stream).?.confs[0..w.held], t));
++        };
+         const t0 = m.now();
+         if (try self.begin(.verify)) {
+             try self.wire.int(gpa, u32, @intCast(windows.len));
+@@ -1414,6 +1427,15 @@ fn chunkRows(start: usize, len: usize) usize {
+         const t1 = m.now();
+         if (self.spill) |t| for (wins[0..windows.len]) |w| t.bump(w.base + w.start, w.base + w.start + w.ids.len);
+         const rows = try self.built.build(gpa, &self.seqs, wins[0..windows.len]);
++        if (m.triage != null) {
++            // (0177: the mask to the device before the forward; uploaded every round so no stale flag survives)
++            var mask: [round.max_rows]u8 = @splat(0);
++            for (wins[0..windows.len], 0..) |win, k| {
++                if (win.live == 0) continue;
++                for (win.live..win.ids.len) |r| mask[self.built.wins[k].row + r] = 1;
++            }
++            try m.setDead(&mask);
++        }
+         // 0160 (TF_DS_ABSORB_AFTER_PICK): forward, then the pick, then the taps' absorb left running under the host's
+         // accept and the pass frame's send; off: the served order (forward, absorb, pick)
+         try m.verify(rows);
+@@ -1496,7 +1518,8 @@ fn chunkRows(start: usize, len: usize) usize {
+         const V = m.vocab;
+         for (windows, out, 0..) |w, *o, k| {
+             const row0 = self.built.wins[k].row;
+-            for (0..w.rows()) |r| o.sampled[r] = if (path != .host_draw) tokens[row0 + r] else try draw(logits[(row0 + r) * V ..][0..V], w.positions[r], w.stream.sampling);
++            // 0177: a dead row is treated as rejected - its sentinel matches no child and the path truncates there
++            for (0..w.rows()) |r| o.sampled[r] = if (wins[k].live != 0 and r >= wins[k].live) std.math.maxInt(u32) else if (path != .host_draw) tokens[row0 + r] else try draw(logits[(row0 + r) * V ..][0..V], w.positions[r], w.stream.sampling);
+             const l = self.streams.getPtr(w.stream).?;
+             if (w.stream.score) |*sc| {
+                 // the recorded continuation's next tokens: row r's logits score the token after it, which is the
+@@ -1510,6 +1533,11 @@ fn chunkRows(start: usize, len: usize) usize {
+             }
+             @memcpy(o.drafts[0..w.held], l.held[0..w.held]);
+             @memcpy(o.drafts[w.held..][0..w.tokens.len], w.tokens);
++            // 0177: a dead row's INPUT sentinel breaks the accept's child match, so the path stops before it and its
++            // garbage pick is never emitted (a wrong call then costs one token of speculation, the review's rule)
++            if (wins[k].live != 0) for (wins[k].live..w.held + 1) |dr| {
++                o.drafts[dr - 1] = std.math.maxInt(u32);
++            };
+             l.nheld = 0;
+         }
+         if (spec and path == .host_draw) try self.speculateRound(windows, out[0..windows.len], logits, V);
+@@ -1544,6 +1572,7 @@ fn chunkRows(start: usize, len: usize) usize {
+             const s = sampling.Sampling{ .seed = sm.seed, .temperature = sm.temperature, .top_k = sm.top_k, .top_p = sm.top_p, .min_p = sm.min_p };
+             const row0 = self.built.wins[k].row;
+             for (0..w.held) |j| {
++                if (o.drafts[j] == std.math.maxInt(u32)) continue; // (0177: a dead row has no draft to speculate on)
+                 const p = try sampling.servedDist(logits[(row0 + j) * V ..][0..V], s);
+                 sx.dist[plan.n] = p;
+                 var ids: [sampling.max_candidates + 1]i64 = undefined;
+@@ -2099,6 +2128,17 @@ pub fn survivals(conf: []const f32, out: []f64) void {
+     }
+ }
+ 
++/// 0177 (TF_DS_DRAFT_TRIAGE): the rows the conf rule keeps - the pending row plus the drafts whose chain survival
++/// stays at or over `t`; the tail under it is dead (prefix-closed, as the chain is).
++pub fn triageLive(conf: []const f32, t: f64) usize {
++    var sv: [draft.max_block]f64 = undefined;
++    const n = @min(conf.len, sv.len);
++    survivals(conf[0..n], sv[0..n]);
++    var k: usize = 0;
++    while (k < n and sv[k] >= t) : (k += 1) {}
++    return 1 + k;
++}
++
+ /// The series' switches' parse ("1" or "on"; unset, "0", "off", "" or anything else: off).
+ fn envOne(name: [:0]const u8) bool {
+     const v = std.c.getenv(name) orelse return false;
+@@ -2587,6 +2627,15 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+                 }
+                 const rows = try built.build(gpa, &seqs, wins[0..nw]);
+                 if (spill) |sd| for (wins[0..nw]) |w| sd.bump(w.base + w.start, w.base + w.start + w.ids.len);
++                if (m.triage != null) {
++                    // (0177: this rank's own copy of the frame's mask, before the forward)
++                    var mask: [round.max_rows]u8 = @splat(0);
++                    for (wins[0..nw], 0..) |win, k| {
++                        if (win.live == 0) continue;
++                        for (win.live..win.ids.len) |row| mask[built.wins[k].row + row] = 1;
++                    }
++                    m.setDead(&mask) catch |err| try roundRefused(err);
++                }
+                 // 0160 (TF_DS_ABSORB_AFTER_PICK): the absorb after the forward, left running to sit under the frame
+                 // wait and the pass frame's send; off: done here, as the round's old order had it. A refused verify
+                 // skips the absorb as the one call did before: a failed forward's taps never reach the drafter rings
+@@ -2757,6 +2806,30 @@ test "a calibration weight parses to a finite value in 0..1" {
+     }
+ }
+ 
++test "TF_DS_DRAFT_TRIAGE: the conf rule keeps a prefix and dies the tail" {
++    // survivals of three zero confidences: 0.5, 0.25, 0.125
++    try std.testing.expectEqual(@as(usize, 2), triageLive(&.{ 0.0, 0.0, 0.0 }, 0.5));
++    try std.testing.expectEqual(@as(usize, 3), triageLive(&.{ 0.0, 0.0, 0.0 }, 0.25));
++    try std.testing.expectEqual(@as(usize, 4), triageLive(&.{ 0.0, 0.0, 0.0 }, 0.1));
++    try std.testing.expectEqual(@as(usize, 1), triageLive(&.{ -8.0, -8.0 }, 0.5));
++    try std.testing.expectEqual(@as(usize, 1), triageLive(&.{}, 0.5)); // the pending row alone
++}
++
++test "TF_DS_DRAFT_TRIAGE: the input sentinel truncates the accept path before the dead row" {
++    const a = std.testing.allocator;
++    const sentinel = std.math.maxInt(u32);
++    const parents = [_]i32{ -1, 0, 1 };
++    // row 2's input is the sentinel (its draft died): the path stops before it whatever the picks are, so its
++    // garbage pick is unreachable and the drawn token is row 1's - a wrong call then costs one token of speculation
++    const path = try lanes.accept.acceptPath(a, &.{ 10, 11, sentinel }, &parents, &.{ 11, 12, 999 });
++    defer a.free(path);
++    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, path);
++    // without the sentinel the walk reaches row 2 and its pick is the drawn token
++    const full = try lanes.accept.acceptPath(a, &.{ 10, 11, 12 }, &parents, &.{ 11, 12, 999 });
++    defer a.free(full);
++    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, full);
++}
++
+ test "draft chances are the prefix survivals chooseK sums" {
+     var out: [3]f64 = undefined;
+     survivals(&.{ 0.0, 0.0, 2.0 }, &out);
+@@ -3082,13 +3155,13 @@ test "a restore's destination holds the waiting prompt's room past its rows whil
+     try std.testing.expect(!kept.stale);
+ }
+ 
+-test "a verify window's frame bytes: as ever with the switch off, its part and generation added with it on" {
++test "a verify window's frame bytes: the plain layout, its part and generation added with the shard on" {
+     const gpa = std.testing.allocator;
+     const win: Win = .{ .slot = 2, .base = 4096, .end = 8192, .start = 7, .absorb = true, .ids = &.{ 5, 6 }, .part = 1, .gen = 9 };
+     var w: Wire = .{};
+     defer w.deinit(gpa);
+     try writeWin(&w, gpa, win, false);
+-    // the layout before TF_DS_KV_SHARD: verifyFn's fields in their order
++    // the layout before TF_DS_KV_SHARD: verifyFn's fields in their order (the live count rides since 0177)
+     var old: Wire = .{};
+     defer old.deinit(gpa);
+     try old.int(gpa, u32, 2);
+@@ -3096,6 +3169,7 @@ test "a verify window's frame bytes: as ever with the switch off, its part and g
+     try old.int(gpa, u64, 8192);
+     try old.int(gpa, u64, 7);
+     try old.int(gpa, u8, 1);
++    try old.int(gpa, u8, 0); // (0177: the live-row count; 0: no dead rows)
+     try old.ids(gpa, &.{ 5, 6 });
+     try std.testing.expectEqualSlices(u8, old.buf.items, w.buf.items);
+     var ids: std.ArrayList(i32) = .empty;
+@@ -3113,6 +3187,13 @@ test "a verify window's frame bytes: as ever with the switch off, its part and g
+     try std.testing.expectEqual(@as(i64, 1), on.part);
+     try std.testing.expectEqual(@as(u64, 9), on.gen);
+     try std.testing.expectEqualSlices(i32, &.{ 5, 6 }, on.ids);
++    // (0177: the live count round-trips)
++    var live_win = win;
++    live_win.live = 3;
++    w.buf.clearRetainingCapacity();
++    try writeWin(&w, gpa, live_win, false);
++    r = .{ .b = w.buf.items };
++    try std.testing.expectEqual(@as(u8, 3), (try readWin(&r, gpa, &ids, false)).live);
+     var bad = win;
+     bad.part = -1;
+     try std.testing.expectError(error.BadPart, writeWin(&w, gpa, bad, true));
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 9c22b57e0d83e368a6375347a144287d41a01007..ad1611a94b26a88a197e5ebfeed9bc264bca112a 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -190,6 +190,7 @@ pub const Model = struct {
+     amax: u64, // u32 [round.max_rows + max_streams]: a round's greedy tokens on the device (roundArgmax), then each window's keep (TF_DS_DEVICE_ACCEPT)
+     amax_host: [round.max_rows + max_streams]u32 = undefined,
+     draw_tab: u64 = 0, // ops.DrawRow [round.max_rows] (TF_DS_T27_DEVICE_DRAW; 0: off)
++    triage: ?f64 = null, // 0177 (TF_DS_DRAFT_TRIAGE): the conf rule's survival threshold (null: off)
+     draw_rows: usize = 0, // rows the round's tokens are drawn on the device (setDraw; 0: the greedy argmax)
+     accept_tab: u64 = 0, // TF_DS_DEVICE_ACCEPT: the device tab [row0 ..][wrows ..] of the round's windows (setAccept)
+     accept_rows: usize = 0, // windows the round's chain keeps are computed on the device (setAccept; 0: off)
+@@ -244,6 +245,7 @@ pub const Model = struct {
+         m.gpa = gpa;
+         m.exact_resume = api.prompt_cache.exactResume(envOf("TF_DS_EXACT_RESUME")); // every rank alike
+         m.absorb_after_pick = envOnOff(envOf("TF_DS_ABSORB_AFTER_PICK")); // rank-local: an uneven pair stays bit-identical
++        m.triage = try parseTriage(envOf("TF_DS_DRAFT_TRIAGE")); // rank-local: the mask rides the verify frame
+         m.tails = &.{};
+         m.tail_buf = null;
+         errdefer if (m.tail_buf) |*b| b.free();
+@@ -1697,10 +1699,19 @@ pub const Model = struct {
+         m.accept_rows = n;
+     }
+ 
++    /// 0177 (TF_DS_DRAFT_TRIAGE): the round's dead-row mask, u8 a row (1: the probe says its predecessor will reject
++    /// its input; the row routes nothing and the host treats it as rejected). Uploaded every round the switch is on,
++    /// so the device never keeps a stale flag; the mask is the same on both ranks (it rides the verify frame).
++    pub fn setDead(m: *Model, mask: []const u8) !void {
++        if (m.triage == null or mask.len == 0 or mask.len > round.max_rows) return error.TriageOff;
++        if (m.rd.dead == 0) m.rd.dead = try m.arena.take(round.max_rows);
++        const d = m.ctx.d;
++        try d.check(d.api.cuMemcpyHtoDAsync_v2(m.rd.dead, mask.ptr, mask.len, m.stream.handle), "cuMemcpyHtoDAsync");
++    }
++
+     /// The next round's rows are drawn on the device by `rules` (one per row) instead of taking the argmax; call after
+     /// verify and before roundArgmax, and set draw_rows back to 0 once the round's tokens are read.
+-    pub fn setDraw(m: *Model, rules: []const ops_mod.DrawRow) !void {
+-        if (rules.len == 0) {
++    pub fn setDraw(m: *Model, rules: []const ops_mod.DrawRow) !void {        if (rules.len == 0) {
+             m.draw_rows = 0;
+             return;
+         }
+@@ -1799,6 +1810,21 @@ fn envOnOff(v: ?[]const u8) bool {
+     return std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "on");
+ }
+ 
++/// 0177 (TF_DS_DRAFT_TRIAGE): `conf:<t>` marks the draft rows whose chain survival is under `t` dead (they route
++/// nothing and the host treats them as rejected); `file:<path>` is the trained probe's hook - the probe study's
++/// weights do not exist, so the value refuses with its named error (the format is the patch's commit body).
++/// Unset, `0` or `off`: the engine as it was. A malformed value refuses the start.
++fn parseTriage(v: ?[]const u8) !?f64 {
++    const s = std.mem.trim(u8, v orelse return null, " \t\r\n");
++    if (s.len == 0 or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "off")) return null;
++    if (std.mem.startsWith(u8, s, "conf:")) {
++        const t = std.fmt.parseFloat(f64, s["conf:".len..]) catch return error.BadDraftTriage;
++        return if (t > 0 and t < 1) t else error.BadDraftTriage;
++    }
++    if (std.mem.startsWith(u8, s, "file:")) return error.TriageProbeUnsupported;
++    return error.BadDraftTriage;
++}
++
+ test "a boolean switch parses 1 and on, and nothing else" {
+     try std.testing.expect(envOnOff("1"));
+     try std.testing.expect(envOnOff("on"));
+@@ -1837,6 +1863,19 @@ test "TF_DS_ENGRAM_SUBMIT_EARLY: the stash's shifted hashes equal the whole sequ
+     }
+ }
+ 
++test "TF_DS_DRAFT_TRIAGE: conf:<t> takes a threshold in (0,1), file: refuses with its name, the rest off" {
++    try std.testing.expectEqual(@as(?f64, null), try parseTriage(null));
++    try std.testing.expectEqual(@as(?f64, null), try parseTriage(""));
++    try std.testing.expectEqual(@as(?f64, null), try parseTriage("0"));
++    try std.testing.expectEqual(@as(?f64, null), try parseTriage("off"));
++    try std.testing.expectEqual(@as(?f64, 0.2), try parseTriage("conf:0.2"));
++    try std.testing.expectError(error.BadDraftTriage, parseTriage("conf:0"));
++    try std.testing.expectError(error.BadDraftTriage, parseTriage("conf:1"));
++    try std.testing.expectError(error.BadDraftTriage, parseTriage("conf:x"));
++    try std.testing.expectError(error.BadDraftTriage, parseTriage("yes"));
++    try std.testing.expectError(error.TriageProbeUnsupported, parseTriage("file:/tmp/probe.bin"));
++}
++
+ test "the slice knob parses to 0 or 1 to 40 layers" {
+     try std.testing.expectEqual(@as(usize, 0), try parseSliceLayers("0"));
+     try std.testing.expectEqual(@as(usize, 5), try parseSliceLayers("5"));
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 5ac44b4e9813c42107b8a90554a9f62993814d72..96d85e31a7d64f4e6f4ed52c51a8c591cb5e875b 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -32,6 +32,12 @@
+ //!   TF_DS_MAX_TOKENS_CLAMP=1                      an explicit max_tokens past the context room is clamped like the implicit
+ //!                                               default instead of refused (0171; unset: the OpenAI-worded refusal)
+ //!   TF_DS_BODY_LIMIT_MB=<MiB>                    the request body limit (0171; unset, 0 or invalid: 32 MiB; 64 matches Baseten)
++//!   TF_DS_DRAFT_TRIAGE=conf:<t>                  0177 (M3, sequential): the draft rows whose chain survival is under <t>
++//!                                               route nothing and are treated as rejected - the probe says their
++//!                                               predecessor will reject their input, so their output is never emitted
++//!                                               (a wrong call costs one token of speculation). `file:<path>` is the
++//!                                               trained probe's hook (the weights do not exist: the value refuses);
++//!                                               unset: every row runs as before
+ //!   TF_DS_ROUND_ROWS, TF_DS_STREAMS             a round's rows at most (16; the four-node lane's 48) and the pool's
+ //!                                               streams (4; its 16): --parallel at most the streams
+ //!   TF_DS_PROMPT_WINDOW_ROWS=<rows>             a prompt chunk under these rows (64 .. 128; 64 unset) takes the MoE decode window
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 5f5fe13b2597b913d73c354cb60a013f29d60ba9..e05b11f65959bdf0c5192b6729bc0d762dc91e08 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -109,6 +109,7 @@ pub const Ops = struct {
+     gpu_clock: cuda.Function,
+     prune: ?expert_prune.Mode = null, // TF_DS_T13_EXPERT_PRUNE and _EXPERT_CAP, read at load
+     prune_fn: ?cuda.Function = null, // looked up only when the switch is on
++    dead_rows: cuda.Function, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' picks emptied
+     keyed_noise: ?cuda.Function = null, // TF_DS_T26_KEYED_DRAFT or TF_DS_SPEC_SAMPLE, looked up only when on
+     spec_clean: ?cuda.Function = null, // TF_DS_SPEC_SAMPLE, looked up only when on
+     gather_cols: ?cuda.Function = null, // TF_DS_SPEC_SAMPLE, looked up only when on
+@@ -156,6 +157,7 @@ pub const Ops = struct {
+             .gpu_clock = try fm.function("tf_ds_clock_kernel"),
+             .prune = prune,
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
++            .dead_rows = try fm.function("tf_ds_dead_rows_kernel"),
+             .keyed_noise = if (envOn(keyed_env) or spec) try fm.function("tf_ds_keyed_noise_kernel") else null,
+             .spec_clean = if (spec) try fm.function("tf_ds_spec_clean_kernel") else null,
+             .gather_cols = if (spec) try fm.function("tf_ds_gather_cols_kernel") else null,
+@@ -315,6 +317,21 @@ pub const Ops = struct {
+         try cuda.launch.launch(o.prune_fn orelse return error.ExpertPruneOff, .{ .grid = .{ .x = 1 }, .block = .{ .x = expert_prune.max_rows }, .pdl = o.pdl }, s, &a);
+     }
+ 
++    /// 0177 (TF_DS_DRAFT_TRIAGE): the dead draft rows' picks emptied - every slot of a dead row becomes pick -1,
++    /// weight 0 (the prune's dropped-slot convention), so the experts' decode combines those rows with no reads.
++    /// `dead`: u8 a row on the device (1: dead; it rides the verify frame, so both ranks mark the same rows).
++    pub fn deadRows(o: *const Ops, s: cuda.Stream, pick: u64, wts: u64, dead: u64, rows: usize, slots: usize) !void {
++        if (rows == 0) return;
++        var a: cuda.Args = .{};
++        a.add(pick);
++        a.add(wts);
++        a.add(dead);
++        a.add(@as(c_int, @intCast(rows)));
++        a.add(@as(c_int, @intCast(slots)));
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.dead_rows, .{ .grid = .{ .x = @intCast(blocks(rows, 256)) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
++    }
++
+     /// The indexer's selection of every scanned key (its top-k takes all nb): out [rows, nb] int64 = j where j <
+     /// vis[r], else -1 (vis [rows] int64), on the device.
+     pub fn iotaVis(o: *const Ops, s: cuda.Stream, vis: u64, out: u64, nb: usize, rows: usize) !void {
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 3eccfa515e8df55072f48167090a5adbdf74f906..f3369da1e257d029512a143b6b7b3e3f9ef841c7 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -258,6 +258,7 @@ pub const Round = struct {
+     pstat: u64, // expert_prune.Stats on the device, 0 unless prune
+     place_bound: bool, // TF_DS_T15_PLACE_BOUND under an applied cap: the experts' grids stop at placeBound
+     moe_bytes: ?ExpertBytes = null, // TF_DS_EXPERT_BYTES (a profile): the windows' places and trellis bytes; null: off
++    dead: u64 = 0, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' mask u8 [max_rows] on the device (0: off)
+     gm: u64, // fp32 [world, R, D]
+     // Engram
+     e_in: u64, // bf16 [R, cols * engram_head_dim]: the rows read for this rank's hash columns
+@@ -1500,6 +1501,11 @@ fn moe(e: *const Engine, rd: *Round, ch: *const Chunk, li: usize) !void {
+     const kc = try tri_norm.rowmmGate(e.t, rd.x, c.hidden, lay.gate_w, rd.gl, R, c.hidden, c.experts);
+     try tri_norm.route(e.t, rd.gl, kc, lay.gate_b, c.top_k, c.routed_scaling, lay.experts.count - 1, rd.pick, rd.mw, R, c.experts, sl);
+     if (rd.prune) |m| try e.ops.expertPrune(e.s, m, rd.pick, rd.mw, rd.pstat, R, c.top_k, sl);
++    // 0177 (TF_DS_DRAFT_TRIAGE): the dead draft rows route nothing - their outputs are never emitted
++    if (rd.dead != 0) {
++        if (e.two != null) return error.TriageUnsupported2D; // (the 2D split is not checked to take pick -1)
++        try e.ops.deadRows(e.s, rd.pick, rd.mw, rd.dead, R, sl);
++    }
+     try rd.mark(e, .m_rt);
+     if (e.two) |tw| {
+         // 2D (round2d.experts, the profile's marks between): gate / up, the intermediate's exchange, down

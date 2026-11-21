@@ -1,0 +1,349 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits 487cb721af4c..7842e206d50a)
+# dsv41: TF_DS_ENGRAM_SUBMIT_EARLY (off by default) hashes a round's Engram rows at the pass's return and submits at the round's start - the hashing sat on the round's critical path after stretch 0
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 46755a78e39847e48e6b4a0a18e794d002afba1b..3c5be28deb88eea7866412cdaa169989ce22687c 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -43,6 +43,8 @@ pub const SpillFollower = spill_tier.Follower(Model.SpillDev);
+ comptime {
+     // parts.zig keeps lanes' block and growth slack (it is self-contained so `zig test` runs it alone)
+     std.debug.assert(parts.chunk_rows == model.chunk_rows and parts.growth_rows == growth_rows);
++    // the Engram stash holds one window's rows at most (round.EngramStash's bound is the widest window's)
++    std.debug.assert(round.EngramStash.rows_max == window_rows);
+ }
+ 
+ /// A window of the pending row and the drafter's block: the widest one the gates checked row for row.
+@@ -1276,6 +1278,7 @@ fn chunkRows(start: usize, len: usize) usize {
+             self.used[slot] = false;
+         }
+         const seq = &self.seqs[slot];
++        m.rd.esh.drop(slot); // TF_DS_ENGRAM_SUBMIT_EARLY: any stashed pass rows on this slot were another stream's
+         try seq.resize(gpa, len);
+         for (seq.items, ids) |*q, id| q.* = @intCast(id);
+         // images: each span's positions dead in the sequence (negative: no Engram n-gram reaches into or across one),
+@@ -1741,6 +1744,11 @@ fn chunkRows(start: usize, len: usize) usize {
+             l.nheld = k;
+             l.dgen = self.spec_gen;
+         }
++        // TF_DS_ENGRAM_SUBMIT_EARLY: the pass's rows hashed into the round's Engram stash now (each stream's pending
++        // and held drafts, the superset its round's window trims), off the round's critical path
++        var fseqs: [max_streams][]const i32 = undefined;
++        for (0..n) |i| fseqs[i] = self.seqs[asked[i].slot].items;
++        m.stashPass(fseqs[0..n], tokens[0..n], q0[0..n], slots[0..n], depths[0..n], d.drafts[0..n]);
+     }
+ 
+     /// The chance that each held draft lands with every earlier one, as the round loop's allocation reads it: the
+@@ -2532,6 +2540,7 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+                 if (slot >= max_streams) return error.BadSlot;
+                 img_rows.clearRetainingCapacity();
+                 try r.ids(gpa, &seqs[slot]);
++                m.rd.esh.drop(slot); // TF_DS_ENGRAM_SUBMIT_EARLY: any stashed pass rows on this slot were another stream's
+                 fill_base = @intCast(base);
+                 if (spill) |sd| sd.bumpSlot(slot);
+                 if (m.fillBegin(slot, @intCast(base))) {
+@@ -2611,7 +2620,19 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+                     }
+                 }
+                 if (kind == .pass_keyed and (m.dr == null or m.dr.?.nz == 0)) return error.KeyedDraftOff;
+-                m.pass(tokens[0..n], q0[0..n], slots[0..n], steps, if (kind == .pass_keyed) .{ .seeds = seeds[0..n], .temps = temps[0..n] } else null) catch |err| try roundRefused(err);
++                // a refused pass skips the stash below (as rank 0's try does): its drafts are undefined at init
++                m.pass(tokens[0..n], q0[0..n], slots[0..n], steps, if (kind == .pass_keyed) .{ .seeds = seeds[0..n], .temps = temps[0..n] } else null) catch |err| {
++                    try roundRefused(err);
++                    continue;
++                };
++                // TF_DS_ENGRAM_SUBMIT_EARLY: as rank 0's draftFn tail - the pass's rows into the round's Engram stash
++                // (the batch's steps a stream: this side knows no less, and the round's window trims them)
++                if (m.dr) |*d| {
++                    var dep: [max_streams]usize = @splat(steps);
++                    var pseqs: [max_streams][]const i32 = undefined;
++                    for (0..n) |i| pseqs[i] = seqs[@intCast(slots[i])].items;
++                    m.stashPass(pseqs[0..n], tokens[0..n], q0[0..n], slots[0..n], dep[0..n], d.drafts[0..n]);
++                }
+             },
+             .fill_images => {
+                 const count = try r.int(u32);
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 62e8bed7f5b82addfb8435324be275d2327b99d5..9c22b57e0d83e368a6375347a144287d41a01007 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -465,6 +465,12 @@ pub const Model = struct {
+             try d.check(d.api.cuMemsetD8Async(r.*, 0, m.streams * m.eng.ringBytes(), m.stream.handle), "cuMemsetD8Async");
+         }
+         m.rd = try round.Round.init(&m.eng, &m.arena, a, m.request_cap);
++        // TF_DS_ENGRAM_SUBMIT_EARLY (0161): the round's Engram rows hash at the drafter pass's return into rd.esh and
++        // submit at the round's start, off the round's critical path (rank-local like TF_DS_ABSORB_AFTER_PICK: "1" or
++        // "on", unset or anything else off)
++        m.rd.esh.enabled = envOnOff(envOf("TF_DS_ENGRAM_SUBMIT_EARLY"));
++        m.rd.esh.entries = try a.alloc(round.EngramStash.Entry, max_streams);
++        for (m.rd.esh.entries) |*en| en.* = .{};
+         try m.agreePrune();
+         try m.agreeKeyed();
+         if (m.kvs != null) try m.rd.useShard(&m.eng, &m.arena, a);
+@@ -1750,6 +1756,41 @@ pub const Model = struct {
+         for (q0, slots) |q, s| pool.absorbed[@intCast(s)] = @intCast(q);
+         try dr.pass(&m.eng, &m.ch, pool, tokens, q0, slots, steps, null, keyed);
+     }
++
++    /// TF_DS_ENGRAM_SUBMIT_EARLY (0161): the drafter pass's return hashes each stream's next window rows - the
++    /// pending token and the drafts it holds (depths[i]; a follower passes the batch's steps: the same superset or
++    /// longer) - into the round's Engram stash (rd.esh, keyed by pool slot), so the round's start can flatten and
++    /// submit them for the windows the stash covers (round.forward), the hashing off the round's critical path.
++    /// No-op without the switch, the Engram tables or the AIO ring (the pool fallback has nothing to move).
++    pub fn stashPass(m: *Model, seqs: []const []const i32, tokens: []const i64, q0: []const i64, slots: []const i64, depths: []const usize, drafts: []const [draft.max_block]i64) void {
++        const st = &m.rd.esh;
++        const eh = if (m.eh) |*x| x else return;
++        if (!st.enabled or eh.aio == null) return;
++        const hasher = eh.hasher;
++        const per = hasher.layers * hasher.cols();
++        const back = hasher.ngram - 1; // the ids before a row its n-grams reach back to
++        const t0 = prompt.readStamp(eh);
++        for (0..tokens.len) |i| {
++            const slot: usize = @intCast(slots[i]);
++            const start: usize = @intCast(q0[i]);
++            if (slot >= st.entries.len) continue;
++            const en = &st.entries[slot];
++            const seq = seqs[i];
++            if (seq.len < start) {
++                st.drop(slot);
++                continue;
++            }
++            const n = @min(1 + depths[i], round.EngramStash.rows_max);
++            const pre_len = @min(start, back);
++            en.* = .{ .valid = true, .slot = slot, .start = start, .n = n, .pre_len = pre_len };
++            @memcpy(en.pre[0..pre_len], seq[start - pre_len .. start]);
++            en.ids[0] = @intCast(tokens[i]);
++            for (1..n) |j| en.ids[j] = @intCast(drafts[i][j - 1]);
++            // the rows' hashes with the reach-back ids before them (stashHash, pinned by a test)
++            stashHash(hasher, en.pre[0..pre_len], en.ids[0..n], en.hashes[0 .. n * per]);
++        }
++        if (eh.io != null) eh.t_hash += prompt.readStamp(eh) - t0;
++    }
+ };
+ 
+ /// The series' boolean switches' value ("1" or "on"; anything else: off), as envOf hands it over (0160).
+@@ -1764,6 +1805,38 @@ test "a boolean switch parses 1 and on, and nothing else" {
+     for ([_]?[]const u8{ null, "", "0", "off", "ON", "yes", "2" }) |bad| try std.testing.expect(!envOnOff(bad));
+ }
+ 
++/// The rows' hashes with the reach-back ids before them, as a stash keeps them (0161): `pre` is the sequence's ids
++/// before `start` and `ids` the rows' own. Equal to `hasher.hashes(seq, start, ids.len, out)` for the sequence those
++/// came from - pinned by the test below for a start under the reach-back and past it (the shifted scratch's index-0
++/// read and pad rule agrees with the whole sequence's).
++fn stashHash(hasher: engram.Hasher, pre: []const i32, ids: []const i32, out: []i64) void {
++    var scratch: [round.EngramStash.rows_max + engram.max_ngram - 1]i32 = undefined;
++    if (pre.len + ids.len > scratch.len) return;
++    @memcpy(scratch[0..pre.len], pre);
++    @memcpy(scratch[pre.len..][0..ids.len], ids);
++    hasher.hashes(scratch[0 .. pre.len + ids.len], pre.len, ids.len, out);
++}
++
++test "TF_DS_ENGRAM_SUBMIT_EARLY: the stash's shifted hashes equal the whole sequence's" {
++    var why: @import("config.zig").Why = .{};
++    var c = try @import("config.zig").parse(std.testing.allocator, @import("config.zig").test_config, &why);
++    c.engram_vocab = 10;
++    c.engram_heads = 1;
++    c.engram_pad = 0;
++    const map = [_]i32{ 7, 1, 2, 3, 4, 5 };
++    const h = engram.Hasher.init(c, &map, .{ .{ 3, 5, 7, 9 }, .{ 11, 13, 15, 17 } });
++    const seq = [_]i32{ 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5 };
++    const n = 3;
++    for ([_]usize{ 0, 1, 2, 5, 17 }) |start| {
++        const pre_len = @min(start, h.ngram - 1);
++        var want: [6 * n]i64 = undefined;
++        var got: [6 * n]i64 = undefined;
++        h.hashes(&seq, start, n, &want);
++        stashHash(h, seq[start - pre_len .. start], seq[start .. start + n], &got);
++        try std.testing.expectEqualSlices(i64, &want, &got);
++    }
++}
++
+ test "the slice knob parses to 0 or 1 to 40 layers" {
+     try std.testing.expectEqual(@as(usize, 0), try parseSliceLayers("0"));
+     try std.testing.expectEqual(@as(usize, 5), try parseSliceLayers("5"));
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 56cdb942362e9e6769fd058ee9dde2db61be7f46..814bde1fe016080e9704d5d655c7cb4fe09389e8 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -48,6 +48,11 @@
+ //!   TF_DS_FUSED_COMPRESS2=1                       the ratio-2 compressor chain in one kernel (the rows scattered to the raw slots, the pair's rows back and compress2's sum; the ch.invalid memset dropped — the flag is dead on this path); both ranks, at Round init; off: nothing changes (the chain is the 6 launches + the RMSNorm); bits identical
+ //!   TF_DS_ENGRAM_BOTH=1                       both Engram layers' rows land at the round's first Engram cut (set alike on both ranks; 1 or on, off otherwise): layer 14's rows are decoded and uploaded there instead of before its own stretch (strictly earlier, never later — one stretch fewer, three stretches a round become two, a captured round's graphs too), the host still lands once, between the first stretch and the rest; bit-identical; off: nothing changes
+ //!   TF_DS_ENGRAM_AIO=1                          a round's Engram reads by Linux AIO on O_DIRECT
++//!   TF_DS_ENGRAM_SUBMIT_EARLY=1                 (or `on`) a round's Engram rows hash at the drafter pass's return and
++//!                                               the reads submit at the round's start, off the round's critical path
++//!                                               (0161; bit-identical - the hashes are a pure function of the rows'
++//!                                               ids; rank-local; with TF_DS_ENGRAM_AIO; unset: the inline hashing
++//!                                               after stretch 0's issue, as ever)
+ //!   TF_DS_PREFILL_SLICE=<layers>                (rank 0; with TF_DS_PREFILL_INTERLEAVE_MS) a prompt chunk runs this many layers
+ //!                                               (1 .. 40) at a time and one decode round runs between slices, so the decoding
+ //!                                               streams stall a slice, not a chunk (unset or 0: the whole chunk; a follower
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 9c4088d235cf184ca110084e1196edbff8dbbb3e..3eccfa515e8df55072f48167090a5adbdf74f906 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -291,6 +291,7 @@ pub const Round = struct {
+     compress_side: bool = false, // TF_DS_COMPRESS_SIDE (read at Round.init; set alike on both ranks)
+     fused_compress2: bool = false, // TF_DS_FUSED_COMPRESS2 (read at Round.init; set alike on both ranks)
+     engram_both: bool = false, // TF_DS_ENGRAM_BOTH (read at Round.init; set alike on both ranks)
++    esh: EngramStash = .{}, // TF_DS_ENGRAM_SUBMIT_EARLY's stash (enabled and entries set at Model.open)
+     timer: ?*PhaseTimer = null, // eager rounds' GPU time by phase (a profile)
+     // a profile's GPU clocks a round (Model.useClock): at the forward's start, then before and after each stretch
+     // a profile's kernel launches by the phase they end in (eager rounds: in a graph only its capture launches)
+@@ -479,6 +480,7 @@ pub const Round = struct {
+         // TF_DS_ENGRAM_BOTH: both Engram layers' rows land at the round's first Engram cut; read here, before the e_in
+         // allocation the switch sizes (set alike on both ranks)
+         rd.engram_both = false;
++        rd.esh = .{}; // (its entries: Model.open, one per pool slot)
+         if (getenv("TF_DS_ENGRAM_BOTH")) |v| if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "on")) {
+             // exactly two Engram layers take the switch; any other count keeps the base path
+             if (e.c.engram_layers.slice().len == 2) rd.engram_both = true;
+@@ -1727,6 +1729,12 @@ pub fn forward(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches
+     // first with TF_DS_ENGRAM_BOTH)
+     var ah: Ahead = .{};
+     var ahead = e.c.engram_layers.slice().len == 0;
++    // TF_DS_ENGRAM_SUBMIT_EARLY: the rows hashed at the drafter pass's return (rd.esh) cover every window: flatten
++    // and submit them now, before stretch 0 (the hashing sat after its issue, on the round's critical path); a stash
++    // that covers no window takes the inline path below, today's
++    if (!ahead) if (eh) |x| {
++        ahead = try engramStashed(e, x, rows, &rd.esh, &ah);
++    };
+     // the stretches: cut before each Engram layer, its rows read on the host before it (TF_DS_ENGRAM_BOTH: one cut,
+     // before the first Engram layer, for both layers' rows)
+     var li: usize = 0;
+@@ -1874,6 +1882,47 @@ fn mix(e: *const Engine, rd: *Round, h: u64, spare: *u64, pending: *?u64, params
+     return tri_hc.hcPre2(e.t, h, params[0], params[1], params[2], pre_in, norm, c.eps, c.hc_eps, c.hc_iters, rd.x, pre_out, rd.post, rd.comb, rd.part, null, rd.sink, R, c.hidden);
+ }
+ 
++/// TF_DS_ENGRAM_SUBMIT_EARLY (off by default): a drafter pass's return hashes its streams' next window rows (each
++/// one's pending row and the drafts it holds - the superset the round's window trims) into this per-round stash,
++/// keyed by pool slot, so a round's hashing and submit leave its critical path (they sat after stretch 0's issue).
++/// The round's start covers each window from its entry (covers: its rows a prefix of the stashed superset, the ids
++/// identical) and submits the reads there; a window the stash does not cover takes the inline engramAhead as ever.
++/// The stash is its own buffer: engramAhead and the prompt fallback still own eh.hashes between them.
++pub const EngramStash = struct {
++    /// The widest window's rows (lanes.window_rows: the pending row and the drafter's block; roundWins refuses wider):
++    /// the stash hashes at most these many, and no window reads past them.
++    pub const rows_max = 6;
++
++    pub const Entry = struct {
++        valid: bool = false,
++        slot: usize = 0,
++        start: usize = 0, // the pending row's position in its stream's sequence
++        n: usize = 0, // the stashed rows: the pending row and the held drafts, [0, rows_max]
++        pre_len: usize = 0,
++        pre: [engram.max_ngram - 1]i32 = @splat(0), // the ids before `start` the rows' n-grams reach back to
++        ids: [rows_max]i32 = @splat(0), // the stashed rows' ids (pending + held)
++        hashes: [rows_max * engram.max_layers * engram.max_cols]i64 = @splat(0), // [n][layers][cols], Hasher.hashes' layout
++
++        /// Whether the entry holds this window's rows' hashes: its stream (slot) and start, the ids the n-grams reach
++        /// back to, and its rows a prefix of the stashed superset (a trimmed held is a shorter prefix; the hashes are
++        /// a pure function of exactly these ids). A window's host rows past the superset, a start that moved, or a
++        /// released slot's dropped entry: not covered - the round then hashes its rows as before.
++        pub fn covers(en: Entry, slot: usize, start: usize, pre: []const i32, ids: []const i32) bool {
++            return en.valid and en.slot == slot and en.start == start and en.pre_len == pre.len and
++                std.mem.eql(i32, en.pre[0..pre.len], pre) and ids.len <= en.n and std.mem.eql(i32, en.ids[0..ids.len], ids);
++        }
++    };
++
++    enabled: bool = false, // TF_DS_ENGRAM_SUBMIT_EARLY, read at Model.open (rank-local)
++    entries: []Entry = &.{}, // one per pool slot (Model.open)
++
++    /// The slot's entry dropped: its stream released or refilled (fillOpen, a follower's fill_begin), so a later
++    /// window's rows never read another stream's stash.
++    pub fn drop(st: *EngramStash, slot: usize) void {
++        if (slot < st.entries.len) st.entries[slot].valid = false;
++    }
++};
++
+ /// A round's Engram reads, ahead of the stretches that use them: every window's n-grams hashed once (all the Engram
+ /// layers), each layer's ids in its own part of the host buffers (two layers in flight); with AIO every layer's reads
+ /// go out at the round's start, else each layer's when its stretch comes (the reader pool).
+@@ -1899,6 +1948,49 @@ fn engramAhead(e: *const Engine, eh: *prompt.EngramHost, seq: []const i32, rows:
+         const per = eh.hasher.layers * cols;
+         eh.hasher.hashes(w.seq, start, w.n, eh.hashes[w.row * per .. (w.row + w.n) * per]);
+     }
++    try engramSubmit(e, eh, rows, ah);
++    if (eh.io != null) eh.t_hash += stamp(eh) - t0;
++}
++
++/// TF_DS_ENGRAM_SUBMIT_EARLY: the round's rows hashed at the drafter pass's return (EngramStash) laid into the host
++/// buffers and their reads submitted at the round's start; false when any window's rows are not all in the stash
++/// (host rows, a start that moved, a slot refilled) - the caller then runs engramAhead for the whole round (a mixed
++/// round is not worth the bookkeeping; that fallback is today's behaviour).
++fn engramStashed(e: *const Engine, eh: *prompt.EngramHost, rows: Rows, st: *EngramStash, ah: *Ahead) !bool {
++    if (!st.enabled) return false;
++    const windows = rows.windows orelse return false;
++    const slots = rows.slots orelse return false;
++    const R = rows.ids.len;
++    const per = eh.hasher.layers * eh.hasher.cols();
++    const back = eh.hasher.ngram - 1; // the ids before a row its n-grams reach back to
++    for (windows) |w| {
++        const slot: usize = @intCast(slots[w.row]);
++        const start: usize = @intCast(rows.pos[w.row]);
++        if (w.row + w.n > R or w.n > EngramStash.rows_max or w.seq.len < start + w.n or slot >= st.entries.len) return false;
++        var ids: [EngramStash.rows_max]i32 = undefined;
++        for (ids[0..w.n], rows.ids[w.row..][0..w.n]) |*o, x| o.* = @intCast(x);
++        const pre_len = @min(start, back);
++        if (!st.entries[slot].covers(slot, start, w.seq[start - pre_len .. start], ids[0..w.n])) return false;
++    }
++    const t0 = stamp(eh);
++    for (windows) |w| {
++        const en = &st.entries[@intCast(slots[w.row])];
++        for (0..w.n) |i| @memcpy(eh.hashes[(w.row + i) * per ..][0..per], en.hashes[i * per ..][0..per]);
++    }
++    try engramSubmit(e, eh, rows, ah);
++    if (eh.io != null) eh.t_hash += stamp(eh) - t0;
++    return true;
++}
++
++/// engramAhead's and engramStashed's second half: the round's row ids in eh.hashes (each window's rows at their rows)
++/// flattened to this rank's columns in eh.flat, every layer's reads submitted at once, and the fallback's hash cache
++/// dropped (forgetHashes: eh.hashes holds no chunk's rows now).
++fn engramSubmit(e: *const Engine, eh: *prompt.EngramHost, rows: Rows, ah: *Ahead) !void {
++    const c = e.c;
++    const R = rows.ids.len;
++    const cols = eh.hasher.cols();
++    const k = eh.hi - eh.lo;
++    if (c.engram_layers.slice().len > 2 or eh.flat.len < 2 * max_rows * k) return error.EngramShape;
+     ah.* = .{ .aio = eh.aio != null, .R = R };
+     for (c.engram_layers.slice(), 0..) |li, j| {
+         const tbl = eh.tables.layers.get(li) orelse return error.MissingEngramTable;
+@@ -1909,7 +2001,6 @@ fn engramAhead(e: *const Engine, eh: *prompt.EngramHost, seq: []const i32, rows:
+         if (eh.aio) |aio| ah.ids[j] = try aio.start(tbl, eh.flat[f0..][0 .. R * k], eh.w[f0 * tbl.row_w ..][0 .. R * k * tbl.row_w], eh.s[f0 * tbl.row_s ..][0 .. R * k * tbl.row_s]);
+     }
+     prompt.forgetHashes(eh); // the round's hashes went into the same buffer the fallback path keeps a chunk's in
+-    if (eh.io != null) eh.t_hash += stamp(eh) - t0;
+ }
+ 
+ /// Slot j's Engram rows of the round's rows (Engram.hashes of each row's stream's ids through the row, this rank's
+@@ -1986,6 +2077,30 @@ test "TF_DS_EXPERT_BYTES: a place's trellis bytes" {
+     try std.testing.expectEqual(@as(u64, 3 * 5120 * 1152 * 10 / 16), ExpertBytes.placeBytes(ex, 10, 10, 10));
+ }
+ 
++test "TF_DS_ENGRAM_SUBMIT_EARLY: a stash covers a window's rows as a prefix of the pass's superset" {
++    // the pass hashed: the ids its n-grams reach back to [7, 8, 9], the pending 100 at 12 and three held drafts
++    var en: EngramStash.Entry = .{ .valid = true, .slot = 3, .start = 12, .n = 4, .pre_len = 3 };
++    en.pre = .{ 7, 8, 9 };
++    en.ids = .{ 100, 101, 102, 103, 0, 0 };
++    // the superset exactly matching, and a held-trimmed window's shorter prefix: covered
++    try std.testing.expect(en.covers(3, 12, &.{ 7, 8, 9 }, &.{ 100, 101, 102, 103 }));
++    try std.testing.expect(en.covers(3, 12, &.{ 7, 8, 9 }, &.{ 100, 101 }));
++    // host rows (forced or tree tokens) where the drafts end, or running past the superset: not covered
++    try std.testing.expect(!en.covers(3, 12, &.{ 7, 8, 9 }, &.{ 100, 101, 102, 200 }));
++    try std.testing.expect(!en.covers(3, 12, &.{ 7, 8, 9 }, &.{ 100, 101, 102, 103, 200 }));
++    // the window starts elsewhere (its stream kept rows since the pass), or is another slot's: not covered
++    try std.testing.expect(!en.covers(3, 13, &.{ 8, 9, 10 }, &.{ 100, 101 }));
++    try std.testing.expect(!en.covers(2, 12, &.{ 7, 8, 9 }, &.{ 100, 101 }));
++    // a released stream's slot refilled at the same lengths: its ids the n-grams reach back to changed
++    try std.testing.expect(!en.covers(3, 12, &.{ 7, 8, 90 }, &.{ 100, 101 }));
++    // and a released slot's entry is dropped at its refill (fillOpen, a follower's fill_begin)
++    var es: [1]EngramStash.Entry = .{en};
++    var st = EngramStash{ .entries = &es };
++    st.drop(3); // past this one-entry stash: no-op
++    st.drop(0);
++    try std.testing.expect(!es[0].covers(3, 12, &.{ 7, 8, 9 }, &.{ 100, 101, 102, 103 }));
++}
++
+ fn getenv(name: [*:0]const u8) ?[]const u8 {
+     return std.mem.span(std.c.getenv(name) orelse return null);
+ }

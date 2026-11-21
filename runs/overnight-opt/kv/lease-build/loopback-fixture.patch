@@ -1,0 +1,43 @@
+--- a/zig/src/families/dsv41/spill_tier.zig
++++ b/zig/src/families/dsv41/spill_tier.zig
+@@ -396,6 +396,7 @@
+                 .owner_layout = storeLayout(&layout),
+                 .limits = .{ .max_tokens = max_tokens, .block_tokens = self.bt, .block_bytes = layout.block_bytes, .foreign_block_bytes = if (sharded) layout.foreign_block_bytes else 0, .own_part = rank, .max_small_bytes = std.mem.alignForward(u64, layout.small_bytes, 256) },
+                 .cap_bytes = s.capBytes(),
++                .bench_lease_bytes = if (@import("builtin").is_test) 1 << 20 else 0,
+                 .floor_bytes = s.floorBytes(),
+                 .quota = s.quota,
+                 .turns = s.turns,
+--- a/zig/src/families/dsv41/spill_tier_test.zig
++++ b/zig/src/families/dsv41/spill_tier_test.zig
+@@ -761,6 +761,30 @@
+             var r: Reader = .{ .b = body };
+             switch (bytes[0]) {
+                 rank_wire.lanes_kind => try f.wireFrame(l, body),
++                // Test-only administrative frames. The deployed rank protocol has no lease grant or revoke.
++                32 => {
++                    if (body.len != 48) return error.BadLeaseLength;
++                    const sd = f.side orelse return error.NoStore;
++                    const key: format.Digest = body[0..32].*;
++                    const at = std.mem.readInt(u32, body[32..36], .little);
++                    const ttl = std.mem.readInt(u32, body[36..40], .little);
++                    const request_nonce = std.mem.readInt(u64, body[40..48], .little);
++                    const grant = sd.store.benchGrantLease(.{ .key = key, .at = at, .part = null, .rank = sd.store.cfg.rank, .compat = sd.store.cfg.compat }, ttl, request_nonce);
++                    var response: [45]u8 = @splat(0);
++                    if (grant) |v| {
++                        response[0] = 1;
++                        response[1..17].* = v.incarnation;
++                        std.mem.writeInt(u64, response[17..25], v.serial, .little);
++                        std.mem.writeInt(u64, response[25..33], v.bytes, .little);
++                        std.mem.writeInt(u32, response[33..37], v.ttl_ms, .little);
++                        std.mem.writeInt(u64, response[37..45], v.request_nonce, .little);
++                    }
++                    try l.send(&response);
++                },
++                33 => {
++                    try std.Io.sleep(io, .fromMilliseconds(try r.int(u32)), .awake);
++                    try l.send(&.{1});
++                },
+                 T.snap => {
+                     const id = try r.int(u64);
+                     _ = try r.int(u32);

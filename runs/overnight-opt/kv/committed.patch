@@ -1,0 +1,371 @@
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -689,6 +689,8 @@
+     drawn: [ring]u32 = undefined,
+     next: u64 = 0,
+     snaps: std.ArrayList(*Snap) = .empty, // kept prompt states, oldest first
++    bench_held_wait_ms: ?u32 = null,
++    bench_committed: bool = false,
+     keep_protect: bool = false, // TF_DS_KEEP_PROTECT=1: a placement takes a snap a longer one covers first, then the oldest non-shared (placeKept)
+     accept_chain: bool = false, // TF_DS_DEVICE_ACCEPT=1: chain windows' keep counts from the device (bit-identical; rank 0's host rule stands when off)
+     switches_sent: bool = false, // sendSwitches ran (openPair can run twice: openSpill)
+@@ -705,6 +707,15 @@
+ 
+     pub fn init(gpa: std.mem.Allocator, m: *Model) Lanes {
+         var ln: Lanes = .{ .gpa = gpa, .m = m, .peer = if (m.world > 1) m.peer() else null };
++        if (std.c.getenv("TF_DS_KV_HELD_WAIT_MS")) |raw_wait_ms| {
++            const ms = std.fmt.parseInt(u32, std.mem.span(raw_wait_ms), 10) catch 10000;
++            if (ms == 10000 or ms == 500) {
++                ln.bench_held_wait_ms = ms;
++                std.log.info("kv held trial configured ms={d}", .{ms});
++            }
++        }
++        ln.bench_committed = envOne("TF_DS_BENCH_PREFER_COMMITTED");
++        if (ln.bench_committed) std.log.info("kv trial committed guard enabled", .{});
+         ln.keep_protect = api.prompt_cache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null); // every rank alike
+         ln.accept_chain = envOne("TF_DS_DEVICE_ACCEPT"); // every rank alike; an uneven pair is still bit-identical (the follower never reads the keep)
+         if (m.triage != null and ln.accept_chain) {
+@@ -968,10 +979,23 @@
+         }
+         // (lanes owns the clock, held_wait_ns from the first wait: the planner waits on it for a live stream that holds
+         // the state, as placeKept does, and for the streams over a hit's tail, planRoom)
+-        const waits = if (src) |sn| self.patient(sn) else false;
++        const timeout_ns = if (self.bench_held_wait_ms) |ms| @as(u64, ms) * std.time.ns_per_ms else held_wait_ns;
++        const waits = if (src) |sn| self.patientFor(sn, timeout_ns) else false;
++        var guard: parts.BenchGuard = .{ .ctx = self, .check = benchCommitted };
++        if (self.bench_committed and !waits and timeout_ns < held_wait_ns) {
++            if (src) |sn| if (self.m.now() -| sn.wanted < held_wait_ns) {
++                k.planner.bench_guard = &guard;
++                for (k.planner.kept.items) |*kept| kept.bench_verified = null;
++            };
++        }
++        defer k.planner.bench_guard = null;
+         self.kvPending();
+-        const a = try k.admit(@intFromPtr(s), std.hash.Wyhash.hash(0, s.id), @intCast(slot), size, if (src) |sn| sn.id else null, waits);
++        const a = k.admit(@intFromPtr(s), std.hash.Wyhash.hash(0, s.id), @intCast(slot), size, if (src) |sn| sn.id else null, waits) catch |err| {
++            if (err == error.ContextFull) self.noteHeld(src, waits, "full");
++            return err;
++        };
+         if (src) |sn| {
++            self.noteHeld(src, waits, if (a.resumed) "resumed" else "dropped");
+             sn.wanted = 0;
+             if (!a.resumed) {
+                 if (sn.at >= note_rows) std.log.info("dsv41: the kept state of {d} tokens at {d} was not resumed ({s}); the prompt runs from 0", .{ sn.at, sn.base, if (a.dropped) "no room in its part" else "its transfer failed" });
+@@ -1907,9 +1931,30 @@
+ 
+     /// Whether a request still waits for the live stream that holds `sn` (held_wait_ns from its first wait).
+     fn patient(self: *const Lanes, sn: *Snap) bool {
++        return self.patientFor(sn, held_wait_ns);
++    }
++
++    fn benchCommitted(ctx: *anyopaque, id: u64, at: usize) bool {
++        const self = of(ctx);
++        const start = self.m.now();
++        const tier = self.spill orelse return false;
++        const ans = tier.benchPresence(id, at);
++        std.log.info("kv committed probe id={d} at={d} result={s} us={d}", .{ id, at, @tagName(ans), (self.m.now() -| start) / std.time.ns_per_us });
++        return ans == .present;
++    }
++
++    fn patientFor(self: *const Lanes, sn: *Snap, timeout_ns: u64) bool {
+         const t = self.m.now();
+         if (sn.wanted == 0) sn.wanted = t;
+-        return t - sn.wanted < held_wait_ns;
++        return t - sn.wanted < timeout_ns;
++    }
++
++    fn noteHeld(self: *const Lanes, source: ?*Snap, patient_: bool, outcome: []const u8) void {
++        const ms = self.bench_held_wait_ms orelse return;
++        const sn = source orelse return;
++        if (sn.at < 250000) return;
++        const elapsed = (self.m.now() -| sn.wanted) / std.time.ns_per_ms;
++        std.log.info("kv held trial ms={d} elapsed_ms={d} part={d} at={d} patient={} outcome={s}", .{ ms, elapsed, sn.part, sn.at, patient_, outcome });
+     }
+ 
+     /// Kept states with rows in [lo, hi) go stale (a stream writes there), `except` aside.
+--- a/zig/src/families/dsv41/parts.zig
++++ b/zig/src/families/dsv41/parts.zig
+@@ -94,7 +94,15 @@
+     came_from: ?u8 = null, // ...and the part it left then
+ };
+ 
++pub const BenchGuard = struct {
++    ctx: *anyopaque,
++    check: *const fn (*anyopaque, u64, usize) bool,
++    checks: usize = 0,
++    ranked: bool = false,
++};
++
+ pub const Kept = struct {
++    bench_verified: ?bool = null,
+     id: u64,
+     part: u8,
+     base: usize,
+@@ -408,6 +416,7 @@
+ 
+ pub const Planner = struct {
+     cfg: Config,
++    bench_guard: ?*BenchGuard = null,
+     part_rows: usize,
+     lives: std.ArrayList(Live) = .empty,
+     kept: std.ArrayList(Kept) = .empty, // oldest first (lanes.snaps' order: the victims' order)
+@@ -685,15 +694,43 @@
+ 
+     /// The oldest kept state of part p that may give its room: not stale, not `protect`, not in a live stream's extent,
+     /// not read by an in-flight copy or carry.
++    fn benchVerified(self: *const Planner, i: usize) bool {
++        const guard = self.bench_guard orelse return false;
++        const kept = &self.kept.items[i];
++        if (kept.bench_verified) |v| return v;
++        if (guard.checks >= 8) return false;
++        guard.checks += 1;
++        const v = guard.check(guard.ctx, kept.id, kept.at);
++        kept.bench_verified = v;
++        return v;
++    }
++
++    pub fn benchRisk(self: *const Planner, plan: *const Plan) bool {
++        if (plan.dropped) return true;
++        for (plan.ops.items) |op| switch (op) {
++            .stale => |e| {
++                const i = self.keptIndex(e.kept) orelse return true;
++                if (!self.benchVerified(i)) return true;
++            },
++            else => {},
++        };
++        return false;
++    }
++
+     fn victim(self: *const Planner, p: u8, stale: []const bool, protect: ?usize) ?usize {
++        var fallback: ?usize = null;
+         for (self.kept.items, 0..) |k, i| {
+             if (k.stale or stale[i] or i == protect) continue;
+             if (!self.mut(.evict_any_part) and k.part != p) continue;
+             if (self.clashLive(k.base, k.base + k.at, null)) continue;
+             if (self.reading(k.id)) continue;
++            if (self.bench_guard) |g| if (g.ranked and !self.benchVerified(i)) {
++                if (fallback == null) fallback = i;
++                continue;
++            };
+             return i;
+         }
+-        return null;
++        return fallback;
+     }
+ 
+     /// lanes.placeKept in part p, simulated: victims oldest first, `source` last; with `patient` and the source held by
+@@ -752,7 +789,7 @@
+             };
+             local[v] = true;
+             try victims.append(gpa, v);
+-            cost = v + 1;
++            cost = @max(cost, v + 1);
+         }
+     }
+ 
+--- a/zig/src/families/dsv41/kv_lanes.zig
++++ b/zig/src/families/dsv41/kv_lanes.zig
+@@ -567,8 +567,25 @@
+     fn place(kv: *Kv, key: usize, id: u64, slot: u32, size: usize, source: ?u64, patient: bool) !Admitted {
+         var relocations: usize = 0;
+         while (true) {
+-            var plan = try kv.planner.planAdmit(kv.gpa, .{ .stream = id, .slot = slot, .size = size, .source = source, .patient = patient });
++            var req: parts.Request = .{ .stream = id, .slot = slot, .size = size, .source = source, .patient = patient };
++            var plan = try kv.planner.planAdmit(kv.gpa, req);
+             defer plan.deinit(kv.gpa);
++            if (kv.planner.bench_guard) |guard| if (!patient and kv.planner.benchRisk(&plan)) {
++                guard.ranked = true;
++                const alternate = try kv.planner.planAdmit(kv.gpa, req);
++                plan.deinit(kv.gpa);
++                plan = alternate;
++                if (kv.planner.benchRisk(&plan)) {
++                    guard.ranked = false;
++                    req.patient = true;
++                    const fallback = try kv.planner.planAdmit(kv.gpa, req);
++                    plan.deinit(kv.gpa);
++                    plan = fallback;
++                    std.log.info("kv committed trial deferred checks={d}", .{guard.checks});
++                } else {
++                    std.log.info("kv committed trial alternate checks={d}", .{guard.checks});
++                }
++            };
+             switch (plan.status) {
+                 .full => {
+                     try kv.applyFull(&plan);
+--- a/zig/src/families/dsv41/spill_tier.zig
++++ b/zig/src/families/dsv41/spill_tier.zig
+@@ -941,6 +941,9 @@
+         const Job = struct { rx: *Rx, txn: u64, point: pc.Point, saved: *anyopaque, sent: u32 = 0, ready_at: u64 = 0, asked_at: u64 = 0, copied: u32 = 0 };
+         const PointRef = struct { key: Digest, at: u32, room: u32 = 0, part: ?u32 = null }; // room: the last lookup's prompt length; part: its salt
+         const Noted = struct { key: Digest };
++        const BenchRef = struct { key: Digest, at: usize };
++        bench_refs: std.AutoHashMapUnmanaged(u64, BenchRef) = .empty,
++        bench_check: bool = false,
+ 
+         gpa: Allocator,
+         side: *S,
+@@ -1005,6 +1008,7 @@
+             errdefer gpa.destroy(self);
+             const wf: []rank_wire.Fork = if (wire != null) try gpa.alloc(rank_wire.Fork, rank_wire.max_keep_forks) else &.{};
+             self.* = .{ .gpa = gpa, .side = side, .fam = fam, .wire = wire, .lead = lead, .min_tokens = s.min_tokens, .shared_min_tokens = s.shared_min_tokens, .image_cache = s.image_cache, .max_restores = @intCast(@max(1, @min(s.restores, rank_wire.max_restores))), .flush_ms = s.flush_ms, .boot = boot, .wire_forks = wf };
++            if (std.c.getenv("TF_DS_BENCH_PREFER_COMMITTED")) |v| self.bench_check = std.mem.eql(u8, std.mem.span(v), "1");
+             return self;
+         }
+ 
+@@ -1016,6 +1020,7 @@
+             self.side.destroy();
+             self.points.deinit(self.gpa);
+             self.noted.deinit(self.gpa);
++            self.bench_refs.deinit(self.gpa);
+             self.fwd.deinit(self.gpa);
+             self.rev.deinit(self.gpa);
+             self.lin.deinit(self.gpa);
+@@ -1184,6 +1189,7 @@
+             self.guardSnap(snap, 0);
+             self.side.dropSnap(snap);
+             _ = self.noted.remove(snap);
++            if (self.bench_check) _ = self.bench_refs.remove(snap);
+         }
+ 
+         pub fn bump(self: *Self, lo: usize, hi: usize) void {
+@@ -1192,6 +1198,26 @@
+ 
+         pub fn bumpSlot(self: *Self, slot: usize) void {
+             self.side.bumpSlot(slot);
++        }
++
++        /// One point-in-time index check on every rank. An ordinary has/abort transaction
++        /// reserves no destination, starts no disk reads and never forgets the point.
++        pub fn benchPresence(self: *Self, snap: u64, at: usize) enum { unmapped, head_missing, peer_missing, busy, present } {
++            const ref = self.bench_refs.get(snap) orelse return .unmapped;
++            if (ref.at != at or self.broken != null) return .unmapped;
++            const side = self.side;
++            if (!side.store.presence(ref.key)) return .head_missing;
++            const w = self.wire orelse return .present;
++            const loc = side.store.partOf(ref.key) orelse return .head_missing;
++            const shard = side.layout.owner_layout == .owner_sharded;
++            const part: u8 = if (shard) @intCast(loc.part orelse return .head_missing) else 0;
++            const msg: rank_wire.Msg = .{ .has = .{ .point = ref.key, .compat = self.lead.?.compat(), .at = at, .blocks = @intCast(at / side.bt), .layout = wireLayout(&side.layout), .part = part } };
++            self.lead.?.admissible(0, msg) catch return .busy;
++            var replies: [rank_wire.max_world - 1]rank_wire.Frame = undefined;
++            const h = self.ask(0, msg, &replies) catch return .busy;
++            const ok = rank_wire.allPresent(replies[0..w.links.len]);
++            _ = self.post(h.txn, .{ .abort = .{ .why = .cancelled, .rank = rank_wire.no_rank, .forget = false } }) catch return .busy;
++            return if (ok) .present else .peer_missing;
+         }
+ 
+         /// Rank 0's own write of kept state `snap` still reads its rows (the planner's pending flag).
+@@ -1259,6 +1285,7 @@
+             const raw: ?[]const u32 = if (pics.media.len > 0) kept.raw[0..at] else null;
+             const r = self.side.keepPoint(.{ .keyed = keyed, .key = key, .at = at, .base = info.base, .snap = info.id, .buf = info.buf, .lineage = lin, .origin = origin, .shared = kept.shared, .group = kept.group, .raw = raw, .media = pics.media });
+             if (r == .refused) return null;
++            if (self.bench_check) self.bench_refs.put(self.gpa, info.id, .{ .key = key, .at = at }) catch {};
+             if (pics.media.len > 0) self.pictures_kept += 1;
+             const id = pointId(key);
+             const gop = self.points.getOrPut(self.gpa, id) catch return null;
+@@ -1561,6 +1588,7 @@
+                     return .{ .failed = e };
+                 };
+             }
++            if (self.bench_check) self.bench_refs.put(self.gpa, rx.snap.id, .{ .key = rx.key, .at = rx.at }) catch {};
+             const lin = self.fromLineage(done_.lineage) catch &.{};
+             _ = self.jobs.remove(id);
+             side.rxDrop(rx);
+@@ -1713,6 +1741,13 @@
+         /// slot; skipped (counted) when its ids or its state are not rank 0's. Never waits on the disk.
+         pub fn keep(self: *Self, _: Head, m: rank_wire.Keep) !void {
+             const s = try self.ready();
++            // Independent, identical fault fixture in both arms, only on the follower.
++            if (m.at == 296960) if (std.c.getenv("TF_DS_BENCH_SKIP_FOLLOWER_296960")) |v| {
++                if (std.mem.eql(u8, std.mem.span(v), "1")) {
++                    std.log.info("kv committed trial follower skipped at={d}", .{m.at});
++                    return self.skip();
++                }
++            };
+             if (!self.fam_live) return self.skip();
+             const ids = self.fam.ids(self.fam.ptr, m.slot);
+             const buf = self.fam.buf(self.fam.ptr, m.kept) orelse return self.skip();
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -70,6 +70,9 @@
+     // and frees its extent (its kept state then resumes in place) instead of waiting out every queued pass, as the
+     // Python lane's fills leave decoding its share
+     finish_until: ?i96 = null,
++    finish_ns: i96 = 5 * std.time.ns_per_s,
++    adaptive_finish: bool = false,
++    logged_extension: bool = false,
+     filling: ?*Job = null, // the job whose prompt pass runs in pieces between rounds (core.filling's)
+     // prefill interleave (TF_DS_PREFILL_INTERLEAVE_MS, 0/unset: off): between two chunks of a long prompt pass, decode
+     // rounds for the other live streams for up to this many ms, their tokens delivered, so a cold long prompt slows a
+@@ -134,7 +137,6 @@
+     const Mark = struct { at: i96, tokens: u64 };
+     const full_retry_ns: i96 = std.time.ns_per_s;
+     const long_pass_ns: i96 = std.time.ns_per_s;
+-    const finish_ns: i96 = 5 * std.time.ns_per_s;
+     const finish_left: i64 = 256;
+     const window_ns: i96 = 2 * std.time.ns_per_s;
+     /// How often an idle host polls work in flight (restores, staged writes, deferred retries).
+@@ -315,7 +317,17 @@
+         var ms: i96 = 0;
+         if (std.c.getenv("TF_DS_PREFILL_INTERLEAVE_MS")) |v| ms = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
+         const metrics = cacheMetricsEnabled(if (std.c.getenv("TF_DS_CACHE_METRICS")) |v| std.mem.span(v) else null);
+-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced, .interleave_ns = ms * std.time.ns_per_ms, .cache_metrics = metrics };
++        var host: LaneHost = .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced, .interleave_ns = ms * std.time.ns_per_ms, .cache_metrics = metrics };
++        if (std.c.getenv("TF_DS_FINISH_GRACE_MS")) |value| {
++            const grace_ms = std.fmt.parseInt(u32, std.mem.span(value), 10) catch return host;
++            host.finish_ns = @as(i96, grace_ms) * std.time.ns_per_ms;
++            std.debug.print("lane host finish grace: {d} ms\n", .{grace_ms});
++        }
++        if (std.c.getenv("TF_DS_FINISH_ADAPTIVE")) |v| {
++            host.adaptive_finish = std.mem.eql(u8, std.mem.span(v), "1");
++            if (host.adaptive_finish) std.debug.print("lane host adaptive finish: on\n", .{});
++        }
++        return host;
+     }
+ 
+     /// The tier's switches (before start). Telemetry is published from here on when either is on: a tier on the cache
+@@ -756,9 +768,10 @@
+         }
+         h.prefilled(job, began);
+         const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
+-        if (now - began >= long_pass_ns) {
++        if (h.finish_ns > 0 and now - began >= long_pass_ns) {
+             h.lock();
+-            h.finish_until = now + finish_ns;
++            h.finish_until = now + h.finish_ns;
++            h.logged_extension = false;
+             h.unlock();
+         }
+         if (h.deliver(job)) h.remove(job);
+@@ -831,7 +844,30 @@
+ 
+     /// Whether an admitted stream decodes within finish_left tokens of its max_tokens (the lock held).
+     fn nearEnd(h: *LaneHost) bool {
+-        for (h.admitted.items) |job| if (job.started and !job.stream.finished and job.stream.budgetLeft() <= finish_left) return true;
++        if (!h.adaptive_finish) {
++            for (h.admitted.items) |job| if (job.started and !job.stream.finished and job.stream.budgetLeft() <= finish_left) return true;
++            return false;
++        }
++        const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
++        const initial = now < h.finish_until.? - h.finish_ns + 500 * std.time.ns_per_ms;
++        for (h.admitted.items) |job| {
++            if (!job.started or job.stream.finished) continue;
++            const left = job.stream.budgetLeft();
++            if (left > finish_left) continue;
++            if (initial) return true;
++            const began = job.prefilled orelse continue;
++            const generated = job.stream.emitted().len -| 1;
++            if (generated < 4) continue;
++            // Budget left divided by this stream's observed wall-time decode rate.
++            // Compare products to avoid rounding the token rate before the decision.
++            if (@as(i96, left) * @max(0, now - began) <= @as(i96, @intCast(generated)) * std.time.ns_per_s) {
++                if (!h.logged_extension) {
++                    std.debug.print("adaptive finish extension: left={d} generated={d}\n", .{ left, generated });
++                    h.logged_extension = true;
++                }
++                return true;
++            }
++        }
+         return false;
+     }
+ 

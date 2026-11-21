@@ -1,0 +1,58 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load remote build context
+#1 DONE 3.7s
+
+#1 [internal] load remote build context
+#1 DONE 3.7s
+
+#2 copy /context /
+#2 DONE 0.1s
+
+#3 [internal] load metadata for docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626
+#3 DONE 0.0s
+
+#4 [build 1/4] FROM docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626@sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee
+#4 resolve docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626@sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee 0.0s done
+#4 DONE 0.0s
+
+#4 [build 1/4] FROM docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626@sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee
+#4 DONE 3.8s
+
+#5 [build 2/4] COPY . /tensorfold
+#5 DONE 0.1s
+
+#6 [build 3/4] WORKDIR /tensorfold
+#6 DONE 0.0s
+
+#7 [build 4/4] RUN /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 -Doptimize=ReleaseFast --prefix /stage -j4 install native
+#7 57.48 native
+#7 57.48 +- install tensorfold-native
+#7 57.48    +- compile exe tensorfold-native safe native
+#7 57.48       +- run /usr/local/cuda/bin/nvcc (prefill_attention.fatbin) w
+#7 57.48 ./zig/kernels/cuda/prefill_attention.cu(18): warning #177-D: variable "tf_prefill_attention::SMEM_MAX" was declared but never referenced
+#7 57.48   constexpr int SMEM_MAX = 96 * 1024;
+#7 57.48                 ^
+#7 57.48 
+#7 57.48 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+#7 57.48 
+#7 57.48 
+#7 DONE 245.1s
+
+#8 [stage-1 2/3] COPY --from=build /stage/native/bin/tensorfold-native /opt/tensorfold/native/bin/tensorfold-native
+#8 DONE 0.0s
+
+#9 [stage-1 3/3] COPY --from=build /stage/bin/tf-dsv41-lanes /opt/tensorfold/bin/tf-dsv41-lanes
+#9 DONE 0.0s
+
+#10 exporting to image
+#10 exporting layers
+#10 exporting layers 0.8s done
+#10 exporting manifest sha256:a0f49bf0699769d1aeb2b44799f4f92e3e0481118b8d74fb62347906ca2033b3 done
+#10 exporting config sha256:3aee234a07c6e83889059a6b95647b14fff3ea6f552ab693b90a8f1ae3461571 done
+#10 exporting attestation manifest sha256:d19a85c481962400347fac5189bf2998dabeb7a57148482ddff42104962a0397 0.0s done
+#10 exporting manifest list sha256:16b03e4798980a4b9cfb3692dadf136fb7397888a6b28e9c7ebb418773d473e4 done
+#10 naming to docker.io/library/tensorfold-dsv41:bench-fused-route-0193-0194 done
+#10 unpacking to docker.io/library/tensorfold-dsv41:bench-fused-route-0193-0194
+#10 unpacking to docker.io/library/tensorfold-dsv41:bench-fused-route-0193-0194 0.3s done
+#10 DONE 1.3s

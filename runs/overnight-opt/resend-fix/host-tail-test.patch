@@ -1,0 +1,14 @@
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -3169,7 +3169,10 @@
+     try std.testing.expect(!ln.usable(&grid, 2 * c + 127)); // nearer than the window
+     try std.testing.expect(!ln.usable(&grid, 2 * c)); // its own position: nothing to run
+     // the pass's end, off the grid: the tail holds the window's rows before it, so a turn of one token resumes
+-    var end: Snap = .{ .id = 2, .at = 10_000, .base = 0, .end = 10_000, .buf = undefined, .tail = undefined, .tail_start = 10_000 - 128, .tail_end = 10_000 };
++    // The host fixture only tests whether the optional device tail is present.
++    var driver: cuda.Driver = undefined;
++    const tail: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 0, .len = 0 };
++    var end: Snap = .{ .id = 2, .at = 10_000, .base = 0, .end = 10_000, .buf = undefined, .tail = tail, .tail_start = 10_000 - 128, .tail_end = 10_000 };
+     try ln.snaps.append(gpa, &end);
+     try std.testing.expect(ln.usable(&end, 10_001));
+     try std.testing.expect(ln.usable(&end, 12_000));

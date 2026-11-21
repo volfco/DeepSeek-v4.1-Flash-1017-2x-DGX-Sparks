@@ -1,0 +1,54 @@
+record: label='greedy-map' url=http://127.0.0.1:8000 salt=aa567db8a9ce like=runs/combo3/blocks/a01.exact.json
+  len_1: prompt=5 out=4 stop cached=0 sha=bd86afaf669b(server) 0.171s
+  len_100: prompt=100 out=21 stop cached=0 sha=fdc36cbe4c55(server) 0.861s
+  len_2048: prompt=2048 out=24 stop cached=0 sha=d7adeb5fe557(server) 1.778s
+  len_2049: prompt=2050 out=75 stop cached=0 sha=34ca606d70cc(server) 3.056s
+  len_4096: prompt=4077 out=25 stop cached=0 sha=b9b8778aba01(server) 2.519s
+  len_8000: prompt=7962 out=4 stop cached=0 sha=789be4f7e8b2(server) 3.765s
+  len_20000: prompt=19909 out=73 stop cached=0 sha=378c2584e0a1(server) 10.343s
+  len_30000: prompt=29994 out=37 stop cached=0 sha=aeb077f8e353(server) 14.202s
+  len_50000: prompt=49967 out=46 stop cached=0 sha=fb134b2c07f6(server) 22.96s
+  len_64000: prompt=63954 out=192 length cached=0 sha=2f952b22dfe3(server) 31.424s
+  len_100000: prompt=99904 out=29 stop cached=0 sha=23d9a654eeab(server) 45.692s
+  repeat_2048: prompt=2048 out=24 stop cached=0 sha=d7adeb5fe557(server) 1.536s
+  resume_1: prompt=7963 out=67 stop cached=0 sha=89a0be039d54(server) 5.234s
+  resume_2: prompt=7965 out=6 stop cached=6144 sha=db02931889fe(server) 1.134s
+  resume_3: prompt=7966 out=4 stop cached=6144 sha=a3c1818b5ad0(server) 1.07s
+  resume_1_again: prompt=7963 out=67 stop cached=6144 sha=89a0be039d54(server) 2.6s
+  conc_1 (8 at once): prompt=597 out=192 sha=839f87e7df1c 11.112s
+  conc_2 (8 at once): prompt=1197 out=136 sha=320cb1a4a9f9 10.751s
+  conc_3 (8 at once): prompt=1792 out=192 sha=656b057c5ba5 14.305s
+  conc_4 (8 at once): prompt=2387 out=36 sha=70c648cbee4d 19.069s
+  conc_5 (8 at once): prompt=2988 out=138 sha=ab40aa40014b 10.89s
+  conc_6 (8 at once): prompt=3583 out=20 sha=38d1ab6b22db 11.294s
+  conc_7 (8 at once): prompt=4180 out=21 sha=e7b5f0bcd102 16.87s
+  conc_8 (8 at once): prompt=4798 out=11 sha=13b3cc434c5e 21.615s
+  solo_1: prompt=597 out=29 stop cached=0 sha=433d67e8c404(server) 1.176s
+  solo_2: prompt=1197 out=76 stop cached=0 sha=e2c875557803(server) 2.572s
+  solo_3: prompt=1792 out=61 stop cached=0 sha=23ff5a68439d(server) 2.493s
+  solo_4: prompt=2387 out=36 stop cached=2048 sha=70c648cbee4d(server) 1.262s
+  solo_5: prompt=2988 out=90 stop cached=2048 sha=8a5c5869edf3(server) 2.923s
+  solo_6: prompt=3583 out=35 stop cached=2048 sha=1ada7ed1081f(server) 1.777s
+  solo_7: prompt=4180 out=21 stop cached=2048 sha=e7b5f0bcd102(server) 1.699s
+  solo_8: prompt=4798 out=11 stop cached=4096 sha=13b3cc434c5e(server) 0.772s
+  conv_A1: prompt=5974 out=26 cached=0 sha=ae879e99bf68 3.633s
+  conv_B1: prompt=5972 out=16 cached=0 sha=3c70844afc33 3.59s
+  conv_C1: prompt=5969 out=14 cached=0 sha=27e0974ed137 5.099s
+  conv_A2: prompt=6012 out=38 cached=4096 sha=1adbfa40588b 2.69s
+  conv_B2: prompt=5999 out=16 cached=4096 sha=d237c8a2b18e 1.585s
+  conv_C2: prompt=5993 out=47 cached=4096 sha=6ebc6506ab0c 2.232s
+  conv_A3: prompt=6061 out=20 cached=4096 sha=6d789ffc4988 1.681s
+  check repeat_2048 == len_2048: ok 
+  check resume_1_again == resume_1: ok 
+  check solo_1 == conc_1: FAIL 
+  check solo_2 == conc_2: FAIL 
+  check solo_3 == conc_3: FAIL 
+  check solo_4 == conc_4: ok 
+  check solo_5 == conc_5: FAIL 
+  check solo_6 == conc_6: FAIL 
+  check solo_7 == conc_7: ok 
+  check solo_8 == conc_8: ok 
+  info: repeat_2048 cached_tokens=0 (informational: a 2048-token prompt may keep no snapshot)
+  check resume_2 cache hit (cached_tokens>0): ok cached=6144
+  check resume_3 cache hit (cached_tokens>0): ok cached=6144
+wrote /home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/overnight-opt/engineering02/greedy-map/exact.json: 39 cases, 0 errors [], 5 failed checks ['solo_1 == conc_1', 'solo_2 == conc_2', 'solo_3 == conc_3', 'solo_5 == conc_5', 'solo_6 == conc_6']

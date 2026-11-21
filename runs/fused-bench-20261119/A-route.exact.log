@@ -1,0 +1,54 @@
+record: label='A-route' url=http://127.0.0.1:8000 salt=aa567db8a9ce like=runs/fused-bench-20261119/A-off.exact.json
+  len_1: prompt=5 out=10 stop cached=0 sha=44046c9e0fad(server) 0.264s
+  len_100: prompt=100 out=27 stop cached=0 sha=cca5e4591199(server) 0.896s
+  len_2048: prompt=2048 out=36 stop cached=0 sha=5a2e108d1cb6(server) 1.956s
+  len_2049: prompt=2050 out=36 stop cached=0 sha=5a2e108d1cb6(server) 1.907s
+  len_4096: prompt=4077 out=38 stop cached=0 sha=345b0fd5f4fd(server) 2.721s
+  len_8000: prompt=7962 out=45 stop cached=0 sha=0ad502443451(server) 4.382s
+  len_20000: prompt=19909 out=42 stop cached=0 sha=fe7d68b2a404(server) 9.285s
+  len_30000: prompt=29994 out=40 stop cached=0 sha=6bb4799ae3b9(server) 13.315s
+  len_50000: prompt=49967 out=39 stop cached=0 sha=0c17b49de4e4(server) 21.864s
+  len_64000: prompt=63954 out=40 stop cached=0 sha=9db38b46d5b9(server) 27.849s
+  len_100000: prompt=99904 out=45 stop cached=0 sha=26599aa2be1c(server) 43.963s
+  repeat_2048: prompt=2048 out=36 stop cached=0 sha=5a2e108d1cb6(server) 1.939s
+  resume_1: prompt=7963 out=40 stop cached=0 sha=59e53285f22e(server) 4.376s
+  resume_2: prompt=7965 out=64 stop cached=6144 sha=096145c892ed(server) 1.981s
+  resume_3: prompt=7966 out=12 stop cached=6144 sha=137e9424838a(server) 1.272s
+  resume_1_again: prompt=7963 out=40 stop cached=6144 sha=59e53285f22e(server) 1.814s
+  conc_1 (8 at once): prompt=597 out=36 sha=5a2e108d1cb6 5.478s
+  conc_2 (8 at once): prompt=1197 out=31 sha=2935bfe2ba8d 2.512s
+  conc_3 (8 at once): prompt=1792 out=36 sha=58a92e51f10d 2.556s
+  conc_4 (8 at once): prompt=2387 out=39 sha=eeb9885a4c27 10.419s
+  conc_5 (8 at once): prompt=2988 out=41 sha=96ca5ef777fc 5.663s
+  conc_6 (8 at once): prompt=3583 out=36 sha=d0f89493c677 8.25s
+  conc_7 (8 at once): prompt=4180 out=36 sha=d0f89493c677 13.232s
+  conc_8 (8 at once): prompt=4798 out=50 sha=27eea99c84d0 16.546s
+  solo_1: prompt=597 out=36 stop cached=0 sha=5a2e108d1cb6(server) 1.243s
+  solo_2: prompt=1197 out=31 stop cached=0 sha=2935bfe2ba8d(server) 1.414s
+  solo_3: prompt=1792 out=36 stop cached=0 sha=58a92e51f10d(server) 1.721s
+  solo_4: prompt=2387 out=39 stop cached=2048 sha=eeb9885a4c27(server) 1.19s
+  solo_5: prompt=2988 out=41 stop cached=2048 sha=96ca5ef777fc(server) 1.454s
+  solo_6: prompt=3583 out=36 stop cached=2048 sha=d0f89493c677(server) 1.703s
+  solo_7: prompt=4180 out=36 stop cached=2048 sha=d0f89493c677(server) 1.967s
+  solo_8: prompt=4798 out=50 stop cached=4096 sha=27eea99c84d0(server) 1.537s
+  conv_A1: prompt=5974 out=11 cached=0 sha=c7b0e613dc42 2.874s
+  conv_B1: prompt=5972 out=7 cached=0 sha=ec32636cb5df 2.903s
+  conv_C1: prompt=5969 out=12 cached=0 sha=74b2dceef366 2.982s
+  conv_A2: prompt=5997 out=20 cached=4096 sha=bce241017630 1.404s
+  conv_B2: prompt=5990 out=13 cached=4096 sha=0b9751a43fe7 1.31s
+  conv_C2: prompt=5991 out=24 cached=4096 sha=e53dc941da99 1.412s
+  conv_A3: prompt=6028 out=9 cached=4096 sha=9ade8c856417 1.273s
+  check repeat_2048 == len_2048: ok 
+  check resume_1_again == resume_1: ok 
+  check solo_1 == conc_1: ok 
+  check solo_2 == conc_2: ok 
+  check solo_3 == conc_3: ok 
+  check solo_4 == conc_4: ok 
+  check solo_5 == conc_5: ok 
+  check solo_6 == conc_6: ok 
+  check solo_7 == conc_7: ok 
+  check solo_8 == conc_8: ok 
+  info: repeat_2048 cached_tokens=0 (informational: a 2048-token prompt may keep no snapshot)
+  check resume_2 cache hit (cached_tokens>0): ok cached=6144
+  check resume_3 cache hit (cached_tokens>0): ok cached=6144
+wrote runs/fused-bench-20261119/A-route.exact.json: 39 cases, 0 errors [], 0 failed checks []

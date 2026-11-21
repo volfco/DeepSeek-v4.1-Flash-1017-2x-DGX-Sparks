@@ -1,0 +1,26 @@
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1839,7 +1839,9 @@
+         // 0180 (TF_DS_TAIL_BATCH): an end state continues a longer prompt too - its rings hold the window, so the
+         // pass computes the new rows only (today's states keep no complete rings and every warm pass replays the
+         // window). Sequential vs a cold pass: the rows' chunk shapes differ (W8's finding; 0121's class).
+-        if (sn.is_end) return self.m.tail_batch != null;
++        // A resumed prompt chunk starts with a complete positional group in ratio-2 KV layers.
++        // Identical odd ends return above without running a chunk; appended turns use an earlier hit.
++        if (sn.is_end) return self.m.tail_batch != null and sn.at % 2 == 0;
+         // TF_DS_EXACT_RESUME: an off-grid state nearer the end than the window resumes on its tail's rows
+         if (sn.tail != null) return tailPre(sn, len, self.m.cfg.window) != null;
+         return sn.at % model.chunk_rows == 0 and sn.at <= len -| self.m.cfg.window;
+@@ -3898,6 +3900,12 @@
+     try std.testing.expect(ln.usable(&end, 9 * c)); // and the continuation (0180): the new rows only
+     try std.testing.expect(!ln.usable(&end, 7 * c)); // never a shorter prompt
+     try std.testing.expect(ln.usable(&plain, 9 * c)); // a state without complete rings replays as before
++    end.at = 8 * c + 1;
++    try std.testing.expect(ln.usable(&end, end.at));
++    try std.testing.expect(!ln.usable(&end, end.at + 257));
++    end.at += 1;
++    try std.testing.expect(ln.usable(&end, end.at + 257));
++    end.at = 8 * c;
+     m.tail_batch = null;
+     try std.testing.expect(ln.usable(&end, 8 * c)); // the identical one needs no switch (0178's own)
+     try std.testing.expect(!ln.usable(&end, 9 * c)); // the continuation does

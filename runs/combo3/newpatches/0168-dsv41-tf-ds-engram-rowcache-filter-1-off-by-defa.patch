@@ -1,0 +1,195 @@
+# port-patches.sh: second-pass-int @ ce4ea5475e2e over 44b2cbb @ 44b2cbb76857 (commits 35eb43522fa2..1b33d2862e81)
+# dsv41: TF_DS_ENGRAM_ROWCACHE_FILTER=1 (off by default) puts a Bloom front before the row cache's has(), so a miss takes no lock - and the check counters that say whether the lock still shows
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index da374de9ee894a828c5d37c717e8d221aaa95df5..6da53af7dc23c1a8aee9b56892df2c7e46e85091 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -281,6 +281,10 @@ pub const EngramStats = struct {
+     /// Seconds the host side of the path summed to (from the load, like total): the hashing, the rows' decode and
+     /// their upload's wait, but not the reads (a request's share is the delta between two reads of it).
+     host: f64 = 0,
++    /// 0181's check counters (the row cache's has()): calls, the filter's lock-free negatives, the locked probes.
++    rc_has: u64 = 0,
++    rc_fast: u64 = 0,
++    rc_lock: u64 = 0,
+ 
+     pub const bucket_edges = [_]f64{ 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0 };
+     pub const help = "Seconds a read of Engram's table rows took, one observation per read (a decode round's, a prompt chunk's or a read-ahead's).";
+diff --git a/zig/src/families/dsv41/engram_io.zig b/zig/src/families/dsv41/engram_io.zig
+index 3722c7409de5b34a11ae8b8f77cbfccb745c4e36..ea503697389f282304ec9d0bcb39c665f3495c36 100644
+--- a/zig/src/families/dsv41/engram_io.zig
++++ b/zig/src/families/dsv41/engram_io.zig
+@@ -301,6 +301,40 @@ fn preadAll(fd: std.c.fd_t, out: []u8, at: u64) !void {
+ /// duplicate fill keeps the first copy (every copy of a (table, row) is the same bytes).
+ pub const RowCache = struct {
+     const Key = struct { layer: u32, row: i64 };
++
++    /// 0181 (TF_DS_ENGRAM_ROWCACHE_FILTER): an approximate-membership front for `has()`, so a miss takes no lock.
++    /// A plain two-probe Bloom over the keys, bits set under the cache's own mutex at `put` and never cleared: a
++    /// stale bit after an eviction (or a collision) costs the old locked probe, and a key in the map always has its
++    /// bits - no false negatives - so every answer is still the map's own.
++    const Filter = struct {
++        const words = 1 << 12; // 32 KiB of bits: a few percent false positives at the pair's ~25k cached rows
++        const mask = words * 64 - 1;
++        bits: [words]std.atomic.Value(u64) = @splat(.init(0)),
++
++        fn probes(key: Key) [2]u32 {
++            var h = std.hash.Wyhash.init(0);
++            h.update(std.mem.asBytes(&key.layer));
++            h.update(std.mem.asBytes(&key.row));
++            const v = h.final();
++            const a: u32 = @intCast(v & mask);
++            const b: u32 = @intCast((v >> 32) & mask);
++            return .{ a, b };
++        }
++
++        fn maybe(f: *const Filter, key: Key) bool {
++            for (probes(key)) |p| {
++                if (f.bits[p >> 6].load(.monotonic) & (@as(u64, 1) << @intCast(p & 63)) == 0) return false;
++            }
++            return true;
++        }
++
++        fn add(f: *Filter, key: Key) void {
++            for (probes(key)) |p| {
++                _ = f.bits[p >> 6].fetchOr(@as(u64, 1) << @intCast(p & 63), .monotonic);
++            }
++        }
++    };
++
+     const Node = struct {
+         key: Key,
+         w: []u8,
+@@ -318,6 +352,12 @@ pub const RowCache = struct {
+     mru: ?*Node = null,
+     lru: ?*Node = null,
+     mutex: std.Io.Mutex = .init,
++    // 0181: the filter front and the check counters (a plain u64 a piece; the filter's own words are atomic)
++    filter: Filter = .{},
++    filter_on: bool = false, // TF_DS_ENGRAM_ROWCACHE_FILTER ("1" or "on")
++    n_has: std.atomic.Value(u64) = .init(0),
++    n_fast: std.atomic.Value(u64) = .init(0),
++    n_lock: std.atomic.Value(u64) = .init(0),
+ 
+     /// TF_DS_ENGRAM_ROWCACHE_MB's budget in bytes; null when unset, 0 or not a number (off: every read as before).
+     pub fn budgetOf(v: ?[]const u8) ?u64 {
+@@ -329,6 +369,10 @@ pub const RowCache = struct {
+     pub fn init(gpa: std.mem.Allocator, io: std.Io, budget: u64) !*RowCache {
+         const rc = try gpa.create(RowCache);
+         rc.* = .{ .gpa = gpa, .io = io, .budget = budget };
++        if (std.c.getenv("TF_DS_ENGRAM_ROWCACHE_FILTER")) |v| {
++            const s = std.mem.span(v);
++            rc.filter_on = std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "on");
++        }
+         return rc;
+     }
+ 
+@@ -354,11 +398,20 @@ pub const RowCache = struct {
+         return true;
+     }
+ 
+-    /// Whether the row is cached (no copy): a reader's run of misses ends at the next cached row.
++    /// Whether the row is cached (no copy): a reader's run of misses ends at the next cached row. With
++    /// TF_DS_ENGRAM_ROWCACHE_FILTER a miss takes no lock (0181): the filter's negative is final, its positive falls
++    /// through to the same locked probe as always.
+     pub fn has(rc: *RowCache, layer: u32, row: i64) bool {
++        _ = rc.n_has.fetchAdd(1, .monotonic);
++        const key: Key = .{ .layer = layer, .row = row };
++        if (rc.filter_on and !rc.filter.maybe(key)) {
++            _ = rc.n_fast.fetchAdd(1, .monotonic);
++            return false;
++        }
++        _ = rc.n_lock.fetchAdd(1, .monotonic);
+         rc.mutex.lockUncancelable(rc.io);
+         defer rc.mutex.unlock(rc.io);
+-        return rc.map.contains(.{ .layer = layer, .row = row });
++        return rc.map.contains(key);
+     }
+ 
+     /// Cache the row's bytes (`s` null where the scales come from a mapping). The first copy of a row stays, the LRU
+@@ -390,6 +443,7 @@ pub const RowCache = struct {
+             rc.free(n);
+             return;
+         };
++        rc.filter.add(key); // (0181: bits before the answer's next look, under the same mutex; never cleared)
+         rc.link(n);
+         rc.used += bytes;
+     }
+@@ -922,3 +976,24 @@ fn probeEnds(rc: *const RowCache) usize {
+     }
+     return rc.map.capacity() - rc.map.count();
+ }
++
++test "TF_DS_ENGRAM_ROWCACHE_FILTER: a negative takes no lock and every answer is the map's own" {
++    const gpa = std.testing.allocator;
++    const rc = try RowCache.init(gpa, std.testing.io, 1 << 20);
++    defer rc.deinit();
++    rc.filter_on = true;
++    var w: [64]u8 = @splat(7);
++    var out: [64]u8 = undefined;
++    // an uncached row: the filter's negative is final, no lock (the counters show which path ran)
++    try std.testing.expect(!rc.has(1, 5));
++    try std.testing.expectEqual(@as(u64, 1), rc.n_fast.load(.monotonic));
++    try std.testing.expectEqual(@as(u64, 0), rc.n_lock.load(.monotonic));
++    // a cached row: the bits say maybe and the map answers yes
++    rc.put(1, 5, &w, null);
++    try std.testing.expect(rc.has(1, 5));
++    try std.testing.expect(rc.get(1, 5, &out, null));
++    try std.testing.expectEqualSlices(u8, &w, &out);
++    // and the negative side stays the map's own (a stale or colliding bit falls through, never overrules)
++    for (0..64) |i| try std.testing.expect(!rc.has(2, @intCast(i)));
++    try std.testing.expectEqual(@as(u64, 66), rc.n_has.load(.monotonic));
++}
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 6ea90778b99f8238d6717bd93fc53ffa8fffb93b..1168a5293812e8a3996faebd38d7a4bde95256d9 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1034,6 +1034,12 @@ pub const Lanes = struct {
+         if (!eh.metrics) return;
+         out.* = eh.reads.snapshot();
+         out.host = @as(f64, @floatFromInt(eh.t_hash + eh.t_decode + eh.t_upload)) / 1e9;
++        // (0181's check: the row cache's has() paths, lock-free filter negatives beside the locked probes)
++        if (eh.rc) |rc| {
++            out.rc_has = rc.n_has.load(.monotonic);
++            out.rc_fast = rc.n_fast.load(.monotonic);
++            out.rc_lock = rc.n_lock.load(.monotonic);
++        }
+     }
+ 
+     /// How stale /health's parts' stats may be (kvPartsFn).
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 96d85e31a7d64f4e6f4ed52c51a8c591cb5e875b..64c9de6a897dbb3b9507f58779bc81d318bdadf1 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -38,6 +38,11 @@
+ //!                                               (a wrong call costs one token of speculation). `file:<path>` is the
+ //!                                               trained probe's hook (the weights do not exist: the value refuses);
+ //!                                               unset: every row runs as before
++//!   TF_DS_ENGRAM_ROWCACHE_FILTER=1                0181: a Bloom front for the Engram row cache's has(), so a miss takes
++//!                                               no lock (a false positive falls through to the same locked probe;
++//!                                               never a false negative). The check counters ride /metrics
++//!                                               (engram_rowcache_*): if the locked probes stay the wall with the
++//!                                               filter on, the lock is not the thing to optimize
+ //!   TF_DS_ROUND_ROWS, TF_DS_STREAMS             a round's rows at most (16; the four-node lane's 48) and the pool's
+ //!                                               streams (4; its 16): --parallel at most the streams
+ //!   TF_DS_PROMPT_WINDOW_ROWS=<rows>             a prompt chunk under these rows (64 .. 128; 64 unset) takes the MoE decode window
+diff --git a/zig/src/server/metrics.zig b/zig/src/server/metrics.zig
+index 65beda2784917d55547b454b4adaf60b6b8b1465..4b507d547882f3bbde3bc415ada055704ad48b4c 100644
+--- a/zig/src/server/metrics.zig
++++ b/zig/src/server/metrics.zig
+@@ -173,7 +173,13 @@ pub const Metrics = struct {
+         if (status.preemptions) |p| try gauge(w, "preemptions_total", "counter", "Requests that had to give a lane up to a later one.", p);
+         if (status.cache) |c| try cacheFamilies(w, c);
+         if (status.kv_parts) |k| try kvPartFamilies(w, k);
+-        if (status.engram) |e| try histogram(w, "engram_lookup_seconds", api.EngramStats.help, e); // TF_DS_ENGRAM_METRICS
++        if (status.engram) |e| {
++            try histogram(w, "engram_lookup_seconds", api.EngramStats.help, e); // TF_DS_ENGRAM_METRICS
++            // 0181's check: does the row cache's lock still show? the filter's lock-free negatives beside the probes
++            try gauge(w, "engram_rowcache_has_total", "counter", "Row-cache has() calls.", e.rc_has);
++            try gauge(w, "engram_rowcache_fast_total", "counter", "Row-cache has() calls the filter answered without the lock (TF_DS_ENGRAM_ROWCACHE_FILTER).", e.rc_fast);
++            try gauge(w, "engram_rowcache_lock_total", "counter", "Row-cache has() calls that took the lock (the filter's positives, true or false).", e.rc_lock);
++        }
+         if (status.pair) |p| try pairFamilies(w, p);
+     }
+ };

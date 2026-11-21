@@ -1,0 +1,34 @@
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -190,6 +190,7 @@
+ pub const Round = struct {
+     r: usize = 0,
+     bucket: usize = 0,
++    align_index_bucket: bool,
+     glue: u64, // int64 [glue_n, max_rows]
+     // RoundDecoder.inputs: one int64 [5, R] buffer (ids, positions, slots, the extent's base and end), so a round's
+     // positions sit R * 8 bytes in: the alignment its kernels were specialized for (16-byte at even R only)
+@@ -366,6 +367,8 @@
+         rd.cur_ratio = 0;
+         rd.clk = 0;
+         rd.bucket = 0;
++        rd.hot = null;
++        rd.align_index_bucket = ops_mod.onValue(if (std.c.getenv("TF_DS_IDX_BUCKET_FINER")) |v| std.mem.span(v) else null);
+         rd.has_cand = false;
+         rd.kk = 0;
+         rd.sglue = 0;
+@@ -1757,7 +1760,13 @@
+     defer tri.decode_rows = bound;
+     var deepest: usize = 0;
+     for (rows.pos) |p| deepest = @max(deepest, @as(usize, @intCast(p)) + 1);
+-    rd.bucket = bucketFor(deepest, pool_cap);
++    const legacy_bucket = bucketFor(deepest, pool_cap);
++    // Beyond 64K, keep both compression ratios aligned for the recorded score tile
++    // counts and candidate blocks. Preserve small captured shapes and buffer bounds.
++    rd.bucket = if (rd.align_index_bucket and deepest > 65536)
++        @min(legacy_bucket, std.mem.alignForward(usize, deepest, 32768))
++    else
++        legacy_bucket;
+     rd.has_cand = false;
+     rd.has_cblk = false;
+     rd.kk = 0;

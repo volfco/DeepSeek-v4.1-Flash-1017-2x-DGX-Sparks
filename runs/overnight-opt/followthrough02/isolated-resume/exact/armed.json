@@ -1,0 +1,93 @@
+[
+  {
+    "id": "sha256:e038a936cce88f334b1a3ccd98e0fe2a6bcda78301979336b4655531af94b9b6",
+    "image": "tensorfold-dsv41:bench-opt-cc1055dfae47",
+    "cmd": [
+      "tensorfold-native",
+      "serve",
+      "/hf/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036/model",
+      "--backend",
+      "cuda",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8000",
+      "--name",
+      "DeepSeek-V4.1-Flash-1017",
+      "--context",
+      "32768",
+      "--parallel",
+      "8",
+      "--max-tokens",
+      "32768",
+      "--temperature",
+      "1.0",
+      "--top-p",
+      "0.95",
+      "--top-k",
+      "20",
+      "--thinking"
+    ],
+    "mounts": [
+      "/hf",
+      "/engram"
+    ],
+    "env": {
+      "TF_DS_WINDOW": "32768",
+      "TF_DS_POOL": "65536",
+      "TF_DS_KV_SHARD": null,
+      "TF_DS_PREFILL_SLICE": "0",
+      "TF_DS_EXACT_RESUME": "1",
+      "TF_DS_SCORE": "1"
+    }
+  },
+  {
+    "id": "sha256:5a605ab6e03b45396041095b5c9e8dc3c7063c36b94d862bc9b5246b377bc0db",
+    "image": "tensorfold-dsv41:bench-opt-cc1055dfae47",
+    "cmd": [
+      "tf-dsv41-lanes",
+      "/hf/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036/checkpoint",
+      "/rank-cache",
+      "1",
+      "2",
+      "192.168.100.1",
+      "29620",
+      "/hf/tensorfold-dsv41/kit-abe07c7d/kit",
+      "--engram",
+      "/engram",
+      "--token-map",
+      "/hf/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036/dsv41_token_map.json",
+      "--pool",
+      "65536",
+      "--streams",
+      "8",
+      "--drafts",
+      "1",
+      "--graphs",
+      "1",
+      "--side",
+      "1",
+      "--prefetch",
+      "1",
+      "--aio",
+      "1",
+      "--graph-cap",
+      "128",
+      "--rdma",
+      "rocep1s0f1,roceP2p1s0f1"
+    ],
+    "mounts": [
+      "/hf",
+      "/engram",
+      "/rank-cache"
+    ],
+    "env": {
+      "TF_DS_WINDOW": "32768",
+      "TF_DS_POOL": "65536",
+      "TF_DS_KV_SHARD": null,
+      "TF_DS_PREFILL_SLICE": "0",
+      "TF_DS_EXACT_RESUME": "1",
+      "TF_DS_SCORE": "1"
+    }
+  }
+]

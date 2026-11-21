@@ -1,0 +1,271 @@
+# port-patches.sh: second-pass-int @ 15f2c8ae2657 over ce4ea54 @ ce4ea5475e2e (commits ce4ea5475e2e..15f2c8ae2657)
+# dsv41: TF_DS_TOPK_FAST (off by default) selects the indexer's top-k in three reads of the row - a sampled threshold, one compacting pass, the exact k-th among those candidates, and the eight-digit select over the row as the fallback
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index a04c89498b44ef9dc2e235d16d8011a396ed577a..cfdae80f2aa3b28bdcb45c4986952e4287f09fb9 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -212,6 +212,165 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(con
+     for (int i = threadIdx.x; i < k; i += blockDim.x) o[i] = cols[i] < v ? cols[i] : -1;
+ }
+ 
++// TF_DS_TOPK_FAST (tf_ds_topk_indices_fast_kernel): the same selection in three reads of the row instead of ten. A
++// systematic sample of the row (every `stride`-th column, ~4096 of them) is radix-selected to the sample's rank of k,
++// which estimates the k-th largest key; one pass then compacts every key at or above that estimate into shared memory;
++// the exact k-th largest is selected among them by the same eight-digit radix rule. An estimate the row does not
++// honour (fewer than k keys above it, or more than TF_DS_TOPK_CAP) falls back to the eight-digit select over the whole
++// row, so whichever path runs, the k selected keys and their order are the exact top-k (the keys are unique, so no
++// estimate can change the set).
++#define TF_DS_TOPK_CAP 4096
++#define TF_DS_TOPK_SAMPLE 4096
++
++// The rank-th largest of a row's keys computed on the fly, every `stride`-th column of it (`stride` 1: the whole row):
++// the same eight-digit radix select as tf_ds_topk_indices_kernel's (that loop, `count` keys wide).
++__device__ __forceinline__ unsigned long long tf_ds_radix_kth_row(const float* row, int n, int stride, int count, int rank,
++                                                                  unsigned int* hist, unsigned long long* prefix_p,
++                                                                  unsigned long long* mask_p, int* want_p) {
++    if (threadIdx.x == 0) {
++        *prefix_p = 0;
++        *mask_p = 0;
++        *want_p = rank;
++    }
++    __syncthreads();
++    for (int d = 7; d >= 0; --d) {
++        for (int b = threadIdx.x; b < 256; b += blockDim.x) hist[b] = 0;
++        __syncthreads();
++        const unsigned long long prefix = *prefix_p, mask = *mask_p;
++        if (stride == 1) {
++            for (int i = threadIdx.x; i < n; i += blockDim.x) {
++                const unsigned long long u = tf_ds_score_key(row[i], i);
++                if ((u & mask) == prefix) atomicAdd(&hist[(u >> (8 * d)) & 0xff], 1u);
++            }
++        } else {
++            for (int s = threadIdx.x; s < count; s += blockDim.x) {
++                const int i = s * stride;
++                const unsigned long long u = tf_ds_score_key(row[i], i);
++                if ((u & mask) == prefix) atomicAdd(&hist[(u >> (8 * d)) & 0xff], 1u);
++            }
++        }
++        __syncthreads();
++        if (threadIdx.x == 0) {
++            int want = *want_p;
++            int b = 255;
++            for (; b > 0; --b) {
++                if ((int)hist[b] >= want) break;
++                want -= (int)hist[b];
++            }
++            *want_p = want;
++            *prefix_p = prefix | ((unsigned long long)b << (8 * d));
++            *mask_p = mask | (0xffull << (8 * d));
++        }
++        __syncthreads();
++    }
++    return *prefix_p;
++}
++
++// The rank-th largest of `count` keys already in shared memory (`v`), by the same eight-digit radix rule: a positive
++// shared scan a digit, `count` <= TF_DS_TOPK_CAP.
++__device__ __forceinline__ unsigned long long tf_ds_radix_kth_shared(const unsigned long long* v, int count, int rank,
++                                                                     unsigned int* hist, unsigned long long* prefix_p,
++                                                                     unsigned long long* mask_p, int* want_p) {
++    if (threadIdx.x == 0) {
++        *prefix_p = 0;
++        *mask_p = 0;
++        *want_p = rank;
++    }
++    __syncthreads();
++    for (int d = 7; d >= 0; --d) {
++        for (int b = threadIdx.x; b < 256; b += blockDim.x) hist[b] = 0;
++        __syncthreads();
++        const unsigned long long prefix = *prefix_p, mask = *mask_p;
++        for (int i = threadIdx.x; i < count; i += blockDim.x) {
++            const unsigned long long u = v[i];
++            if ((u & mask) == prefix) atomicAdd(&hist[(u >> (8 * d)) & 0xff], 1u);
++        }
++        __syncthreads();
++        if (threadIdx.x == 0) {
++            int want = *want_p;
++            int b = 255;
++            for (; b > 0; --b) {
++                if ((int)hist[b] >= want) break;
++                want -= (int)hist[b];
++            }
++            *want_p = want;
++            *prefix_p = prefix | ((unsigned long long)b << (8 * d));
++            *mask_p = mask | (0xffull << (8 * d));
++        }
++        __syncthreads();
++    }
++    return *prefix_p;
++}
++
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_fast_kernel(const float* score, long long ss, int n,
++                                                                                  int k, const long long* vis,
++                                                                                  long long* out, int pdl) {
++    pdl_enter(pdl);
++    __shared__ unsigned int hist[256];
++    __shared__ unsigned long long prefix_s, mask_s;
++    __shared__ int want_s, count_s;
++    __shared__ unsigned long long cand[TF_DS_TOPK_CAP];
++    const float* row = score + (long long)blockIdx.x * ss;
++    long long* const cols = (long long*)cand;   // the tail's columns: the candidates are dead by then
++    unsigned long long kth;
++    bool have = false;
++    const int stride = n > TF_DS_TOPK_SAMPLE ? n / TF_DS_TOPK_SAMPLE : 1;
++    if (stride > 1) {
++        const int sn = (n + stride - 1) / stride;
++        const int rank = (int)(((long long)k * sn + n - 1) / n);   // the sample's rank of the row's k (k >= 1)
++        const unsigned long long t = tf_ds_radix_kth_row(row, n, stride, sn, rank, hist, &prefix_s, &mask_s, &want_s);
++        if (threadIdx.x == 0) count_s = 0;
++        __syncthreads();
++        for (int i = threadIdx.x; i < n; i += blockDim.x) {
++            const unsigned long long u = tf_ds_score_key(row[i], i);
++            if (u >= t) {
++                const int at = atomicAdd(&count_s, 1);
++                if (at < TF_DS_TOPK_CAP) cand[at] = u;
++            }
++        }
++        __syncthreads();
++        const int c = count_s;
++        if (c >= k and c <= TF_DS_TOPK_CAP) {   // (uniform: every thread reads the same count)
++            kth = tf_ds_radix_kth_shared(cand, c, k, hist, &prefix_s, &mask_s, &want_s);
++            have = true;
++        }
++    }
++    if (!have) kth = tf_ds_radix_kth_row(row, n, 1, n, k, hist, &prefix_s, &mask_s, &want_s);
++    // from here tf_ds_topk_indices_kernel's own tail: the keys at or above the k-th, their columns sorted ascending,
++    // a column at or past vis[r] as -1
++    if (threadIdx.x == 0) count_s = 0;
++    __syncthreads();
++    for (int i = threadIdx.x; i < n; i += blockDim.x) {
++        if (tf_ds_score_key(row[i], i) >= kth) {
++            const int at = atomicAdd(&count_s, 1);
++            if (at < k) cols[at] = i;
++        }
++    }
++    int p = 1;
++    while (p < k) p <<= 1;
++    for (int i = k + threadIdx.x; i < p; i += blockDim.x) cols[i] = 0x7FFFFFFFFFFFFFFFll;
++    for (int size = 2; size <= p; size <<= 1) {
++        for (int stride2 = size >> 1; stride2 > 0; stride2 >>= 1) {
++            __syncthreads();
++            for (int i = threadIdx.x; i < p; i += blockDim.x) {   // (p up to 2048: two elements a thread)
++                const int j = i ^ stride2;
++                if (j > i) {
++                    const bool up = (i & size) == 0;
++                    const long long a = cols[i], b = cols[j];
++                    if ((a > b) == up) {
++                        cols[i] = b;
++                        cols[j] = a;
++                    }
++                }
++            }
++        }
++    }
++    __syncthreads();
++    const long long v = vis[blockIdx.x];
++    long long* o = out + (long long)blockIdx.x * k;
++    for (int i = threadIdx.x; i < k; i += blockDim.x) o[i] = cols[i] < v ? cols[i] : -1;
++}
++
+ // The next kernels' weights touched into L2 ahead of them (the served build's paced l2_prefetch, as its trace shows it:
+ // a block of 128 threads on a stream of its own, up to 16 ranges a launch): every 128-byte line of each range, the
+ // ranges in order. It writes nothing.
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 84a2795107871bdfc5e149a5d00890da4551fec0..2506be3dc7262a0745680321471d6b7a9be33c72 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -80,6 +80,14 @@
+ //!   TF_DS_HC_SIDE=1                             the mixes' side work on a stream of its own
+ //!   TF_DS_L2_PREFETCH=1                         the paced L2 prefetch of the next kernels' weights
+ //!   TF_DS_PDL=1                            the hand-written kernels launch with programmatic dependent launches (griddepcontrol.wait + launch_dependents at every kernel's entry, the attribute on every launch of these kernels); both ranks, read at load via ops/exact; launch-timing only, bits identical (not TF_RDMA_PDL / not TF_DS_TRITON_PDL; changes no frames, no bytes, so the pair may run mixed ranks bit-identically, though setting it alike on both is the convention); no fingerprint bit, no switches bit
++//!   TF_DS_TOPK_FAST=1                          the indexer's top-k (tf_ds_topk_indices_kernel) runs as
++//!                                               tf_ds_topk_indices_fast_kernel: a systematic sample of the row (every
++//!                                               n/4096-th key) estimates the k-th largest, one pass compacts the keys at
++//!                                               or above that estimate, and the exact k-th is selected among them (a row
++//!                                               whose count falls outside [k, 4096] falls back to the eight-digit select
++//!                                               over the row, as when off); three reads of the row instead of ten, bits
++//!                                               identical (the same k keys, the same order), both ranks by convention
++//!                                               (no frame, no bytes), no fingerprint bit, no switches bit
+ //!   TF_DS_COMPRESS_SIDE=1                       the compressor chain (ratio 1/2) on a stream of its own (set alike on both ranks), forked behind the input linears and joined before the indexer select block; a reorder of independent launches, so the bytes are the same; off: nothing changes
+ //!   TF_DS_FUSED_COMPRESS2=1                       the ratio-2 compressor chain in one kernel (the rows scattered to the raw slots, the pair's rows back and compress2's sum; the ch.invalid memset dropped — the flag is dead on this path); both ranks, at Round init; off: nothing changes (the chain is the 6 launches + the RMSNorm); bits identical
+ //!   TF_DS_ENGRAM_BOTH=1                       both Engram layers' rows land at the round's first Engram cut (set alike on both ranks; 1 or on, off otherwise): layer 14's rows are decoded and uploaded there instead of before its own stretch (strictly earlier, never later — one stretch fewer, three stretches a round become two, a captured round's graphs too), the host still lands once, between the first stretch and the rest; bit-identical; off: nothing changes
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 89b8a7f23d84dabe2063a429cde5b83a7fa852aa..0ec0f1775beb2bd87e8b7a3c9836ff66f245daed 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -39,6 +39,11 @@ pub const spec_env = "TF_DS_SPEC_SAMPLE";
+ /// one launch; launch-timing only, bits identical); read at load on every rank. Not TF_RDMA_PDL / TF_DS_TRITON_PDL.
+ pub const pdl_env = "TF_DS_PDL";
+ 
++/// The switch for the indexer's top-k in three reads of the row instead of ten (tf_ds_topk_indices_fast_kernel: a
++/// sampled threshold, one compacting pass, the exact k-th among the candidates, the eight-digit select as the
++/// fallback); read at load on every rank, bits identical either way (the same k keys, the same order).
++pub const topk_fast_env = "TF_DS_TOPK_FAST";
++
+ /// The series' switches' parse ("1" or "on"; unset, "0", "off", "" or anything else: off).
+ pub fn onValue(v: ?[]const u8) bool {
+     const s = v orelse return false;
+@@ -93,6 +98,7 @@ pub const Ops = struct {
+     add2_bf16: cuda.Function,
+     topk_i64: cuda.Function,
+     topk_indices: cuda.Function,
++    topk_indices_fast: cuda.Function, // TF_DS_TOPK_FAST (launched only under it)
+     scatter: cuda.Function,
+     cand_fast: cuda.Function,
+     iota_vis: cuda.Function,
+@@ -116,6 +122,7 @@ pub const Ops = struct {
+     gather_cols: ?cuda.Function = null, // TF_DS_SPEC_SAMPLE, looked up only when on
+     spec: bool = false, // TF_DS_SPEC_SAMPLE
+     pdl: bool = false, // TF_DS_PDL
++    topk_fast: bool = false, // TF_DS_TOPK_FAST
+     draw_rows: ?cuda.Function = null, // TF_DS_T27_DEVICE_DRAW, looked up only when on
+     lora_add: ?cuda.Function = null, // TF_DS_LORA: the adapter epilogue's add, looked up only when on
+ 
+@@ -133,6 +140,7 @@ pub const Ops = struct {
+             return err;
+         };
+         const pdl = onValue(envSpan(pdl_env));
++        const topk_fast = onValue(envSpan(topk_fast_env));
+         return .{
+             .pointwise = pw,
+             .movement = mv,
+@@ -142,6 +150,7 @@ pub const Ops = struct {
+             .add2_bf16 = try fm.function("tf_ds_add2_bf16_kernel"),
+             .topk_i64 = try fm.function("tf_ds_topk_i64_kernel"),
+             .topk_indices = try fm.function("tf_ds_topk_indices_kernel"),
++            .topk_indices_fast = try fm.function("tf_ds_topk_indices_fast_kernel"),
+             .scatter = try fm.function("tf_ds_scatter_rows_kernel"),
+             .cand_fast = try fm.function("tf_ds_cand_fast_kernel"),
+             .iota_vis = try fm.function("tf_ds_iota_vis_kernel"),
+@@ -165,6 +174,7 @@ pub const Ops = struct {
+             .gather_cols = if (spec) try fm.function("tf_ds_gather_cols_kernel") else null,
+             .spec = spec,
+             .pdl = pdl,
++            .topk_fast = topk_fast,
+             .draw_rows = if (envOn(draw_env)) try fm.function("tf_ds_draw_rows_kernel") else null,
+             .lora_add = if (loraOn()) try fm.function("tf_ds_add_bf16_kernel") else null,
+         };
+@@ -257,7 +267,8 @@ pub const Ops = struct {
+         a.add(vis);
+         a.add(out);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
+-        try cuda.launch.launch(o.topk_indices, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
++        const f = if (o.topk_fast) o.topk_indices_fast else o.topk_indices; // TF_DS_TOPK_FAST: same k, same order
++        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// dst row idx[i] = src row i (`t[idx] = rows`, distinct int64 indices): `rows` rows of `bytes` bytes, src rows
+@@ -606,6 +617,12 @@ test "TF_DS_SPEC_SAMPLE parses like the series' switches and refuses TF_DS_T26_K
+     try std.testing.expect(isOne("1") and !isOne("0") and !isOne("on") and !isOne(null) and !isOne(""));
+ }
+ 
++test "TF_DS_TOPK_FAST parses like the series' switches" {
++    try std.testing.expectEqualStrings("TF_DS_TOPK_FAST", topk_fast_env);
++    try std.testing.expect(onValue("1") and onValue("on"));
++    for ([_]?[]const u8{ null, "0", "off", "", "ON", "yes", "01", "true" }) |v| try std.testing.expect(!onValue(v));
++}
++
+ test "TF_DS_PDL parses like the series' switches" {
+     try std.testing.expectEqualStrings("TF_DS_PDL", pdl_env);
+     try std.testing.expect(onValue("1") and onValue("on"));

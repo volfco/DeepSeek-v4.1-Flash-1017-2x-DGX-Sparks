@@ -1,0 +1,398 @@
+[
+ {
+  "id": "d01",
+  "arm": "best",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d02",
+  "arm": "bt",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_TOPK_FAST": "1",
+   "TF_DS_T15_PLACE_BOUND": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think",
+   "exact:runs/combo/blocks/p05.exact.json",
+   "sampled_ident"
+  ]
+ },
+ {
+  "id": "d03",
+  "arm": "bto",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_TOPK_FAST": "1",
+   "TF_DS_T15_PLACE_BOUND": "1",
+   "TF_DS_PREFILL_GATHER_OVERLAP": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think",
+   "exact:runs/combo/blocks/p05.exact.json",
+   "sampled_ident"
+  ]
+ },
+ {
+  "id": "d04",
+  "arm": "half-engram",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map-warm",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_ENGRAM_FAST": "1",
+   "TF_DS_ENGRAM_SUBMIT_EARLY": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d05",
+  "arm": "half-host",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "CPUSET": "5-9,15-19",
+   "TF_DS_REPLY_SCAN_SUFFIX": "1",
+   "TF_DS_TOKEN_ALIGN_MB": "16",
+   "TF_DS_LOAD_READERS": "4"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d06",
+  "arm": "bto",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_TOPK_FAST": "1",
+   "TF_DS_T15_PLACE_BOUND": "1",
+   "TF_DS_PREFILL_GATHER_OVERLAP": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d07",
+  "arm": "bt",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_TOPK_FAST": "1",
+   "TF_DS_T15_PLACE_BOUND": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d08",
+  "arm": "best",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d09",
+  "arm": "half-host",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "CPUSET": "5-9,15-19",
+   "TF_DS_REPLY_SCAN_SUFFIX": "1",
+   "TF_DS_TOKEN_ALIGN_MB": "16",
+   "TF_DS_LOAD_READERS": "4"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d10",
+  "arm": "half-engram",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map-warm",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_ENGRAM_FAST": "1",
+   "TF_DS_ENGRAM_SUBMIT_EARLY": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d11",
+  "arm": "best",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d12",
+  "arm": "bt",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_TOPK_FAST": "1",
+   "TF_DS_T15_PLACE_BOUND": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d13",
+  "arm": "bto",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_TOPK_FAST": "1",
+   "TF_DS_T15_PLACE_BOUND": "1",
+   "TF_DS_PREFILL_GATHER_OVERLAP": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think"
+  ]
+ },
+ {
+  "id": "d14",
+  "arm": "finer",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_IDX_BUCKET_FINER": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think",
+   "exact:runs/combo/blocks/p05.exact.json"
+  ]
+ },
+ {
+  "id": "d15",
+  "arm": "finer-topk",
+  "flags": {
+   "TF_DS_ENGRAM_LEAD": "1",
+   "TF_DS_ENGRAM_SCALES": "map",
+   "TF_DS_ENGRAM_STRICT": "1",
+   "TENSORFOLD_TOKEN_CACHE_MB": "32",
+   "TF_DS_DEVICE_ACCEPT": "1",
+   "TF_DS_COMPRESS_SIDE": "1",
+   "TF_DS_PDL": "1",
+   "TF_DS_FUSED_COMPRESS2": "1",
+   "TF_DS_IDX_BUCKET_FINER": "1",
+   "TF_DS_TOPK_FAST": "1"
+  },
+  "cells": [
+   "warm",
+   "validate",
+   "prefill_quick",
+   "prefill_p125",
+   "dec1",
+   "dec4",
+   "dec8",
+   "think",
+   "exact:runs/combo/blocks/p05.exact.json"
+  ]
+ }
+]

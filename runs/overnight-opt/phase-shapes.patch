@@ -1,0 +1,60 @@
+--- a/zig/src/families/dsv41/phase_windows.zig
++++ b/zig/src/families/dsv41/phase_windows.zig
+@@ -30,7 +30,14 @@
+ }
+ pub fn record(kind: u32, phase: u32, start: u64, end: u64) void {
+     if (!enabled() or end < start) return;
++    append(.{ .kind = kind, .phase = phase, .start = start, .end = end });
++}
++pub fn shape(phase: u32, m: usize, k: usize, n: usize) void {
++    if (!enabled()) return;
++    append(.{ .kind = 4, .phase = phase, .start = (@as(u64, m) << 32) | k, .end = n });
++}
++fn append(row: Record) void {
+     if (used == buffer.len) flush();
+-    buffer[used] = .{ .kind = kind, .phase = phase, .start = start, .end = end };
++    buffer[used] = row;
+     used += 1;
+ }
+--- a/zig/src/families/dsv41/prefill_prof.zig
++++ b/zig/src/families/dsv41/prefill_prof.zig
+@@ -72,6 +72,11 @@
+ 
+ /// The chunk's end (head's mark drained it): count the chunk, close the open interval and drop the sub cursors. The
+ /// tail after head is not charged.
++pub fn shape(ph: Phase, m: usize, k: usize, n: usize) void {
++    if (live == null) return;
++    phase_windows.shape(@intFromEnum(ph), m, k, n);
++}
++
+ pub fn finish() void {
+     const p = live orelse return;
+     p.cursor = 0;
+--- a/zig/src/families/dsv41/exl3_prefill.zig
++++ b/zig/src/families/dsv41/exl3_prefill.zig
+@@ -108,6 +108,7 @@
+     try unpack(k, t.stream, l, ws.w);
+     prefill_prof.subEnd(t.stream, .d_unpack);
+     try tri_markov.matmul(t, ws.xh, ws.w, ws.h, l.svh, null, out, out_type, os, m, l.k, l.n);
++    prefill_prof.shape(.d_gemm, m, l.k, l.n);
+     prefill_prof.subEnd(t.stream, .d_gemm);
+ }
+ 
+--- a/zig/src/families/dsv41/exl3_experts.zig
++++ b/zig/src/families/dsv41/exl3_experts.zig
+@@ -259,6 +259,7 @@
+     a.add(limit);
+     a.add(@as(c_int, act_f32));
+     try launch(k.gateup_epilogue, s, .{ p, i / 128, 1 }, 32, &a);
++    prefill_prof.shape(.e_gu, p, d, i);
+     prefill_prof.subEnd(s, .e_gu);
+ 
+     // down: grid (1, D / 128, pairs), 4 warps, two 16-row member tiles a program, one split
+@@ -272,6 +273,7 @@
+     for ([_]u64{ sc.z, pick, ex.svh_d, sc.no_y, wts, 0, out }) |v| a.add(v);
+     for ([_]usize{ p, d, 1, e, slots, 0 }) |v| i32a(&a, v);
+     try launch(k.down_combine, s, .{ r, d / 128, 1 }, 32 * slots, &a);
++    prefill_prof.shape(.e_down, p, i, d);
+     prefill_prof.subEnd(s, .e_down);
+ }
+ 

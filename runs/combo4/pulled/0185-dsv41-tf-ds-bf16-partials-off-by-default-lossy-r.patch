@@ -1,0 +1,158 @@
+# port-patches.sh: second-pass-int @ 185b0c9f5b60 over bcad456 @ bcad456fbd42 (commits bcad456fbd42..185b0c9f5b60)
+# dsv41: TF_DS_BF16_PARTIALS (off by default, LOSSY) rounds a prompt chunk's attention partial to bf16 on the wire - gathered at half the payload and widened back to fp32 at the mixes
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/zig/src/families/dsv41/layer_main.zig b/zig/src/families/dsv41/layer_main.zig
+index ab53303a659d75604cbecec7ea37b6de6e0f40d4..eedfbe1c1f500202bcfede2f48c5dfe1e248874c 100644
+--- a/zig/src/families/dsv41/layer_main.zig
++++ b/zig/src/families/dsv41/layer_main.zig
+@@ -870,7 +870,7 @@ fn runChunk(run: *Run, eng: *const prompt.Engine, ch: *prompt.Chunk, caches: *co
+         if (checked and !try run.check(try std.fmt.bufPrint(&label_buf, "L{d} attention in", .{li}), att, ch.x)) return false;
+         prompt.attention(eng, ch, caches, shared, li, rings[li], floor, kv_done != null and kv_done.? == li) catch |err| return report(w_out, rank, li, "attention", err);
+         if (checked and !try run.check(try std.fmt.bufPrint(&label_buf, "L{d} attention partial", .{li}), fx.find(after, "Model.attention_k", l, "out"), ch.pa)) return false;
+-        try prompt.gather(eng, ch, ch.pa, ch.ga);
++        try prompt.gatherPartial(eng, ch);
+         if (checked and !try run.check(try std.fmt.bufPrint(&label_buf, "L{d} attention gather", .{li}), fx.find(att.?.call, "Comm.gather", null, "out"), ch.ga)) return false;
+         prompt.ffnMixes(eng, ch, li) catch |err| return report(w_out, rank, li, "ffn mixes", err);
+         const mo: ?*const Point = if (checked) (fx.find(att.?.call, "Model.moe", l, "in2") orelse return report(w_out, rank, li, "moe fixture", error.NoLayerFixture)) else null;
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index e8d52bb39eadb9eeb113addd2ff460975309cd7c..8f27fddc10b3c06d68ec0bad67a450b00cdb3052 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -118,6 +118,8 @@ pub const Options = struct {
+     prefetch: bool = false, // the paced L2 prefetch (round.Round.usePrefetch)
+     // TF_DS_PREFILL_GATHER_OVERLAP (0183): the chunk's MoE gather on a stream of its own, joined where the post reads it
+     gather_overlap: bool = false,
++    // TF_DS_BF16_PARTIALS (0185, LOSSY): the chunk's attention partial rounded to bf16 before its gather
++    bf16_partials: bool = false,
+     engram_aio: bool = false, // a round's Engram reads by Linux AIO on O_DIRECT (else the reader pool)
+     arena_bytes: usize = 0, // the device arena's first block (0: it grows from 256 MiB blocks as the buffers ask)
+     round_rows: usize = round.default_rows, // a round's rows at most (TF_DS_ROUND_ROWS; the four-node lane's 48)
+@@ -452,6 +454,8 @@ pub const Model = struct {
+         m.eng.window_rows = m.window_rows;
+         m.eng.gemm_rows = m.gemm_rows;
+         m.eng.plain_rows = o.plain_rows;
++        // TF_DS_BF16_PARTIALS (LOSSY): two or more ranks and not the four-node split (its partials are the pair's columns)
++        m.eng.bf16_partials = o.bf16_partials and prompt.bf16PartialsWork(sp.world, m.two != null);
+         m.ch = try prompt.Chunk.init(&m.eng, &m.arena, chunk_rows, m.request_cap);
+         // TF_DS_EXACT_RESUME: every slot's tail (a prompt pass's last window decoder-input rows, a ring by position)
+         if (m.exact_resume) {
+@@ -1619,7 +1623,7 @@ pub const Model = struct {
+             try prompt.attention(e, ch, &m.view, &rs.shared, li, m.ring_view[li], rs.floor, rs.kv_done != null and rs.kv_done.? == li);
+             if (pt) |t| try t.mark(m.stream, .attn);
+             prefill_prof.mark(m.stream, .attn);
+-            try prompt.gather(e, ch, ch.pa, ch.ga);
++            try prompt.gatherPartial(e, ch); // TF_DS_BF16_PARTIALS: bf16 on the wire, widened at the mixes
+             if (pt) |t| try t.mark(m.stream, .gather_a);
+             prefill_prof.mark(m.stream, .gather_a);
+             try prompt.ffnMixes(e, ch, li);
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 65fd88a11c3a0317df3df87bc1a1f5f9165cc062..2b63a8202e416d8a6f24f12172b1198d272b4ae2 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -86,6 +86,13 @@
+ //!                                               is in flight; the same all-gather on the same ranks, so bits identical
+ //!                                               (set alike on both ranks; no frame, no bytes, no fingerprint bit). A lone
+ //!                                               rank or the four-node 2D split keeps the main stream. Off: nothing changes
++//!   TF_DS_BF16_PARTIALS=1                      LOSSY, opt-in: a prompt chunk's attention partial (wo_b's output)
++//!                                               is written bf16, gathered as bf16 (the payload halves) and widened
++//!                                               back to fp32 before the FFN mixes' sum, as Baseten rounds before the
++//!                                               sum; two or more ranks without the 2D split (their partials are the
++//!                                               pair's columns). Replies differ from the fp32 run by the rounding of
++//!                                               one fp32 value a row a layer a rank: no fingerprint bit, no switches
++//!                                               bit. Off: fp32 exactly as served
+ //!   TF_DS_IDX_BUCKET_FINER=1                   the round's context bucket is the deepest row's position rounded up to a
+ //!                                               multiple of 1024, not to the next power of two (70K positions: 70656 keys
+ //!                                               instead of 131072), so the indexer's scoring and select size to the context;
+@@ -331,6 +338,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+         .side = if (getenv("TF_DS_HC_SIDE")) |v| !std.mem.eql(u8, v, "0") else false,
+         .prefetch = if (getenv("TF_DS_L2_PREFETCH")) |v| !std.mem.eql(u8, v, "0") else false,
+         .gather_overlap = ops_mod.onValue(getenv(prompt.gather_side_env)), // 0183 (the 2D split and a lone rank keep the main stream: Model.useGatherSide)
++        .bf16_partials = ops_mod.onValue(getenv("TF_DS_BF16_PARTIALS")), // 0185, LOSSY (a lone rank and the 2D split keep fp32: Model.open)
+         .engram_aio = if (getenv("TF_DS_ENGRAM_AIO")) |v| !std.mem.eql(u8, v, "0") else false,
+         .pool = try pool_mod.resolve(o.context, getenv("TF_DS_POOL")), // may exceed the window: more kept prompts stay resident
+         .window = o.context, // (a follower takes TF_DS_WINDOW, else rank 0's: Model.open)
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 122d71c6c8265558fc9f61855c2019f1d6ed1ddc..0159b93d4709e6d9af4ee65fc77df0f137b7f449 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -138,6 +138,9 @@ pub const Engine = struct {
+     two: ?*const prompt2d.Two = null, // a node of the four-node 2D split (prompt2d.zig); `world` stays TP2's
+     ring: ?*rdma.Ring = null, // TP2: the decode-size all-gathers over the RDMA ring (the served lane's), else NCCL
+     kv: ?*shard_ops.KvShard = null, // TF_DS_KV_SHARD: the parts, the decode mode, the fetch kernels (null: replicated)
++    // TF_DS_BF16_PARTIALS (0185, LOSSY): a chunk's attention partial rounded to bf16 before its gather (the payload
++    // halves); the four-node split and a lone rank keep fp32
++    bf16_partials: bool = false,
+ 
+     /// A decode-size all-gather of `count` fp32 a rank into `dst`, rank after rank: the RDMA ring when the engine has
+     /// one and the slice fits a slot (whole float4s), else NCCL. The same bytes either way.
+@@ -311,6 +314,10 @@ pub const Chunk = struct {
+     u: u64, // bf16 [cap, groups * o_lora]
+     pa: u64, // fp32 [cap, D]: the attention partial
+     ga: u64, // fp32 [world, cap, D]: its gather
++    // TF_DS_BF16_PARTIALS: the same partial rounded to bf16 [cap, D], its bf16 gather [world, cap, D] (ga then holds
++    // the widened sum's input, written where the mixes read it); 0 when the switch is off
++    pb: u64 = 0,
++    gb: u64 = 0,
+     neg: u64, // int64 [cap], -1: no ring slot (model.py _neg)
+     ring_idx: u64, // int64 [ring]
+     rslot: u64 = 0, // int64 [RING_EXTRA]: ring mode's slots, pos % R
+@@ -456,6 +463,8 @@ pub const Chunk = struct {
+         ch.u = try a.take(cap * groups * o_lora * 2);
+         ch.pa = try a.take(cap * d * 4);
+         ch.ga = try a.take(e.world * cap * d * 4);
++        ch.pb = if (e.bf16_partials) try a.take(cap * d * 2) else 0;
++        ch.gb = if (e.bf16_partials) try a.take(e.world * cap * d * 2) else 0;
+         ch.neg = try a.take(cap * 8);
+         ch.ring_idx = try a.take((c.window + ring_extra) * 8);
+         ch.rslot = try a.take(ring_extra * 8);
+@@ -1178,6 +1187,8 @@ pub fn attention(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, l
+     }
+     prefill_prof.subEnd(e.s, .a_woa);
+     if (e.two) |t| return t.woB(e, ch, lay); // 2D: the column partner's groups first, then this pair's columns
++    // TF_DS_BF16_PARTIALS: the partial rounded to bf16 as the GEMM writes it (RNE, as Baseten rounds it before the sum)
++    if (e.bf16_partials) return mm(e, ch, lay.wo_b, ch.u, uw, ch.pb, .bf16, c.hidden);
+     try mm(e, ch, lay.wo_b, ch.u, uw, ch.pa, .fp32, c.hidden);
+ }
+ 
+@@ -1494,6 +1505,19 @@ pub fn gatherAside(e: *const Engine, ch: *Chunk) !void {
+     ch.pending_side = true;
+ }
+ 
++/// TF_DS_BF16_PARTIALS runs where the partial is exchanged rather than copied: two or more ranks, and not the four-node
++/// 2D split (whose partials are the pair's own columns). LOSSY; this only says where it can apply.
++pub fn bf16PartialsWork(world: usize, two: bool) bool {
++    return world >= 2 and !two;
++}
++
++/// The attention partial's gather: the ranks' bf16 partials when TF_DS_BF16_PARTIALS is on (the payload halves),
++/// fp32 otherwise. The bf16 payload is widened where the mixes read it (ffnMixes), so ga means the same either way.
++pub fn gatherPartial(e: *const Engine, ch: *const Chunk) !void {
++    if (ch.pb == 0) return gather(e, ch, ch.pa, ch.ga);
++    try e.comm.allGather(ch.pb, ch.gb, ch.n * e.c.hidden, .bf16, e.s);
++}
++
+ /// The side gather's join, before anything reads gm (a no-op when none is in flight or the switch is off).
+ pub fn joinAside(e: *const Engine, ch: *Chunk) !void {
+     if (!ch.pending_side) return;
+@@ -1514,6 +1538,8 @@ fn pendingPost(e: *const Engine, ch: *Chunk) !void {
+ pub fn ffnMixes(e: *const Engine, ch: *Chunk, li: usize) !void {
+     const lay = e.w.layers[li];
+     const c = e.c;
++    // TF_DS_BF16_PARTIALS: the ranks' bf16 partials widened back to fp32 before the mix's sum (the kit takes fp32)
++    if (ch.gb != 0) try e.ops.toF32(e.s, ch.gb, ch.ga, e.world * ch.n * c.hidden);
+     const src = try tri_hc.hcPrePf(e.t, ch.h, lay.hc_ffn[0], lay.hc_ffn[1], lay.hc_ffn[2], ch.pre_a, lay.ffn_norm, c.eps, c.hc_eps, c.hc_iters, ch.x, ch.pre_f, ch.post, ch.comb, ch.part, .{ .gathered = ch.ga, .world = e.world, .h_out = ch.h_alt }, ch.n, c.hidden);
+     swapStreams(ch, src);
+ }
+@@ -2554,6 +2580,12 @@ test "hd ** -0.5 as the served build passes it" {
+     try std.testing.expectEqual(@as(u32, 0x3d3504f3), @as(u32, @bitCast(scale(512))));
+ }
+ 
++test "TF_DS_BF16_PARTIALS applies to two ranks and no 2D split (the series' parse is ops')" {
++    try std.testing.expect(bf16PartialsWork(2, false) and bf16PartialsWork(4, false));
++    try std.testing.expect(!bf16PartialsWork(1, false)); // one rank's gather copies its own partial: rounding is pure loss
++    try std.testing.expect(!bf16PartialsWork(2, true) and !bf16PartialsWork(4, true)); // the 2D split's partials are per pair
++}
++
+ test "TF_DS_PREFILL_GATHER_OVERLAP: two or more ranks, no 2D split, the series' parse" {
+     try std.testing.expectEqualStrings("TF_DS_PREFILL_GATHER_OVERLAP", gather_side_env);
+     try std.testing.expect(overlapWorks(2, false) and overlapWorks(4, false));

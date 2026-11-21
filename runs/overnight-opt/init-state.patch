@@ -1,0 +1,23 @@
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -369,6 +369,7 @@
+         rd.clk = 0;
+         rd.bucket = 0;
+         rd.hot = null;
++        rd.dead = 0;
+         rd.align_index_bucket = ops_mod.onValue(if (std.c.getenv("TF_DS_IDX_BUCKET_FINER")) |v| std.mem.span(v) else null);
+         rd.has_cand = false;
+         rd.kk = 0;
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -246,6 +246,10 @@
+         const m = try gpa.create(Model);
+         errdefer gpa.destroy(m);
+         m.* = undefined;
++        m.clk_ph = @splat(0);
++        m.clk_cnt = @splat(0);
++        m.clk_rounds = 0;
++        m.accept_rows = 0;
+         m.gpa = gpa;
+         m.exact_resume = api.prompt_cache.exactResume(envOf("TF_DS_EXACT_RESUME")); // every rank alike
+         m.absorb_after_pick = envOnOff(envOf("TF_DS_ABSORB_AFTER_PICK")); // rank-local: an uneven pair stays bit-identical

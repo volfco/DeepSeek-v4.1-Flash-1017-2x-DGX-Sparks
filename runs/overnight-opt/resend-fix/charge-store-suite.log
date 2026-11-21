@@ -1,0 +1,71 @@
+1/70 prompt_cache_test.test.a growing conversation resumes each turn where the last one's history ended, and equals a fresh pass...OK
+2/70 prompt_cache_test.test.an entry keys its lookahead tokens: a prompt that differs right after the state does not resume it...OK
+3/70 prompt_cache_test.test.a state within the tail of a prompt's end is passed over for an earlier one, and stays for the conversation that kept it...OK
+4/70 prompt_cache_test.test.planned families resume and keep only at the request's chunk starts...OK
+5/70 prompt_cache_test.test.eviction frees a conversation's superseded state first, then the oldest; a state past the budget is refused...OK
+6/70 prompt_cache_test.test.TF_DS_KEEP_PROTECT=1: a branch point's own conversation moving on frees it first...OK
+7/70 prompt_cache_test.test.TF_DS_KEEP_PROTECT=1: a cross-conversation fork's longer state leaves its branch point alone...OK
+8/70 prompt_cache_test.test.TF_DS_KEEP_PROTECT unset: any longer descendant makes its parent the first victim...OK
+9/70 prompt_cache_test.test.TF_DS_KEEP_PROTECT=1: the lineage link supersedes within one computation, and claims nothing without one...OK
+10/70 prompt_cache_test.test.a failed copy keeps nothing and a failed restore prefills from the start...OK
+11/70 prompt_cache_test.test.marks: the stable prefix with the last prompt and shared blocks, past the resume point, before the end...OK
+12/70 prompt_cache_test.test.TF_DS_EDIT_MARK: an early history edit keeps its stable mark on and drops it off...OK
+13/70 prompt_cache_test.test.TF_DS_EDIT_MARK: a late edit keeps its stable mark in both modes...OK
+14/70 prompt_cache_test.test.TF_DS_EDIT_MARK: the stable mark keeps min_gap from the resume point and from its neighbours...OK
+15/70 prompt_cache_test.test.TF_DS_SHARED_PLAN: only 1 turns it on...OK
+16/70 prompt_cache_test.test.TF_DS_SHARED_PLAN: a state kept at a shared cut's chunk end is shared even when the ring never notes it...OK
+17/70 prompt_cache_test.test.TF_DS_SHARED_PLAN: a shared keep is flagged with the switch on as the ring flags it with the switch off...OK
+18/70 prompt_cache_test.test.TF_DS_SHARED_PLAN: a shared cut stays flagged after interleaved lookups rotate the note ring...OK
+19/70 prompt_cache_test.test.prompts under min_prompt keep nothing (their extra prompt call would cost more than reuse saves), longer ones keep as before...OK
+20/70 prompt_cache_test.test.kept states charge their real storage, a save takes spare storage first, and spare stays inside the budget...OK
+21/70 prompt_cache_test.test.a shared system cut outlives its own conversation's turns: a second conversation resumes it after cold prompts fill the budget...OK
+22/70 prompt_cache_test.test.a pass makes room for every state it keeps before it starts, so a peer told of the evictions with the request stays inside the budget...OK
+23/70 prompt_cache_test.test.a state a peer cannot resume is forgotten: the next prompt misses instead of asking again...OK
+24/70 prompt_cache_test.test.a learned harness state outlives its store: a fresh session on a new one resumes it from disk, equal to a fresh pass...OK
+25/70 prompt_cache_test.test.past the learned-state cap the least recently used state is forgotten, and a file that no longer reads is too...OK
+26/70 prompt_cache_test.test.TF_DS_CACHE_METRICS: the misses split into no prefix, tail-window and stale...OK
+27/70 prompt_cache_test.test.a miss's cause comes only from a matching entry: one longer than the prompt never raises tail_window...OK
+28/70 prompt_cache_test.test.TF_DS_CACHE_METRICS: evictions split into superseded and least recently used...OK
+29/70 prompt_cache_test.test.TF_DS_CACHE_METRICS: failures split into save and restore...OK
+30/70 prompt_cache_test.test.TF_DS_CACHE_METRICS: the resume depth buckets each finished pass by the fraction it resumed...OK
+31/70 prompt_cache_test.test.TF_DS_CACHE_METRICS=0: the cause splits and the resume depth count nothing...OK
+32/70 prompt_cache_test.test.TF_DS_EXACT_RESUME: an off-grid end state is live on a store built with a grid, and only with the switch on...OK
+33/70 prompt_cache_test.test.full ends displace through the cache, match identical IDs and release memory at capacity...OK
+34/70 prompt_cache_test.test.paired full-end charging fits 78 grid and two full states without evicting one...OK
+35/70 prompt_cache_test.test.a planned live mark reserves its contextual bytes before the peer starts its pass...OK
+36/70 prompt_cache.decltest.imageCacheOn...OK
+37/70 prompt_cache.decltest.editMark...OK
+38/70 prompt_cache.decltest.exactResume...OK
+39/70 prompt_cache.decltest.keepProtect...OK
+40/70 prompt_cache.test_0...OK
+41/70 prompt_cache.test.0178 (TF_DS_PROMPT_ENDSTATE): eligible offers at == len only with the flag...OK
+42/70 prompt_cache.test.TF_DS_PROMPT_ENDSTATE parses 1..8 and nothing else...OK
+43/70 prompt_imprint.test_0...OK
+44/70 prompt_imprint_test.test.learned states survive a reopen; the longest usable prefix wins...OK
+45/70 prompt_imprint_test.test.the least recently used state goes first, and a removed one stays gone after a reopen...OK
+46/70 prompt_imprint_test.test.other identities are swept, least recently opened first, until the cap fits...OK
+47/70 prompt_cache_tier_test.test.a restored shared state's family copy is marked shared at adopt (placeKept's victim order)...OK
+48/70 prompt_cache_tier_test.test.without a tier the store asks nothing and counts nothing new...OK
+49/70 prompt_cache_tier_test.test.a keep enqueues its write with conversation and lineage; a state that left memory restores, equal to a fresh pass...OK
+50/70 prompt_cache_tier_test.test.a stale long memory state never shadows a durable point; ineligible points are not offered...OK
+51/70 prompt_cache_tier_test.test.one restore per point: a second request joins it, and it is cancelled once...OK
+52/70 prompt_cache_tier_test.test.a restore that fails anywhere leaves nothing; one memory already holds is dropped, its copy freed...OK
+53/70 prompt_cache_tier_test.test.a stale memory twin of a durable point is replaced by its restore; an evicted state restores too...OK
+54/70 prompt_cache_tier_test.test.a write still queued is staged before its memory state is dropped; a new shared prefix is marked on disk...OK
+55/70 prompt_cache_tier_test.test.flush stops restores, drains writes, and reports what its deadline left unpublished...OK
+56/70 prompt_cache_tier_test.test.forgetting a point drops it on disk and unlinks its memory twin...OK
+57/70 prompt_cache_tier_test.test.common prefix...OK
+58/70 prompt_cache_tier_test.test.continued conversations: a rewind continues, another conversation or an edit starts its own, the newest match wins...OK
+59/70 prompt_cache_tier_test.test.continued conversations skip shared, pictured, restored and forgotten conversations' states...OK
+60/70 prompt_cache_tier_test.test.join: an own turn keeps its conversation, a continuation names it, anything else starts one...OK
+61/70 prompt_cache_tier_test.test.a continued request is counted with its prefill; a large one's line says where it resumed and why...OK
+62/70 prompt_cache_tier_test.test.the log threshold: a continued request's prefill of chat_log_tokens or more...OK
+63/70 prompt_cache_tier_test.test.join: a hit on another conversation's state inside the shared system prompt is no evidence of that conversation...OK
+64/70 prompt_cache_tier_test.test.with a grid an off-grid shared cut marks the state the family keeps on the grid as shared, on disk too...OK
+65/70 prompt_cache_tier_test.test.a restore's destination is charged to the budget while it runs; spare storage in its way is trimmed, not every state...OK
+66/70 prompt_cache_tier_test.test.lineage: a fresh pass starts its own, a resumed one forks its state's at the resume point, kept states carry it to disk and back...OK
+67/70 prompt_cache_tier_test.test.a restore refused for room or capacity: the shorter memory state stays when it can, a restore that can start wins...OK
+68/70 prompt_cache_tier_test.test.a NoRoom is worth waiting for only when the restores in flight hold the rest of the budget...OK
+69/70 prompt_cache_tier_test.test.TF_DS_CACHE_METRICS: a keep refused for the restores in flight splits from one past the budget...OK
+70/70 prompt_cache_tier_test.test.a durable base restore and a full live save reserve their actual different sizes...OK
+All 70 tests passed.

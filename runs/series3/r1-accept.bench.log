@@ -1,0 +1,38 @@
+[prefill]
+  prefill prompt    1933 (cached 0) ttft    1.10s prefill   1763.6 tok/s | out    1 decode    n/a tok/s
+  prefill prompt    1939 (cached 0) ttft    1.09s prefill   1772.9 tok/s | out    1 decode    n/a tok/s
+  prefill prompt    1928 (cached 0) ttft    1.08s prefill   1777.0 tok/s | out    1 decode    n/a tok/s
+  prefill prompt    7679 (cached 0) ttft    3.73s prefill   2056.1 tok/s | out    1 decode    n/a tok/s
+  prefill prompt    7695 (cached 0) ttft    3.73s prefill   2064.6 tok/s | out    1 decode    n/a tok/s
+  prefill prompt    7677 (cached 0) ttft    3.69s prefill   2083.2 tok/s | out    1 decode    n/a tok/s
+  prefill prompt   30682 (cached 0) ttft   14.64s prefill   2096.2 tok/s | out    1 decode    n/a tok/s
+  prefill prompt   30680 (cached 0) ttft   14.43s prefill   2126.8 tok/s | out    1 decode    n/a tok/s
+  prefill prompt   30681 (cached 0) ttft   14.43s prefill   2126.0 tok/s | out    1 decode    n/a tok/s
+[decode]
+  decode  prompt      36 (cached 0) ttft    0.17s prefill    212.0 tok/s | out  256 decode   62.9 tok/s
+  decode  prompt      36 (cached 0) ttft    0.17s prefill    214.8 tok/s | out  256 decode   64.6 tok/s
+  decode  prompt      36 (cached 0) ttft    0.17s prefill    213.8 tok/s | out  256 decode   63.7 tok/s
+[multi]
+  multi x1 rep0: aggregate 61.2 tok/s, mean per-stream 61.2, errors 0
+  multi x1 rep1: aggregate 65.6 tok/s, mean per-stream 65.6, errors 0
+  multi x1 rep2: aggregate 62.4 tok/s, mean per-stream 62.4, errors 0
+  multi x4 rep0: aggregate 128.5 tok/s, mean per-stream 34.0, errors 0
+  multi x4 rep1: aggregate 123.2 tok/s, mean per-stream 32.2, errors 0
+  multi x4 rep2: aggregate 126.3 tok/s, mean per-stream 33.0, errors 0
+
+summary (medians):
+  prefill.2000.ttft_s                  1.09
+  prefill.2000.tok_s                   1772.91
+  prefill.8000.ttft_s                  3.73
+  prefill.8000.tok_s                   2064.61
+  prefill.32000.ttft_s                 14.43
+  prefill.32000.tok_s                  2126.01
+  decode.tok_s                         63.69
+  decode.ttft_s                        0.17
+  decode.accepted_over_drafted         None
+  multi.1.aggregate_tok_s              62.38
+  multi.1.per_stream_tok_s             62.38
+  multi.4.aggregate_tok_s              126.31
+  multi.4.per_stream_tok_s             33.03
+  errors                               0
+wrote runs/series3/r1-accept.bench.json

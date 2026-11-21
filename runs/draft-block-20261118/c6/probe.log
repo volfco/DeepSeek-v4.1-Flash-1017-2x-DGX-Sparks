@@ -1,0 +1,77 @@
+c6 tetris greedy seed 1 {'rounds': None, 'accepted': None, 'exact_tokens_per_round': None, 'drafted_per_round': None, 'ms_per_round': None, 'exact_tok_s': None, 'hist': {1: 1, 2: 1, 5: 1, 7: 6}, 'sha': None}
+c6 tetris sampled seed 700 {'rounds': None, 'accepted': None, 'exact_tokens_per_round': None, 'drafted_per_round': None, 'ms_per_round': None, 'exact_tok_s': None, 'hist': {1: 1, 2: 1, 5: 1, 7: 6}, 'sha': None}
+c6 tetris sampled seed 701 {'rounds': None, 'accepted': None, 'exact_tokens_per_round': None, 'drafted_per_round': None, 'ms_per_round': None, 'exact_tok_s': None, 'hist': {1: 1, 2: 1, 5: 1, 7: 6}, 'sha': None}
+c6 tetris sampled seed 702 {'rounds': None, 'accepted': None, 'exact_tokens_per_round': None, 'drafted_per_round': None, 'ms_per_round': None, 'exact_tok_s': None, 'hist': {1: 1, 2: 1, 5: 1, 7: 6}, 'sha': None}
+c6 code greedy seed 1 {'rounds': None, 'accepted': None, 'exact_tokens_per_round': None, 'drafted_per_round': None, 'ms_per_round': None, 'exact_tok_s': None, 'hist': {1: 2, 2: 3, 3: 7, 4: 3, 5: 3, 6: 9, 7: 10}, 'sha': None}
+c6 json greedy seed 1 {'rounds': None, 'accepted': None, 'exact_tokens_per_round': None, 'drafted_per_round': None, 'ms_per_round': None, 'exact_tok_s': None, 'hist': {1: 5, 2: 2, 3: 2, 4: 1, 5: 2, 6: 3, 7: 3}, 'sha': None}
+c6 prose greedy seed 1 {'rounds': '614', 'accepted': '154/348', 'exact_tokens_per_round': 1.251, 'drafted_per_round': 0.567, 'ms_per_round': 26.55, 'exact_tok_s': 47.12, 'hist': {1: 467, 2: 143, 3: 5}, 'sha': 'db65e3fe8ac0'}
+c6 prose greedy seed 1 {'rounds': '363', 'accepted': '404/640', 'exact_tokens_per_round': 2.116, 'drafted_per_round': 1.763, 'ms_per_round': 31.4, 'exact_tok_s': 67.37, 'hist': {1: 80, 2: 205, 3: 42, 4: 24, 5: 5, 6: 4, 7: 1}, 'sha': '93094abcc197'}
+c6 prose sampled seed 700 {'rounds': '481', 'accepted': '286/561', 'exact_tokens_per_round': 1.597, 'drafted_per_round': 1.166, 'ms_per_round': 29.11, 'exact_tok_s': 54.86, 'hist': {1: 212, 2: 254, 3: 16}, 'sha': '1c52cbcd196a'}
+c6 tetris greedy seed 1 {'rounds': None, 'accepted': None, 'exact_tokens_per_round': None, 'drafted_per_round': None, 'ms_per_round': None, 'exact_tok_s': None, 'hist': {1: 1, 2: 1, 5: 1, 7: 6}, 'sha': None}
+Exception in thread Thread-1 (one):
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+Exception in thread Thread-2 (one):
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+    self.run()
+  File "/usr/lib/python3.12/threading.py", line 1010, in run
+    self.run()
+  File "/usr/lib/python3.12/threading.py", line 1010, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/draft-block-20261118/probe.py", line 78, in one
+    self._target(*self._args, **self._kwargs)
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/draft-block-20261118/probe.py", line 78, in one
+    res[i] = json.load(urllib.request.urlopen(req, timeout=900))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    res[i] = json.load(urllib.request.urlopen(req, timeout=900))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 500: Internal Server Error
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 500: Internal Server Error
+Traceback (most recent call last):
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/draft-block-20261118/probe.py", line 124, in <module>
+    main()
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/draft-block-20261118/probe.py", line 118, in main
+    b = burst(f"tetris sampled x{width}", width, seed0, 768)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/draft-block-20261118/probe.py", line 90, in burst
+    line = next((l for l in lines if " done " + str(r.get("id")) in l), "")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/colum/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/draft-block-20261118/probe.py", line 90, in <genexpr>
+    line = next((l for l in lines if " done " + str(r.get("id")) in l), "")
+                                                    ^^^^^
+AttributeError: 'NoneType' object has no attribute 'get'

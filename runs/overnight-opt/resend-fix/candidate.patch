@@ -1,0 +1,231 @@
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -1005,7 +1005,8 @@
+     /// The layers whose window rings a Snap carries: all of them, or with TF_DS_SNAP_TRIM only the encoder's (the
+     /// decoder's last half is rebuilt by the replay, so its rings are dead weight in every kept state).
+     pub fn snap_rings(m: *const Model) usize {
+-        return if (m.snap_trim) m.eng.c.layers / 2 else m.rings.len;
++        // A full prompt-end hit replays zero rows and must carry its decoder rings too.
++        return if (m.snap_trim and m.endstate == null) m.eng.c.layers / 2 else m.rings.len;
+     }
+ 
+     /// Slot `slot`'s own state into `buf` (save: true) or back from it, in the stream's order (no wait): with the
+@@ -1841,19 +1842,22 @@
+     /// 0178: the slot's end state (the drafter stages' rows and head_g) between `ptr` (an end_buf) and the live state:
+     /// `to_device` restores, else it saves. Both halves are device bytes.
+     pub fn endCopy(m: *Model, slot: usize, ptr: u64, to_device: bool) !void {
+-        const d = m.ctx.d;
+-        const stage: usize = if (m.dpool) |*p| p.planeBytes() / p.slots else 0;
+-        if (m.dpool) |*p| {
+-            for (0..p.stages) |j| {
+-                const src = if (to_device) ptr + j * stage else p.view(j, slot);
+-                const dst = if (to_device) p.view(j, slot) else ptr + j * stage;
+-                try d.check(d.api.cuMemcpyDtoD_v2(dst, src, stage), "cuMemcpyDtoD");
++        // Prompt head logits and DSpark absorbs are enqueued on this nonblocking model stream.
++        // Put save and restore on the same stream as their producers and consumers.
++        const stage_bytes = if (m.dpool) |*pool| pool.planeBytes() / pool.slots else 0;
++        var cursor = ptr;
++        if (m.dpool) |*pool| {
++            for (0..pool.stages) |j| {
++                try m.copyState(pool.view(j, slot), cursor, stage_bytes, !to_device);
++                cursor += stage_bytes;
+             }
+         }
+-        const off = (if (m.dpool) |*p| p.stages else 0) * stage;
+-        const src = if (to_device) ptr + off else m.ch.head_g;
+-        const dst = if (to_device) m.ch.head_g else ptr + off;
+-        try d.check(d.api.cuMemcpyDtoD_v2(dst, src, m.vocab * 4), "cuMemcpyDtoD");
++        try m.copyState(m.ch.head_g, cursor, m.vocab * 4, !to_device);
++    }
++
++    pub fn restoreEnd(m: *Model, slot: usize, ptr: u64, at: usize) !void {
++        try m.endCopy(slot, ptr, true);
++        if (m.dpool) |*pool| pool.absorbed[slot] = at;
+     }
+ 
+     /// 0177 (TF_DS_DRAFT_TRIAGE): the round's dead-row mask, u8 a row (1: the probe says its predecessor will reject
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1382,7 +1382,7 @@
+             }
+             try m.snapCopy(slot, sn.buf.ptr, false);
+             // 0178 (TF_DS_PROMPT_ENDSTATE): the extras and head_g back - the pass then runs no rows
+-            if (sn.end_buf) |b| try m.endCopy(slot, b.ptr, true);
++            if (sn.end_buf) |b| try m.restoreEnd(slot, b.ptr, sn.at);
+             // TF_DS_EXACT_RESUME: the tail comes back with the state, and the pass resumes where the state stands
+             if (sn.tail) |tb| {
+                 try m.tailCopy(slot, tb.ptr, false);
+@@ -2299,11 +2299,22 @@
+     return followWith(gpa, m, null);
+ }
+ 
++/// The follower records the payload at save time. Spill-restored buffers contain only the base state.
++const FollowSnapshot = struct {
++    buf: cuda.DeviceBuffer,
++    tail: ?[2]usize = null,
++    end_offset: ?usize = null,
++
++    fn layout(base: usize, tail_bytes: usize, end_bytes: usize, full_end: bool) struct { bytes: usize, end: ?usize } {
++        return if (full_end) .{ .bytes = base + end_bytes, .end = base } else .{ .bytes = base + tail_bytes, .end = null };
++    }
++};
++
+ /// A follower's kept states as its spill side sees them (spill_tier.FollowerFamily).
+ const FollowKept = struct {
+     gpa: std.mem.Allocator,
+     m: *Model,
+-    kept: *std.AutoHashMapUnmanaged(u64, cuda.DeviceBuffer),
++    kept: *std.AutoHashMapUnmanaged(u64, FollowSnapshot),
+     loading: std.AutoHashMapUnmanaged(u64, cuda.DeviceBuffer) = .empty, // restores' destinations, not yet installed
+     seqs: *[max_streams]std.ArrayList(i32),
+ 
+@@ -2327,7 +2338,7 @@
+     fn install(p: *anyopaque, id: u64) anyerror!void {
+         const f = of(p);
+         const kv = f.loading.fetchRemove(id) orelse return error.UnknownSnapshot;
+-        f.kept.put(f.gpa, id, kv.value) catch |e| {
++        f.kept.put(f.gpa, id, .{ .buf = kv.value }) catch |e| {
+             var b = kv.value;
+             b.free();
+             return e;
+@@ -2341,7 +2352,7 @@
+     }
+ 
+     fn buf(p: *anyopaque, id: u64) ?u64 {
+-        return if (of(p).kept.get(id)) |b| b.ptr else null;
++        return if (of(p).kept.get(id)) |sn| sn.buf.ptr else null;
+     }
+ 
+     fn ids(p: *anyopaque, slot: u32) []const i32 {
+@@ -2534,16 +2545,12 @@
+     var slot: usize = 0;
+     var img_rows: std.ArrayList(u8) = .empty; // a prompt's image rows as their pieces come
+     defer img_rows.deinit(gpa);
+-    var kept: std.AutoHashMapUnmanaged(u64, cuda.DeviceBuffer) = .empty; // rank 0's kept states, this rank's part
++    var kept: std.AutoHashMapUnmanaged(u64, FollowSnapshot) = .empty;
+     defer {
+         var ki = kept.valueIterator();
+-        while (ki.next()) |b| b.free();
++        while (ki.next()) |sn| sn.buf.free();
+         kept.deinit(gpa);
+     }
+-    // TF_DS_EXACT_RESUME: each kept state's tail positions [start, end) as this rank's own pass stashed them (rank 0
+-    // restores its own from the Snap; the frames carry neither, and both ranks' passes stash alike). Empty when off.
+-    var kept_tail: std.AutoHashMapUnmanaged(u64, [2]usize) = .empty;
+-    defer kept_tail.deinit(gpa);
+     var fk: FollowKept = .{ .gpa = gpa, .m = m, .kept = &kept, .seqs = &seqs };
+     defer fk.deinit();
+     if (spill) |sd| sd.attach(fk.family());
+@@ -2759,25 +2766,32 @@
+                 const end_keep = try r.int(u8) != 0; // (0178: this rank keeps its own extras with the state)
+                 if (s >= max_streams) return error.BadSlot;
+                 // TF_DS_EXACT_RESUME: a state's tail (the window rows of decoder input before its end) rides after it
+-                var b = try cuda.DeviceBuffer.alloc(m.ctx.d, m.snapBytes() + @max(if (m.exact_resume) m.tailBytes() else 0, if (m.endstate != null) m.endBytes() else 0) + (if (end_keep) m.endBytes() else 0));
+-                m.snapCopy(s, b.ptr, true) catch |err| {
+-                    b.free();
++                const base_bytes = m.snapBytes();
++                const tail_bytes = if (m.exact_resume and !end_keep) m.tailBytes() else 0;
++                const payload = FollowSnapshot.layout(base_bytes, tail_bytes, if (end_keep) m.endBytes() else 0, end_keep);
++                try kept.ensureUnusedCapacity(gpa, 1);
++                var sn: FollowSnapshot = .{ .buf = try cuda.DeviceBuffer.alloc(m.ctx.d, payload.bytes), .end_offset = payload.end };
++                m.snapCopy(s, sn.buf.ptr, true) catch |err| {
++                    sn.buf.free();
+                     refused(err);
+                     continue;
+                 };
+-                if (m.exact_resume) {
+-                    m.tailCopy(s, b.ptr + m.snapBytes(), true) catch |err| refused(err);
+-                    try kept_tail.put(gpa, id, .{ m.tails[s].start, m.tails[s].end });
++                if (tail_bytes != 0) {
++                    m.tailCopy(s, sn.buf.ptr + base_bytes, true) catch |err| {
++                        sn.buf.free();
++                        refused(err);
++                        continue;
++                    };
++                    sn.tail = .{ m.tails[s].start, m.tails[s].end };
+                 }
+-                if (end_keep) {
+-                    // (0178: this rank's drafter rows and head_g into the entry's extras)
+-                    m.endCopy(s, b.ptr + b.len - m.endBytes(), false) catch |err| {
+-                        b.free();
++                if (sn.end_offset) |offset| {
++                    m.endCopy(s, sn.buf.ptr + offset, false) catch |err| {
++                        sn.buf.free();
+                         refused(err);
+                         continue;
+                     };
+                 }
+-                try kept.put(gpa, id, b);
++                kept.putAssumeCapacity(id, sn);
+             },
+             .snap_restore => {
+                 const id = try r.int(u64);
+@@ -2786,35 +2800,26 @@
+                 const from: usize = @intCast(try r.int(u64));
+                 const to: usize = @intCast(try r.int(u64));
+                 const at: usize = @intCast(try r.int(u64));
+-                const b = kept.get(id) orelse return error.UnknownSnapshot; // rank 0 restores only states both ranks keep
++                const sn = kept.get(id) orelse return error.UnknownSnapshot; // rank 0 restores only states both ranks keep
+                 if (from != to) {
+                     if (spill) |sd| sd.bump(to, to + at);
+                     m.copyExtent(from, to, at) catch |err| refused(err);
+                 }
+-                m.snapCopy(s, b.ptr, false) catch |err| refused(err);
+-                // TF_DS_EXACT_RESUME: the tail back into the slot's ring, and the pass resumes where the state stands
+-                if (m.exact_resume) {
+-                    m.tailCopy(s, b.ptr + m.snapBytes(), false) catch |err| refused(err);
+-                    // its positions as at the keep (tailCopy clears them): without them tailPre finds the resume's
+-                    // prepend uncovered here while rank 0 runs it, and the ranks' collectives part
+-                    if (kept_tail.get(id)) |se| {
+-                        m.tails[s].start = se[0];
+-                        m.tails[s].end = se[1];
+-                    }
++                m.snapCopy(s, sn.buf.ptr, false) catch |err| refused(err);
++                if (sn.tail) |positions| {
++                    m.tailCopy(s, sn.buf.ptr + m.snapBytes(), false) catch |err| refused(err);
++                    m.tails[s].start = positions[0];
++                    m.tails[s].end = positions[1];
+                     m.tails[s].resume_at = at;
+                 }
+-                // 0178 (TF_DS_PROMPT_ENDSTATE): the extras (the drafter stages' rows and head_g) when the state has
+-                // them - the entry's size says so
+-                const extra = b.len - m.snapBytes() - (if (m.exact_resume) m.tailBytes() else 0);
+-                if (extra > 0) m.endCopy(s, b.ptr + b.len - extra, true) catch |err| refused(err);
++                if (sn.end_offset) |offset| m.restoreEnd(s, sn.buf.ptr + offset, at) catch |err| refused(err);
+             },
+             .snap_drop => {
+                 const id = try r.int(u64);
+                 if (spill) |sd| sd.dropSnap(id); // its write guarded, its small-state capture done, before the free
+-                _ = kept_tail.remove(id);
+                 if (kept.fetchRemove(id)) |kv| {
+-                    var b = kv.value;
+-                    b.free();
++                    var sn = kv.value;
++                    sn.buf.free();
+                 }
+             },
+             // TF_DS_SPEC_SAMPLE: the round's gather rank 0 issues next (Lanes.speculateRound), the same launches here; a
+@@ -3897,3 +3902,23 @@
+     try std.testing.expect(ln.usable(&end, 8 * c)); // the identical one needs no switch (0178's own)
+     try std.testing.expect(!ln.usable(&end, 9 * c)); // the continuation does
+ }
++
++
++test "identical prompt follower snapshots restore their own end bytes and no spill or grid padding" {
++    const t = std.testing;
++    const ordinary = FollowSnapshot.layout(16, 0, 8, false);
++    const exact_tail = FollowSnapshot.layout(16, 5, 8, false);
++    const end = FollowSnapshot.layout(16, 5, 8, true);
++    try t.expectEqual(@as(usize, 16), ordinary.bytes);
++    try t.expectEqual(@as(?usize, null), ordinary.end);
++    try t.expectEqual(@as(usize, 21), exact_tail.bytes);
++    try t.expectEqual(@as(?usize, null), exact_tail.end);
++    try t.expectEqual(@as(usize, 24), end.bytes);
++    var image: [32]u8 = @splat(0xec);
++    const expected = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3, 11, 22, 33, 44 };
++    image[end.end.?..][0..8].* = expected;
++    try t.expectEqualSlices(u8, &expected, image[end.bytes - expected.len ..][0..8]);
++    try t.expectEqual(@as(u8, 0xec), image[end.bytes]);
++    const from_spill: FollowSnapshot = .{ .buf = undefined };
++    try t.expect(from_spill.tail == null and from_spill.end_offset == null);
++}

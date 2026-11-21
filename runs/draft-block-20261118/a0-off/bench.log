@@ -1,0 +1,32 @@
+[decode]
+  decode  prompt      38 (cached 0) ttft    0.16s prefill    242.8 tok/s | out  256 decode   63.3 tok/s
+  decode  prompt      38 (cached 0) ttft    0.16s prefill    242.6 tok/s | out  256 decode   62.9 tok/s
+  decode  prompt      38 (cached 0) ttft    0.16s prefill    244.0 tok/s | out  256 decode   63.5 tok/s
+[multi]
+  multi x1 rep0: aggregate 63.4 tok/s, mean per-stream 63.4, errors 0
+  multi x1 rep1: aggregate 63.0 tok/s, mean per-stream 63.0, errors 0
+  multi x1 rep2: aggregate 66.5 tok/s, mean per-stream 66.5, errors 0
+  multi x2 rep0: aggregate 87.9 tok/s, mean per-stream 45.2, errors 0
+  multi x2 rep1: aggregate 88.0 tok/s, mean per-stream 45.3, errors 0
+  multi x2 rep2: aggregate 93.6 tok/s, mean per-stream 47.8, errors 0
+  multi x4 rep0: aggregate 124.0 tok/s, mean per-stream 32.5, errors 0
+  multi x4 rep1: aggregate 118.2 tok/s, mean per-stream 31.5, errors 0
+  multi x4 rep2: aggregate 120.9 tok/s, mean per-stream 31.8, errors 0
+  multi x8 rep0: aggregate 160.9 tok/s, mean per-stream 21.6, errors 0
+  multi x8 rep1: aggregate 162.9 tok/s, mean per-stream 21.9, errors 0
+  multi x8 rep2: aggregate 160.6 tok/s, mean per-stream 21.5, errors 0
+
+summary (medians):
+  decode.tok_s                         63.28
+  decode.ttft_s                        0.16
+  decode.accepted_over_drafted         None
+  multi.1.aggregate_tok_s              63.37
+  multi.1.per_stream_tok_s             63.37
+  multi.2.aggregate_tok_s              88.05
+  multi.2.per_stream_tok_s             45.28
+  multi.4.aggregate_tok_s              120.89
+  multi.4.per_stream_tok_s             31.76
+  multi.8.aggregate_tok_s              160.92
+  multi.8.per_stream_tok_s             21.61
+  errors                               0
+wrote runs/draft-block-20261118/a0-off/bench.json

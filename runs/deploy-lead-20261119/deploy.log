@@ -1,0 +1,15 @@
+appended: TF_DS_ENGRAM_LEAD=1 (.env now 42 lines)
+smoke ok: OK
+rank0 tensorfold-dsv41:exl3-tp2-ea522d353626 started 2026-11-19T02:22:36.706483555Z
+TENSORFOLD_TOKEN_CACHE_MB=32 TF_DS_DRAFT_BLOCK=6 TF_DS_ENGRAM_AIO=1 TF_DS_ENGRAM_LEAD=1 TF_DS_KV_SHARD=1 TF_DS_PREFILL_SLICE=5 TF_DS_SPILL_GIB=180 TF_DS_STREAMS=8 TF_DS_T13_EXPERT_PRUNE=1 TF_DS_T26_KEYED_DRAFT=1 
+/spill /home/colum/.cache/dsv41-spill
+ each Engram layer's prompt rows read a chunk ahead
+rank1 tensorfold-dsv41:exl3-tp2-ea522d353626 started 2026-11-19T02:22:36.464674241Z
+TENSORFOLD_TOKEN_CACHE_MB=32 TF_DS_DRAFT_BLOCK=6 TF_DS_ENGRAM_LEAD=1 TF_DS_KV_SHARD=1 TF_DS_PREFILL_SLICE=5 TF_DS_SPILL_GIB=180 TF_DS_STREAMS=8 TF_DS_T13_EXPERT_PRUNE=1 TF_DS_T26_KEYED_DRAFT=1 
+/spill /home/colum/.cache/dsv41-spill
+ each Engram layer's prompt rows read a chunk ahead
+the lead banner is not on at both ranks
+
+Note: deploy.sh stopped at its banner check (it cut the banner text away before matching). The restart had already
+succeeded; the banner check, validation and the 32K prefill check were then run by hand (banners.txt, validate.log,
+prefill_check.txt). The check in deploy.sh is corrected.

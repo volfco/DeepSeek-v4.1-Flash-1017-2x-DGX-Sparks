@@ -1,0 +1,105 @@
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -714,7 +714,7 @@
+ /// TF_DS_KV_SHARD alone) nothing persists, so a missing recipe identity reads "unset" (Extra.envFor).
+ pub fn rankExchange(gpa: std.mem.Allocator, io: std.Io, mo: model.Options, m: *model.Model, s: ?spill_tier.Settings, layout: *const model.Model.spill.StateLayout) !@import("fingerprint.zig").Exchange {
+     const envp = try rank_identity.Extra.envFor(getenvFn, s != null);
+-    var fbuf: [256]u8 = undefined;
++    var fbuf: [320]u8 = undefined;
+     const image_cache = spill_tier.Settings.imageCache(getenv("TF_DS_IMAGE_CACHE"));
+     const edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")); // (the marks gate: the fingerprint's reading)
+     const keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")); // (the victim order gate: the fingerprint's reading)
+@@ -723,7 +723,7 @@
+     // TF_DS_KV_SHARD's switches every rank's planner takes (carry, twins) and its part size: agreed in `features`
+     const kvs: kv_lanes.Settings = if (m.kvs != null) try kv_lanes.Settings.fromEnv(getenvFn) else .{ .carry = false, .twins = false };
+     const part_rows: u64 = if (m.caches.shard) |x| x.part else 0;
+-    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .spill_shared_min = if (s) |x| x.shared_min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .keep_protect = keep_protect, .exact_resume = exact_resume, .spec_sample = spec_sample, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
++    const features = try rank_identity.featureString(&fbuf, .{ .spill = s != null, .spill_min_tokens = if (s) |x| x.min_tokens else 0, .spill_shared_min = if (s) |x| x.shared_min_tokens else 0, .kv_shard = m.kvs != null, .kv_carry = kvs.carry, .twins = kvs.twins, .part_rows = part_rows, .image_cache = image_cache, .edit_mark = edit_mark, .keep_protect = keep_protect, .exact_resume = exact_resume, .spec_sample = spec_sample, .bf16_partials = m.eng.bf16_partials, .streams = @intCast(m.streams), .round_rows = @intCast(m.eng.round_rows), .pool = m.pool_cap, .drafts = m.drafting() });
+     var pbuf: [model.Model.spill.StateLayout.max_encoded]u8 = undefined;
+     const lp = try rank_identity.layoutPart(layout, m.world, &pbuf);
+     var arena = std.heap.ArenaAllocator.init(gpa);
+@@ -788,7 +788,7 @@
+ /// (Lanes.startKv) both post through it, so one Tracker orders every frame of the pair. Nothing with both off (no
+ /// frame, no fingerprint: the served bytes unchanged) or one rank.
+ pub fn openPair(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, ln: *lanes_mod.Lanes, mo: model.Options, s: ?spill_tier.Settings) !void {
+-    // TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE: the pair compares them first (nothing is sent with both off)
++    // Compare the pair switches before any shared operation. An all-off pair sends no switches frame.
+     if (m.world >= 2) try ln.sendSwitches();
+     if (ln.rw != null or m.world < 2 or (s == null and m.kvs == null)) return;
+     if (s != null and m.world != 2) return error.SpillNeedsTwoRanks;
+@@ -900,7 +900,7 @@
+         error.BadRoundRows => "TF_DS_ROUND_ROWS: a round's rows at most, 16 .. 48",
+         error.SpecAndKeyedDraft => ops_mod.spec_keyed_why,
+         error.SpecSampleWorld => "TF_DS_SPEC_SAMPLE runs on the TP2 pair (or one rank) with the drafter on: not on the four-node lane or a 2D drafter head; unset it",
+-        error.PairSwitchesDiffer => "TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE differ between the ranks: set them alike on every rank",
++        error.PairSwitchesDiffer => "TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE / TF_DS_BF16_PARTIALS differ between the ranks: set them alike on every rank",
+         error.BadGraphCap => "TF_DS_GRAPH_CAP: the captured CUDA graphs kept at most, a count (0: all)",
+         error.BadPlainRows => "TF_DS_PLAIN_ROWS: the rows a mixed pack's plain linear runs over, 0 (the round's own) or a count up to TF_DS_ROUND_ROWS",
+         error.BadStreams => "TF_DS_STREAMS: the pool's streams, 1 .. 16",
+--- a/zig/src/families/dsv41/rank_identity.zig
++++ b/zig/src/families/dsv41/rank_identity.zig
+@@ -135,6 +135,7 @@
+     keep_protect: bool = false, // TF_DS_KEEP_PROTECT (named in the string only when on)
+     exact_resume: bool = false, // TF_DS_EXACT_RESUME (named in the string only when on)
+     spec_sample: bool = false, // TF_DS_SPEC_SAMPLE (named in the string only when on)
++    bf16_partials: bool = false, // The effective prompt precision changes stored activations.
+     streams: u32,
+     round_rows: u32,
+     pool: u64,
+@@ -158,6 +159,7 @@
+     if (f.spec_sample) n += (try std.fmt.bufPrint(buf[n..], "spec_sample=1;", .{})).len;
+     // a keep's smallest size on every rank's store: an off peer would refuse the shared keeps rank 0 queues
+     if (f.spill_shared_min > 0) n += (try std.fmt.bufPrint(buf[n..], "spill_shared_min={d};", .{f.spill_shared_min})).len;
++    if (f.bf16_partials) n += (try std.fmt.bufPrint(buf[n..], "bf16_partials=1;", .{})).len;
+     return buf[0..n];
+ }
+ 
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -824,10 +824,10 @@
+         if (try self.begin(kind)) try self.flush();
+     }
+ 
+-    /// TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE: both ranks must run them alike, and the spill/KV hello that names them
++    /// Both ranks must use the same resume, sampling and prompt-precision modes. The spill/KV hello that names them
+     /// in the features never runs with them alone (openPair returns before it). Rank 0 sends its bits once, first, only
+     /// when one is on (an off pair's frames are the base ones); followPair compares them with its own and ends on a
+-    /// difference, and a follower with one on refuses any other first frame (a head with both off).
++    /// difference, and a follower with one on refuses any other first frame (a head with all off).
+     pub fn sendSwitches(self: *Lanes) !void {
+         if (self.switches_sent) return;
+         self.switches_sent = true;
+@@ -2526,9 +2526,10 @@
+     return followPair(gpa, m, spill, null);
+ }
+ 
+-/// The both-rank switches sendSwitches compares: bit 0 TF_DS_EXACT_RESUME, bit 1 TF_DS_SPEC_SAMPLE.
++/// Both-rank switches: bit 0 exact resume, bit 1 speculative sampling, bit 2 BF16 prompt partials.
+ fn pairSwitches(m: *const Model) u8 {
+-    return @as(u8, @intFromBool(m.exact_resume)) | (@as(u8, @intFromBool(m.ops.spec)) << 1);
++    return @as(u8, @intFromBool(m.exact_resume)) | (@as(u8, @intFromBool(m.ops.spec)) << 1) |
++        (@as(u8, @intFromBool(m.eng.bf16_partials)) << 2);
+ }
+ 
+ /// followWith, with `fx` for the pair's one rank_wire Follower's hello instead of its default: the spill side's full
+@@ -2615,9 +2616,9 @@
+             16 => .spec_q,
+             else => return error.BadFrame,
+         };
+-        // TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE: rank 0 sends its bits first when one is on (Lanes.sendSwitches)
++        // Rank 0 sends its bits first when any pair switch is on (Lanes.sendSwitches).
+         if (kind != .switches and !switches_seen and own_switches != 0) {
+-            std.log.err("dsv41: this rank runs TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE ({d}) and rank 0 runs neither: set them alike on every rank", .{own_switches});
++            std.log.err("dsv41: this rank runs TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE/TF_DS_BF16_PARTIALS ({d}) and rank 0 sent no switches: set them alike on every rank", .{own_switches});
+             return error.PairSwitchesDiffer;
+         }
+         switches_seen = true;
+@@ -2850,7 +2851,7 @@
+             .switches => {
+                 const theirs = try r.int(u8);
+                 if (theirs != own_switches) {
+-                    std.log.err("dsv41: rank 0's TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE bits ({d}) differ from this rank's ({d}): set them alike on every rank", .{ theirs, own_switches });
++                    std.log.err("dsv41: rank 0's TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE/TF_DS_BF16_PARTIALS bits ({d}) differ from this rank's ({d}): set them alike on every rank", .{ theirs, own_switches });
+                     return error.PairSwitchesDiffer;
+                 }
+             },

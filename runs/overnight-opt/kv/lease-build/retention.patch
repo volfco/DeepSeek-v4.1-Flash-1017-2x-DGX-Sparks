@@ -1,0 +1,181 @@
+--- a/zig/src/core/spill/store.zig
++++ b/zig/src/core/spill/store.zig
+@@ -71,6 +71,8 @@
+     limits: format.Limits,
+     /// Bytes this rank's store may hold.
+     cap_bytes: u64,
++    /// Experimental whole-point upper bound for one metadata-only retention promise. Zero disables leases.
++    bench_lease_bytes: u64 = 0,
+     /// No write leaves less than this free on the store's file system.
+     floor_bytes: u64 = 50 << 30,
+     /// A conversation holding more than this fraction of the cap trims its own old turns and forks first (0: off).
+@@ -360,6 +362,49 @@
+ 
+ const RTask = struct { job: *ReadJob, index: ?u32, slot: Slot };
+ 
++pub const LeasePoint = struct {
++    compat: Digest,
++    key: Digest,
++    at: u32,
++    part: ?u32,
++    rank: u32,
++};
++
++pub const LeaseGrant = struct {
++    point: LeasePoint,
++    incarnation: [16]u8,
++    serial: u64,
++    request_nonce: u64,
++    bytes: u64,
++    ttl_ms: u32,
++};
++
++/// A head may consult this local view only in the same established rank agreement. Receiving a
++/// new agreement, an authoritative forget, failed restore or disconnect clears that observation.
++pub const LeaseView = struct {
++    grant: LeaseGrant,
++    until_ns: i96,
++
++    /// Start the conservative head deadline when the request is sent. A late reply earns no extension.
++    pub fn fromReply(grant: LeaseGrant, request_nonce: u64, sent_ns: i96, received_ns: i96) ?LeaseView {
++        const early = sent_ns + @divTrunc(@as(i96, grant.ttl_ms) * std.time.ns_per_ms, 2);
++        if (request_nonce == 0 or request_nonce != grant.request_nonce or received_ns < sent_ns or received_ns >= early) return null;
++        return .{ .grant = grant, .until_ns = early };
++    }
++
++    pub fn permits(view: LeaseView, live: ?[16]u8, point: LeasePoint, now_ns: i96) bool {
++        const incarnation = live orelse return false;
++        return now_ns < view.until_ns and std.mem.eql(u8, &incarnation, &view.grant.incarnation) and
++            std.meta.eql(view.grant.point, point);
++    }
++};
++
++pub const LeaseSlot = struct {
++    grant: LeaseGrant,
++    until_ns: i96,
++    deferred_turn: bool = false,
++};
++
+ pub const Store = struct {
+     gpa: Allocator,
+     io: std.Io,
+@@ -388,6 +433,9 @@
+     inflight: std.AutoHashMapUnmanaged(Digest, JobId) = .empty,
+     parent: std.AutoHashMapUnmanaged(Digest, ?Digest) = .empty,
+     reading: std.AutoHashMapUnmanaged(Digest, u32) = .empty,
++    bench_incarnation: [16]u8 = @splat(0),
++    bench_serial: u64 = 0,
++    bench_lease: ?LeaseSlot = null,
+     waiting: std.AutoHashMapUnmanaged(Digest, *WriteJob) = .empty,
+     jobs_by_id: std.AutoHashMapUnmanaged(JobId, *WriteJob) = .empty,
+     fifo: std.ArrayList(*WriteJob) = .empty, // jobs with blocks left to stage, oldest first
+@@ -435,6 +483,7 @@
+         };
+         s.writer = fsio.Writer.init(&s.hooks, cfg.direct);
+         errdefer s.destroy();
++        if (cfg.bench_lease_bytes != 0) try io.randomSecure(&s.bench_incarnation);
+         s.slots = try slots_mod.Slots.init(gpa, cfg.staging, s.block_slot, s.small_slot);
+         s.root_fd = try fsio.openDir(cfg.root);
+         var nb: [64]u8 = undefined;
+@@ -899,6 +948,9 @@
+     /// A point goes from the index (its files queued for the writer), then the blocks only it named.
+     fn remove(s: *Store, key: Digest, comptime why: []const u8) void {
+         const kv = s.points.fetchRemove(key) orelse return;
++        if (s.bench_lease) |lease| {
++            if (std.mem.eql(u8, &lease.grant.point.key, &key)) s.bench_lease = null;
++        }
+         const p = kv.value;
+         s.ref(p.blocks, -1);
+         const up = if (s.parent.fetchRemove(key)) |e| e.value else null;
+@@ -1183,7 +1235,7 @@
+         for (v.items) |x| {
+             if (s.stored_bytes <= target) return;
+             if (protect != null and std.mem.eql(u8, &protect.?, &x.key)) continue;
+-            if (!s.points.contains(x.key) or s.reading.contains(x.key)) continue;
++            if (!s.points.contains(x.key) or s.reading.contains(x.key) or s.leaseProtects(x.key, false)) continue;
+             s.removeWhy(x.key, x.why);
+         }
+     }
+@@ -1213,7 +1265,7 @@
+                     continue;
+                 }
+             }
+-            if (!s.reading.contains(k)) s.remove(k, "trimmed_turns");
++            if (!s.reading.contains(k) and !s.leaseProtects(k, true)) s.remove(k, "trimmed_turns");
+         }
+     }
+ 
+@@ -1283,7 +1335,7 @@
+         defer v.deinit(gpa);
+         for (v.items) |x| {
+             if (s.stored_bytes <= target) break;
+-            if (s.reading.contains(x.key) or !s.points.contains(x.key)) continue;
++            if (s.reading.contains(x.key) or s.leaseProtects(x.key, false) or !s.points.contains(x.key)) continue;
+             s.removeWhy(x.key, x.why);
+         }
+     }
+@@ -1543,6 +1595,7 @@
+     pub fn stage(s: *Store, out: []StageReq) usize {
+         s.lockS();
+         defer s.unlockS();
++        if (s.bench_lease != null) s.expireLeaseLocked(std.Io.Clock.awake.now(s.io).toNanoseconds());
+         var n: usize = 0;
+         var i: usize = 0;
+         while (i < s.fifo.items.len and n < out.len) {
+@@ -2344,6 +2397,56 @@
+     fn complete_(s: *Store, p: *const Point) bool {
+         for (p.blocks) |b| if (!s.have.contains(b.name)) return false;
+         return true;
++    }
++
++    /// Called under the store lock by the three ordinary eviction paths. An integrity forget remains authoritative.
++    fn leaseProtects(s: *Store, key: Digest, turn: bool) bool {
++        const lease = if (s.bench_lease) |*v| v else return false;
++        if (!std.mem.eql(u8, &lease.grant.point.key, &key)) return false;
++        if (std.Io.Clock.awake.now(s.io).toNanoseconds() >= lease.until_ns) return false;
++        if (turn) lease.deferred_turn = true;
++        return true;
++    }
++
++    fn expireLeaseLocked(s: *Store, now_ns: i96) void {
++        const lease = s.bench_lease orelse return;
++        if (now_ns < lease.until_ns) return;
++        const key = lease.grant.point.key;
++        if (lease.deferred_turn) {
++            if (s.points.get(key)) |p| {
++                // Do not start another promise until a current read releases the previously protected turn.
++                if (!p.shared and s.reading.contains(key)) return;
++                if (!p.shared) s.remove(key, "trimmed_turns");
++            }
++        }
++        s.bench_lease = null;
++    }
++
++    pub fn benchExpireLease(s: *Store) void {
++        s.lockS();
++        defer s.unlockS();
++        s.expireLeaseLocked(std.Io.Clock.awake.now(s.io).toNanoseconds());
++    }
++
++    /// One unrenewable grant with a fixed 1 s upper lifetime. It consumes no restore or staging slot.
++    /// The byte charge counts each block reference even if another point shares its data or inode.
++    pub fn benchGrantLease(s: *Store, point: LeasePoint, ttl_ms: u32, request_nonce: u64) ?LeaseGrant {
++        s.lockS();
++        defer s.unlockS();
++        const now_ns = std.Io.Clock.awake.now(s.io).toNanoseconds();
++        s.expireLeaseLocked(now_ns);
++        if (request_nonce == 0 or s.bench_lease != null or ttl_ms == 0 or ttl_ms > 1000 or s.cfg.bench_lease_bytes == 0) return null;
++        if (point.rank != s.cfg.rank or !std.mem.eql(u8, &point.compat, &s.cfg.compat)) return null;
++        const p = s.points.get(point.key) orelse return null;
++        if (p.at != point.at or p.lineage.part != point.part or !s.complete_(p)) return null;
++        var upper = p.files;
++        for (p.blocks) |block| upper +|= block.bytes;
++        if (upper > @min(s.cfg.cap_bytes, s.cfg.bench_lease_bytes)) return null;
++        s.bench_serial = std.math.add(u64, s.bench_serial, 1) catch return null;
++        const grant: LeaseGrant = .{ .point = point, .incarnation = s.bench_incarnation,
++            .serial = s.bench_serial, .request_nonce = request_nonce, .bytes = upper, .ttl_ms = ttl_ms };
++        s.bench_lease = .{ .grant = grant, .until_ns = now_ns + @as(i96, ttl_ms) * std.time.ns_per_ms };
++        return grant;
+     }
+ 
+     /// Whether this rank holds `key` complete (manifest, ids, small state, every block): what a rank answers to

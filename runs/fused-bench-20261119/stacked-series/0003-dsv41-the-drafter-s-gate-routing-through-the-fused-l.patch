@@ -1,0 +1,90 @@
+From a6d2623462b44e428cca31c4338f2021488cd55d Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Wed, 18 Nov 2026 23:04:58 -0800
+Subject: [PATCH 3/6] dsv41: the drafter's gate+routing through the fused
+ launch (TF_DS_FUSED_ROUTE)
+
+The DSpark drafter's moe() runs through the same fused route launch as the main model when
+TF_DS_FUSED_ROUTE is on and the bounds hold: a decode-sized pass (R <= decode_rows) takes
+fuseOk's gate path (rowmmGate and route replaced, picks identical), a wider pass keeps cuBLAS
+for the logits and takes fuseOkLogits' kc == 0 routing. do_prune=0, dead=0, stats=0, scratch=null,
+like the prompt path: the drafter has no T13 prune and no 0177 dead rows. Off or out of bounds:
+the rowmmGate/route and toF32/xwT/route paths, byte-for-byte unchanged. The drafter runs per
+node and has no two flag of its own; fuseOk gets the engine's (e.two != null), the same refusal
+the main model makes on a 2D node, so 2D behavior is unchanged. UNVERIFIED-BUILD: gated on the
+exact suite on a Spark, like 0193/0194.
+---
+ zig/src/families/dsv41/draft.zig | 35 +++++++++++++++++++++++++++++---
+ 1 file changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/zig/src/families/dsv41/draft.zig b/zig/src/families/dsv41/draft.zig
+index 6ff45bd..083389c 100644
+--- a/zig/src/families/dsv41/draft.zig
++++ b/zig/src/families/dsv41/draft.zig
+@@ -26,6 +26,7 @@ const markov_tokens = @import("markov_tokens.zig");
+ const draft2d = @import("draft2d.zig");
+ const lora = @import("lora.zig");
+ const sampling = @import("sampling.zig");
++const moe_route = @import("moe_route.zig");
+ 
+ const ops_mod = @import("ops.zig");
+ 
+@@ -795,17 +796,31 @@ pub const Drafter = struct {
+         const c = e.c;
+         const lay = dr.ds.blocks[j];
+         const ne: usize = lay.experts.count - 1;
++        const sl = dr.slots_moe;
++        const shared_id = lay.experts.count - 1;
+         var kc: usize = 0;
++        // TF_DS_FUSED_ROUTE (the main model's switch, off by default): the gate's chunk sums, the top-k routing and
++        // the shared expert's slot in one launch (0193/0194's kernel). The drafter runs per node and has no prune and
++        // no dead rows; past decode_rows the gate is cuBLAS's and the routing still fuses (kc == 0).
+         // TF_DS_DRAFT_BLOCK: the kit's drafter gates are the row counts its capture ran (a five-row block a stream:
+         // RB 5, 10, 15); a pass of other rows takes the wide passes' cuBLAS gate, which every row count has
+-        if (R <= tri.decode_rows and tri_norm.rowmmGateFits(e.t, dr.x, c.hidden, lay.gate_w, dr.gl, R, c.hidden, ne)) {
++        const fused_ok = moe_route.fuseOk(e.ops.fused_route, e.two != null, R, dr.topk, ne, sl);
++        const fused_logits = moe_route.fuseOkLogits(e.ops.fused_route, e.two != null, R, dr.topk, ne, sl);
++        if (R <= tri.decode_rows and fused_ok) {
++            try e.ops.moeRoute(e.s, dr.x, c.hidden, lay.gate_w, 0, lay.gate_b, dr.pick, dr.mw, 0, 0, R, ne, dr.topk, sl, c.hidden / 256, c.hidden, shared_id, c.routed_scaling, null, null);
++        } else if (R <= tri.decode_rows and tri_norm.rowmmGateFits(e.t, dr.x, c.hidden, lay.gate_w, dr.gl, R, c.hidden, ne)) {
+             kc = try tri_norm.rowmmGate(e.t, dr.x, c.hidden, lay.gate_w, dr.gl, R, c.hidden, ne);
++            try tri_norm.route(e.t, dr.gl, kc, lay.gate_b, dr.topk, c.routed_scaling, shared_id, dr.pick, dr.mw, R, ne, sl);
+         } else {
+-            // x.float() @ gate_w.float().t() through cuBLAS, then the plain routing
++            // x.float() @ gate_w.float().t() through cuBLAS, then the routing
+             try e.ops.toF32(e.s, dr.x, dr.xf, R * c.hidden);
+             try e.blas.xwT(dr.xf, dr.gate_f[j], dr.gl, R, c.hidden, ne);
++            if (fused_logits) {
++                try e.ops.moeRoute(e.s, 0, 0, 0, dr.gl, lay.gate_b, dr.pick, dr.mw, 0, 0, R, ne, dr.topk, sl, 0, c.hidden, shared_id, c.routed_scaling, null, null);
++            } else {
++                try tri_norm.route(e.t, dr.gl, kc, lay.gate_b, dr.topk, c.routed_scaling, shared_id, dr.pick, dr.mw, R, ne, sl);
++            }
+         }
+-        try tri_norm.route(e.t, dr.gl, kc, lay.gate_b, dr.topk, c.routed_scaling, lay.experts.count - 1, dr.pick, dr.mw, R, ne, dr.slots_moe);
+         // routed(): fewer than EXACT_ROWS rows take the decode window's fused path, more the chunk's (13+ streams)
+         if (R < exl3_experts.exact_rows) return exl3_experts.decode(e.ex, e.s, lay.experts, dr.xsd, dr.x, c.hidden, dr.pick, dr.mw, dr.pm, R, c.swiglu_limit, null);
+         try exl3_experts.prompt(e.ex, e.s, lay.experts, dr.xs, dr.x, c.hidden, dr.pick, dr.mw, dr.pm, R, c.swiglu_limit);
+@@ -859,6 +874,20 @@ pub fn chooseK(conf: []const f32, kmax: usize, live: usize, drafts: usize, round
+     return best;
+ }
+ 
++test "the served drafter's gate and routing fit the fused launch's bounds (TF_DS_FUSED_ROUTE)" {
++    // the served DSpark shape: draft_top_k 3, slots 4 (3 routed + the shared expert), 128 routed + 1 shared; a pass's
++    // rows up to max_rows (16 streams x 5 drafts), so past decode_rows the fixture's bounds are fuseOkLogits'
++    const ne = 128;
++    try std.testing.expect(moe_route.fuseOk(true, false, tri.decode_rows, 3, ne, 4));
++    try std.testing.expect(moe_route.fuseOk(true, false, 1, 3, ne, 4));
++    try std.testing.expect(!moe_route.fuseOk(true, false, tri.decode_rows + 1, 3, ne, 4)); // decode_rows split: logits path
++    try std.testing.expect(moe_route.fuseOkLogits(true, false, 80, 3, ne, 4));
++    try std.testing.expect(!moe_route.fuseOk(true, true, 4, 3, ne, 4)); // a 2D node refuses the fusion
++    try std.testing.expect(!moe_route.fuseOkLogits(true, true, 4, 3, ne, 4));
++    try std.testing.expect(!moe_route.fuseOk(false, false, 4, 3, ne, 4)); // the switch off
++    try std.testing.expect(!moe_route.fuseOkLogits(false, false, 4, 3, ne, 4));
++}
++
+ test "draft depths and pass steps as multi.py takes them" {
+     // 16-row rounds, 5 drafts: 5 alone or beside one other stream, 3 at three or four
+     try std.testing.expectEqual(@as(usize, 5), depth(1, 5, 16));
+-- 
+2.56.1
+

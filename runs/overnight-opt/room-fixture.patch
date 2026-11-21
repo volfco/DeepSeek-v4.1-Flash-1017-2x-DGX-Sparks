@@ -1,0 +1,33 @@
+--- a/zig/src/core/lane_host_robust_test.zig
++++ b/zig/src/core/lane_host_robust_test.zig
+@@ -141,17 +141,27 @@
+     const along = [_]u32{ 8, 6, 7, 5, 3, 0, 9, 2, 1, 4, 4, 4 };
+     var a: Box = .{};
+     defer a.deinit();
+-    const areq: Request = .{ .prompt = &along, .max_tokens = 100000 };
+-    try e.submit(1, &areq, a.sink());
+-    while (a.count() == 0) std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+     r.tier.refuse_if = .{ .ctx = &r.core, .check = Live.check };
+     r.tier.refuse_err = error.ContextFull;
+     r.tier.refuse = 1 << 20;
+     _ = try r.point(&t2, 8);
++    // Only cancellation should release this room. A fast fake can emit 100,000 tokens
++    // before the host's real one-second retry. The stream grows as it actually emits.
++    const areq: Request = .{ .prompt = &along, .max_tokens = std.math.maxInt(u32) };
++    try e.submit(1, &areq, a.sink());
++    errdefer {
++        e.cancel(1);
++        _ = a.wait();
++    }
++    while (a.count() == 0) std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+     var b: Box = .{};
+     defer b.deinit();
+     const req: Request = .{ .prompt = &t2, .max_tokens = 6, .history_len = 14 };
+     try e.submit(2, &req, b.sink());
++    errdefer {
++        e.cancel(2);
++        _ = b.wait();
++    }
+     // refused while the stream decodes: asked again (at most each second, or when a stream ends), never prefilled
+     var asked = false;
+     for (0..5000) |_| {

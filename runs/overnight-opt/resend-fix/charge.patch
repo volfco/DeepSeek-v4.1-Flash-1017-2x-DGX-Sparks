@@ -1,0 +1,269 @@
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -16,14 +16,17 @@
+     vtable: *const VTable,
+ 
+     pub const VTable = struct {
+-        /// The most new storage `save` takes at `at` tokens (checked against the budget before any copy).
++        /// Default reservation for a live save at `at` or a durable point with unknown destination bytes.
+         bytes: *const fn (ptr: *anyopaque, at: u32) u64,
++        /// Optional live-save estimate when a family's payload depends on whether this is the prompt end.
++        /// The context-free bytes function still sizes unknown-cost durable restore destinations.
++        keep_bytes: ?*const fn (ptr: *anyopaque, at: u32, prompt_len: usize) u64 = null,
+         /// Copy the live state after `at` prompt tokens into new storage; `owner` is the lane core's stream (null: one stream).
+         save: *const fn (ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!Saved,
+         /// Make the live state `saved`'s: the next prompt chunk starts at its position.
+         restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, saved: Saved) anyerror!void,
+         drop: *const fn (ptr: *anyopaque, saved: Saved) void,
+-        /// The storage a kept state holds: new storage up to `bytes`, or the spare storage it took (null: `bytes`).
++        /// The storage a kept state holds, at most its live-save reservation, or the spare storage it took (null: reservation).
+         charged: ?*const fn (ptr: *anyopaque, saved: Saved) u64 = null,
+         /// Free storage the family keeps for later saves, inside the budget (null: none).
+         spare: ?*const fn (ptr: *anyopaque) u64 = null,
+@@ -1001,7 +1004,7 @@
+                 .stale => s.counts.misses_stale += 1,
+             };
+         }
+-        const marks_ = try s.fitting(a, try s.marks(a, prompt, if (e) |x| x.at else 0, history_len, shared, starts, if (e) |x| x.last else &.{}));
++        const marks_ = try s.fitting(a, prompt.len, try s.marks(a, prompt, if (e) |x| x.at else 0, history_len, shared, starts, if (e) |x| x.last else &.{}));
+         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
+             // the mark as `marks` computed it (a chunk start, or the cut itself), and the state the family keeps for
+             // it (a chunk start, or the cut on the family's grid: dsv41 keeps an off-grid mark at its chunk end)
+@@ -1015,10 +1018,15 @@
+         return .{ .entry = e, .marks = marks_, .shared = shared_ats };
+     }
+ 
++    fn keepBytes(s: *const Store, at: u32, prompt_len: usize) u64 {
++        const family = s.family;
++        return if (family.vtable.keep_bytes) |f| f(family.ptr, at, prompt_len) else family.vtable.bytes(family.ptr, at);
++    }
++
+     /// Room for every state the pass keeps, made before it: a peer that mirrors the keeps hears of these evictions with the request.
+     fn reserve(s: *Store, prompt: []const u32, from: ?*Entry, marks_: []const u32) void {
+         var need: u64 = 0;
+-        for (marks_) |at| need += s.family.vtable.bytes(s.family.ptr, at);
++        for (marks_) |at| need += s.keepBytes(at, prompt.len);
+         while (s.held + s.restoring_bytes + need > s.budget) {
+             const i = s.victimBut(from, prompt, 0, &.{}) orelse return;
+             s.remove(i);
+@@ -1059,11 +1067,11 @@
+     }
+ 
+     /// The marks whose state the budget can hold (a new slice in `a`); the rest are refused now, so no pass, nor a peer, copies them.
+-    fn fitting(s: *Store, a: Allocator, marks_: []const u32) ![]const u32 {
++    fn fitting(s: *Store, a: Allocator, prompt_len: usize, marks_: []const u32) ![]const u32 {
+         defer a.free(marks_);
+         var out: std.ArrayList(u32) = .empty;
+         for (marks_) |at| {
+-            const bytes = s.family.vtable.bytes(s.family.ptr, at);
++            const bytes = s.keepBytes(at, prompt_len);
+             if (bytes <= s.budget) try out.append(a, at) else {
+                 s.counts.refused += 1;
+                 if (s.metrics) s.counts.refused_budget += 1;
+@@ -1154,7 +1162,7 @@
+             if (e.group == 0) e.group = info.group;
+             return true;
+         };
+-        const bytes = s.family.vtable.bytes(s.family.ptr, at);
++        const bytes = s.keepBytes(at, prompt.len);
+         if (bytes > s.budget) {
+             s.counts.refused += 1;
+             if (s.metrics) s.counts.refused_budget += 1;
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1938,9 +1938,15 @@
+     /// The prompt cache's Snapshots functions (native.zig hands them to the CUDA host).
+     pub fn snapBytesFn(ptr: *anyopaque, at: u32) u64 {
+         _ = at;
++        // Durable restores install only the base payload on both ranks.
++        return of(ptr).m.snapBytes();
++    }
++
++    pub fn snapKeepBytesFn(ptr: *anyopaque, at: u32, prompt_len: usize) u64 {
+         const m = of(ptr).m;
+-        // TF_DS_EXACT_RESUME: a state kept at the pass's end carries its tail (the prompt cache budgets it so)
+-        return m.snapBytes() + @max(if (m.exact_resume) m.tailBytes() else 0, if (m.endstate != null) m.endBytes() else 0);
++        const extra = if (m.endstate != null and at == prompt_len) m.endBytes() else if (m.exact_resume) m.tailBytes() else 0;
++        // The paired follower currently saves a tail on every non-end live save when exact_resume is on.
++        return m.snapBytes() + extra;
+     }
+ 
+     /// TF_DS_EXACT_RESUME: whether a keep at `at` is a chunk end this pass may take (null: refused), and whether it
+@@ -3922,3 +3928,37 @@
+     const from_spill: FollowSnapshot = .{ .buf = undefined };
+     try t.expect(from_spill.tail == null and from_spill.end_offset == null);
+ }
++
++test "full-end charging follows the real model geometry and the follower's live tail" {
++    var m: Model = undefined;
++    m.cfg.window = 128;
++    m.cfg.layers = 40;
++    m.cfg.head_dim = 512;
++    m.cfg.hc = 4;
++    m.cfg.hidden = 4096;
++    m.eng.c = &m.cfg;
++    m.exact_resume = false;
++    m.endstate = 2;
++    m.snap_trim = false;
++    var ring_planes: [40]u64 = @splat(0);
++    m.rings = &ring_planes;
++    m.caches = .{};
++    for ([_]usize{ 2, 8, 14 }) |i| {
++        m.caches.raw_kv[i] = 1;
++        m.caches.raw_score[i] = 2;
++    }
++    m.dpool = .{ .stages = 3, .slots = 8, .ring = 144, .hd = 512 };
++    m.vocab = 129280;
++    var lanes_: Lanes = .{ .gpa = std.testing.allocator, .m = &m, .peer = null };
++    try std.testing.expectEqual(6684672, Lanes.snapBytesFn(&lanes_, 8192));
++    try std.testing.expectEqual(6684672, Lanes.snapKeepBytesFn(&lanes_, 8192, 8459));
++    try std.testing.expectEqual(7644160, Lanes.snapKeepBytesFn(&lanes_, 8201, 8201));
++    m.exact_resume = true;
++    try std.testing.expectEqual(6684672, Lanes.snapBytesFn(&lanes_, 8192));
++    try std.testing.expectEqual(6684672 + m.tailBytes(), Lanes.snapKeepBytesFn(&lanes_, 8192, 8459));
++    try std.testing.expectEqual(7644160, Lanes.snapKeepBytesFn(&lanes_, 8201, 8201));
++    m.endstate = null;
++    try std.testing.expectEqual(6684672 + m.tailBytes(), Lanes.snapKeepBytesFn(&lanes_, 8200, 8201));
++    m.exact_resume = false;
++    try std.testing.expectEqual(6684672, Lanes.snapKeepBytesFn(&lanes_, 8192, 8459));
++}
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -269,6 +269,7 @@
+ pub const Snaps = struct {
+     ptr: *anyopaque,
+     bytes: *const fn (*anyopaque, u32) u64,
++    keep_bytes: ?*const fn (*anyopaque, u32, usize) u64 = null,
+     save: *const fn (*anyopaque, ?*anyopaque, u32) anyerror!*anyopaque,
+     restore: *const fn (*anyopaque, ?*anyopaque, *anyopaque) anyerror!void,
+     drop: *const fn (*anyopaque, *anyopaque) void,
+@@ -437,7 +438,7 @@
+     st.lanes.vision = st.vision;
+     // the pool is the model's (preallocated): a stream takes no device memory of its own
+     const L = lanes_mod.Lanes;
+-    var snaps: Snaps = .{ .ptr = &st.lanes, .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .share = L.snapShareFn, .tail = @intCast(st.m.cfg.window) };
++    var snaps: Snaps = .{ .ptr = &st.lanes, .bytes = L.snapBytesFn, .keep_bytes = L.snapKeepBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .share = L.snapShareFn, .tail = @intCast(st.m.cfg.window) };
+     const window: ?usize = if (st.m.kvs != null or st.m.pool_cap != o.context) st.m.window_cap else null;
+     var tier: ?spill_tier.prompt_cache.Tier = null;
+     if (o.spill != null) {
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -326,7 +326,7 @@
+     };
+     if (spill != null) {
+         const L = dsv41.lanes.Lanes;
+-        snap_vt = .{ .bytes = L.snapBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .usable = L.usableFn, .share = L.snapShareFn };
++        snap_vt = .{ .bytes = L.snapBytesFn, .keep_bytes = L.snapKeepBytesFn, .save = L.snapSaveFn, .restore = L.snapRestoreFn, .drop = L.snapDropFn, .usable = L.usableFn, .share = L.snapShareFn };
+         store_v = pcache.Store.init(gpa, .{ .ptr = &ln, .vtable = &snap_vt }, .{ .grid = dsv41.model.chunk_rows, .window = @intCast(m.cfg.window), .edit_mark = pcache.editMark(spillEnv("TF_DS_EDIT_MARK")), .keep_protect = pcache.keepProtect(if (std.c.getenv("TF_DS_KEEP_PROTECT")) |v| std.mem.span(v) else null), .exact = pcache.exactResume(if (std.c.getenv("TF_DS_EXACT_RESUME")) |v| std.mem.span(v) else null), .endstate = m.endstate != null, .end_limit = m.endstate orelse 0 }, @intFromFloat(cache_gib * (1 << 30)));
+         var seed: [4]u8 = undefined;
+         io.random(&seed);
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -480,6 +480,7 @@
+         if (want > 0) {
+             h.snap_vt = .{ .bytes = sn.bytes, .save = sn.save, .restore = sn.restore, .drop = sn.drop };
+             if (@hasField(@TypeOf(sn), "share")) h.snap_vt.share = sn.share;
++            if (@hasField(@TypeOf(sn), "keep_bytes")) h.snap_vt.keep_bytes = sn.keep_bytes;
+             h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = sn.ptr, .vtable = &h.snap_vt }, .{ .tail = if (@hasField(@TypeOf(sn), "tail")) sn.tail else 0, .edit_mark = api.prompt_cache.editMark(getenv("TF_DS_EDIT_MARK")), .keep_protect = api.prompt_cache.keepProtect(getenv("TF_DS_KEEP_PROTECT")), .exact = api.prompt_cache.exactResume(getenv("TF_DS_EXACT_RESUME")), .endstate = api.prompt_cache.endState(getenv("TF_DS_PROMPT_ENDSTATE")) != null, .end_limit = api.prompt_cache.endState(getenv("TF_DS_PROMPT_ENDSTATE")) orelse 0 }, want);
+             // TF_DS_EXACT_RESUME: the store passes its tail rule to the family's usable, wired without a tier too
+             if (h.cache.?.rules.exact) if (@hasField(@TypeOf(sn), "usable")) {
+--- a/zig/src/core/prompt_cache_test.zig
++++ b/zig/src/core/prompt_cache_test.zig
+@@ -955,3 +955,57 @@
+     try std.testing.expectEqual(@as(u32, b.len), s.find(&b,&.{}).?.at);
+     try std.testing.expectEqual(@as(usize,1), f.live);
+ }
++
++test "paired full-end charging fits 78 grid and two full states without evicting one" {
++    const Bytes = struct {
++        fn ordinary(_: *anyopaque, _: u32) u64 { return 6684672; }
++        fn uniform(_: *anyopaque, _: u32) u64 { return 7644160; }
++        fn live(_: *anyopaque, at: u32, len: usize) u64 { return if (at == len) 7644160 else 6684672; }
++    };
++    const gpa = std.testing.allocator;
++    for ([_]bool{ false, true }) |accurate| {
++        var f: Fake = .{ .gpa = gpa };
++        var vt = f.snapshots().vtable.*;
++        vt.bytes = if (accurate) Bytes.ordinary else Bytes.uniform;
++        vt.keep_bytes = if (accurate) Bytes.live else null;
++        var s = Store.init(gpa, .{ .ptr = &f, .vtable = &vt }, .{ .grid = 4, .window = 2, .endstate = true, .end_limit = 2 }, 512 * 1024 * 1024);
++        defer s.deinit();
++        for (0..80) |i| {
++            const input = [_]u32{ @intCast(i + 1), 2, 3, 4, 5, 6 };
++            f.at = if (i >= 78) input.len else 4;
++            try std.testing.expect(s.keep(&input, f.at, null, &.{}));
++            try std.testing.expect(s.held + s.restoring_bytes <= s.budget);
++        }
++        try std.testing.expectEqual(@as(usize, if (accurate) 80 else 70), s.entries.items.len);
++        try std.testing.expectEqual(@as(u64, if (accurate) 78 * 6684672 + 2 * 7644160 else 70 * 7644160), s.held);
++        try std.testing.expectEqual(@as(u64, if (accurate) 0 else 10), s.counts.evicted);
++    }
++}
++
++test "a planned live mark reserves its contextual bytes before the peer starts its pass" {
++    const Bytes = struct {
++        fn durable(_: *anyopaque, _: u32) u64 { return 10; }
++        fn live(_: *anyopaque, _: u32, _: usize) u64 { return 60; }
++    };
++    const gpa = std.testing.allocator;
++    var f: Fake = .{ .gpa = gpa };
++    var vt = f.snapshots().vtable.*;
++    vt.bytes = Bytes.durable;
++    vt.keep_bytes = Bytes.live;
++    const a = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
++    const other = [_]u32{ 9, 9, 9, 9, 9, 9, 9, 9 };
++    for ([_]u64{ 50, 100 }) |budget| {
++        var s = Store.init(gpa, .{ .ptr = &f, .vtable = &vt }, .{ .min_prompt = 0, .min_gap = 0 }, budget);
++        defer s.deinit();
++        if (budget == 100) {
++            f.at = 4;
++            try std.testing.expect(s.keep(&other, 4, null, &.{}));
++            try std.testing.expectEqual(60, s.held);
++        }
++        const look = try s.lookup(gpa, &a, 4, &.{}, &.{});
++        defer gpa.free(look.marks);
++        try std.testing.expectEqual(@as(usize, if (budget == 50) 0 else 1), look.marks.len);
++        try std.testing.expectEqual(0, s.held);
++        try std.testing.expectEqual(@as(u64, if (budget == 50) 0 else 1), s.counts.evicted);
++    }
++}
+--- a/zig/src/core/prompt_cache_tier_test.zig
++++ b/zig/src/core/prompt_cache_tier_test.zig
+@@ -852,3 +852,37 @@
+     try std.testing.expectEqual(@as(u64, 2), s.counts.refused);
+     try std.testing.expectEqual(@as(u64, 1), s.counts.refused_budget);
+ }
++
++test "a durable base restore and a full live save reserve their actual different sizes" {
++    const Bytes = struct {
++        fn ordinary(_: *anyopaque, _: u32) u64 { return 100; }
++        fn live(_: *anyopaque, at: u32, len: usize) u64 { return if (at == len) 160 else 100; }
++    };
++    var f: Sum = .{};
++    var tier: FakeTier = .{ .gpa = gpa, .codec = f.codec() };
++    defer tier.deinit();
++    var vt = f.snapshots().vtable.*;
++    vt.bytes = Bytes.ordinary;
++    vt.keep_bytes = Bytes.live;
++    var s = Store.init(gpa, .{ .ptr = &f, .vtable = &vt }, .{ .min_prompt = 0, .endstate = true, .end_limit = 2 }, 200);
++    defer s.deinit();
++    s.setTier(tier.tier(), 0);
++    const a = seq(40, 1);
++    _ = try tier.put(a[0..16], 16, std.mem.asBytes(&Sum.State{ .at = 16, .sum = Sum.fresh(&a, 16) }), 0, 3, true);
++    const p = s.probe(&a, &.{}).durable.?;
++    try std.testing.expectEqual(0, p.bytes);
++    const pending = try s.restoreBegin(p, &a);
++    try std.testing.expectEqual(100, s.restoring_bytes);
++    const b = seq(40, 3);
++    f.feed(&b, 40);
++    try std.testing.expect(!s.keep(&b, 40, null, &.{}));
++    try std.testing.expectEqual(0, s.held);
++    try std.testing.expectEqual(pc.Restored.adopted, settle(&s, pending));
++    try std.testing.expectEqual(100, s.held);
++    try std.testing.expectEqual(0, s.restoring_bytes);
++    f.reset();
++    f.feed(&b, 16);
++    try std.testing.expect(s.keep(&b, 16, null, &.{}));
++    try std.testing.expectEqual(200, s.held);
++    try std.testing.expectEqual(2, s.entries.items.len);
++}

@@ -1,0 +1,105 @@
+2026-11-15T16:43:59Z full run start passes=3
+2026-11-15T16:43:59Z x-cold restart [SPILL_GIB=0 KV_SHARD=0 TF_DS_PREFILL_SLICE=0] --prompt-cache-gib 0
+2026-11-15T16:45:57Z x-cold up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T16:46:30Z x-cold resume cold rc=0
+2026-11-15T16:46:30Z x-base-1 restart [] 
+2026-11-15T16:48:29Z x-base-1 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T16:48:55Z x-base-1 validate rc=0 all passed
+2026-11-15T16:50:43Z x-base-1 bench rc=0 p2k=1838.6 p8k=2109.9 p32k=2158.7 decode=64.0 multi4=124.0
+2026-11-15T16:51:28Z x-base-1 longctx rc=0
+2026-11-15T16:52:39Z x-base-1 tetris rc=0 x-base-1 tetris greedy seed=1 tokens=2048 wall_tok_s=115.51384933871;x-base-1 tetris sampled seed=100 tokens=2048 wall_tok_s=113.49126660954273;x-base-1 tetris sampled seed=101 tokens=2048 wall_tok_s=114.78229372031056;x-base-1 tetris sampled seed=102 tokens=2048 wall_tok_s=118.9112829952552;
+2026-11-15T16:53:36Z x-base-1 sampled rc=0 sampled streams=1 rep=0 agg_tok_s=53.4;sampled streams=1 rep=1 agg_tok_s=55.3;sampled streams=4 rep=0 agg_tok_s=104.7;sampled streams=4 rep=1 agg_tok_s=106.1;
+2026-11-15T16:53:36Z x-tok-1 restart [TENSORFOLD_TOKEN_CACHE_MB=32] 
+2026-11-15T16:55:36Z x-tok-1 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T16:55:53Z x-tok-1 validate rc=0 all passed
+2026-11-15T16:57:41Z x-tok-1 bench rc=0 p2k=1776.5 p8k=2077.3 p32k=2145.4 decode=63.1 multi4=122.8
+2026-11-15T16:58:27Z x-tok-1 longctx rc=0
+2026-11-15T16:58:27Z x-k0-1 restart [TF_DS_T26_KEYED_DRAFT=0] 
+2026-11-15T17:00:27Z x-k0-1 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:00:44Z x-k0-1 validate rc=0 all passed
+2026-11-15T17:01:55Z x-k0-1 tetris rc=0 x-k0-1 tetris greedy seed=1 tokens=2048 wall_tok_s=117.68851839725818;x-k0-1 tetris sampled seed=100 tokens=2048 wall_tok_s=111.61343966452527;x-k0-1 tetris sampled seed=101 tokens=2048 wall_tok_s=115.35153968661055;x-k0-1 tetris sampled seed=102 tokens=2048 wall_tok_s=118.80783675654352;
+2026-11-15T17:02:51Z x-k0-1 sampled rc=0 sampled streams=1 rep=0 agg_tok_s=55.3;sampled streams=1 rep=1 agg_tok_s=57.4;sampled streams=4 rep=0 agg_tok_s=107.9;sampled streams=4 rep=1 agg_tok_s=107.9;
+2026-11-15T17:02:51Z x-rbase-1 restart [SPILL_GIB=0 KV_SHARD=0 TF_DS_PREFILL_SLICE=0] 
+2026-11-15T17:04:49Z x-rbase-1 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:05:15Z x-rbase-1 validate rc=0 all passed
+2026-11-15T17:07:00Z x-rbase-1 bench rc=0 p2k=1828.8 p8k=2128.5 p32k=2167.2 decode=64.5 multi4=125.4
+2026-11-15T17:07:22Z x-rbase-1 resume rc=0
+2026-11-15T17:07:37Z x-rbase-1 reuse rc=1 agent turn 3 (after another conversation): 11685 prompt tokens, 10240 cached (88%), 1.3 s prompt_reuse: FAILED: a turn resumed only 88% of its prompt 
+2026-11-15T17:08:23Z x-rbase-1 longctx rc=0
+2026-11-15T17:08:23Z x-ron-1 restart [SPILL_GIB=0 KV_SHARD=0 TF_DS_PREFILL_SLICE=0 TF_DS_EXACT_RESUME=1] 
+2026-11-15T17:10:21Z x-ron-1 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:10:46Z x-ron-1 validate rc=1 FAILED: image
+2026-11-15T17:12:32Z x-ron-1 bench rc=0 p2k=1834.2 p8k=2130.8 p32k=2169.5 decode=65.0 multi4=122.8
+2026-11-15T17:12:52Z x-ron-1 resume rc=0
+2026-11-15T17:13:06Z x-ron-1 reuse rc=0 agent turn 3 (after another conversation): 11657 prompt tokens, 11452 cached (98%), 0.7 s prompt_reuse: OK 
+2026-11-15T17:13:51Z x-ron-1 longctx rc=0
+2026-11-15T17:13:51Z pass 1 done
+2026-11-15T17:13:51Z x-base-2 restart [] 
+2026-11-15T17:15:51Z x-base-2 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:16:08Z x-base-2 validate rc=0 all passed
+2026-11-15T17:17:56Z x-base-2 bench rc=0 p2k=1790.3 p8k=2049.8 p32k=2106.3 decode=64.0 multi4=122.4
+2026-11-15T17:18:42Z x-base-2 longctx rc=0
+2026-11-15T17:19:54Z x-base-2 tetris rc=0 x-base-2 tetris greedy seed=1 tokens=2048 wall_tok_s=117.3663964498026;x-base-2 tetris sampled seed=200 tokens=2048 wall_tok_s=116.70019927458235;x-base-2 tetris sampled seed=201 tokens=2048 wall_tok_s=114.54386684197434;x-base-2 tetris sampled seed=202 tokens=2048 wall_tok_s=111.11986231883735;
+2026-11-15T17:20:50Z x-base-2 sampled rc=0 sampled streams=1 rep=0 agg_tok_s=53.4;sampled streams=1 rep=1 agg_tok_s=55.2;sampled streams=4 rep=0 agg_tok_s=104.5;sampled streams=4 rep=1 agg_tok_s=106.0;
+2026-11-15T17:20:50Z x-tok-2 restart [TENSORFOLD_TOKEN_CACHE_MB=32] 
+2026-11-15T17:22:50Z x-tok-2 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:23:07Z x-tok-2 validate rc=0 all passed
+2026-11-15T17:24:55Z x-tok-2 bench rc=0 p2k=1799.1 p8k=2079.0 p32k=2134.1 decode=65.2 multi4=120.8
+2026-11-15T17:25:42Z x-tok-2 longctx rc=0
+2026-11-15T17:25:42Z x-k0-2 restart [TF_DS_T26_KEYED_DRAFT=0] 
+2026-11-15T17:27:41Z x-k0-2 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:27:58Z x-k0-2 validate rc=0 all passed
+2026-11-15T17:29:11Z x-k0-2 tetris rc=0 x-k0-2 tetris greedy seed=1 tokens=2048 wall_tok_s=117.27619835231421;x-k0-2 tetris sampled seed=200 tokens=2048 wall_tok_s=112.12426957511616;x-k0-2 tetris sampled seed=201 tokens=2048 wall_tok_s=112.34762792015601;x-k0-2 tetris sampled seed=202 tokens=2048 wall_tok_s=110.87128922807818;
+2026-11-15T17:30:07Z x-k0-2 sampled rc=0 sampled streams=1 rep=0 agg_tok_s=55.3;sampled streams=1 rep=1 agg_tok_s=57.7;sampled streams=4 rep=0 agg_tok_s=107.9;sampled streams=4 rep=1 agg_tok_s=107.6;
+2026-11-15T17:30:07Z x-rbase-2 restart [SPILL_GIB=0 KV_SHARD=0 TF_DS_PREFILL_SLICE=0] 
+2026-11-15T17:32:04Z x-rbase-2 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:32:30Z x-rbase-2 validate rc=0 all passed
+2026-11-15T17:34:16Z x-rbase-2 bench rc=0 p2k=1828.3 p8k=2127.1 p32k=2168.8 decode=65.6 multi4=130.2
+2026-11-15T17:34:38Z x-rbase-2 resume rc=0
+2026-11-15T17:34:53Z x-rbase-2 reuse rc=1 agent turn 3 (after another conversation): 11685 prompt tokens, 10240 cached (88%), 1.3 s prompt_reuse: FAILED: a turn resumed only 88% of its prompt 
+2026-11-15T17:35:39Z x-rbase-2 longctx rc=0
+2026-11-15T17:35:39Z x-ron-2 restart [SPILL_GIB=0 KV_SHARD=0 TF_DS_PREFILL_SLICE=0 TF_DS_EXACT_RESUME=1] 
+2026-11-15T17:37:36Z x-ron-2 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:38:01Z x-ron-2 validate rc=1 FAILED: image
+2026-11-15T17:39:47Z x-ron-2 bench rc=0 p2k=1833.9 p8k=2129.2 p32k=2178.6 decode=66.7 multi4=126.1
+2026-11-15T17:40:07Z x-ron-2 resume rc=0
+2026-11-15T17:40:20Z x-ron-2 reuse rc=0 agent turn 3 (after another conversation): 11657 prompt tokens, 11452 cached (98%), 0.7 s prompt_reuse: OK 
+2026-11-15T17:41:05Z x-ron-2 longctx rc=0
+2026-11-15T17:41:05Z pass 2 done
+2026-11-15T17:41:05Z x-base-3 restart [] 
+2026-11-15T17:43:05Z x-base-3 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:43:22Z x-base-3 validate rc=0 all passed
+2026-11-15T17:45:09Z x-base-3 bench rc=0 p2k=1794.1 p8k=2083.4 p32k=2131.1 decode=64.1 multi4=123.1
+2026-11-15T17:45:55Z x-base-3 longctx rc=0
+2026-11-15T17:47:06Z x-base-3 tetris rc=0 x-base-3 tetris greedy seed=1 tokens=2048 wall_tok_s=116.92513724738939;x-base-3 tetris sampled seed=300 tokens=2048 wall_tok_s=117.72879994167364;x-base-3 tetris sampled seed=301 tokens=2048 wall_tok_s=114.40641204871496;x-base-3 tetris sampled seed=302 tokens=2048 wall_tok_s=113.71991186832511;
+2026-11-15T17:48:03Z x-base-3 sampled rc=0 sampled streams=1 rep=0 agg_tok_s=53.3;sampled streams=1 rep=1 agg_tok_s=55.0;sampled streams=4 rep=0 agg_tok_s=104.7;sampled streams=4 rep=1 agg_tok_s=106.1;
+2026-11-15T17:48:03Z x-tok-3 restart [TENSORFOLD_TOKEN_CACHE_MB=32] 
+2026-11-15T17:50:03Z x-tok-3 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:50:20Z x-tok-3 validate rc=0 all passed
+2026-11-15T17:52:07Z x-tok-3 bench rc=0 p2k=1798.0 p8k=2081.7 p32k=2139.0 decode=63.2 multi4=126.5
+2026-11-15T17:52:54Z x-tok-3 longctx rc=0
+2026-11-15T17:52:54Z x-k0-3 restart [TF_DS_T26_KEYED_DRAFT=0] 
+2026-11-15T17:54:54Z x-k0-3 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:55:11Z x-k0-3 validate rc=0 all passed
+2026-11-15T17:56:24Z x-k0-3 tetris rc=0 x-k0-3 tetris greedy seed=1 tokens=2048 wall_tok_s=117.90415893410383;x-k0-3 tetris sampled seed=300 tokens=2048 wall_tok_s=111.7346952193173;x-k0-3 tetris sampled seed=301 tokens=2048 wall_tok_s=111.76840643507136;x-k0-3 tetris sampled seed=302 tokens=2048 wall_tok_s=109.59474379319398;
+2026-11-15T17:57:20Z x-k0-3 sampled rc=0 sampled streams=1 rep=0 agg_tok_s=55.3;sampled streams=1 rep=1 agg_tok_s=57.6;sampled streams=4 rep=0 agg_tok_s=107.7;sampled streams=4 rep=1 agg_tok_s=107.8;
+2026-11-15T17:57:20Z x-rbase-3 restart [SPILL_GIB=0 KV_SHARD=0 TF_DS_PREFILL_SLICE=0] 
+2026-11-15T17:59:17Z x-rbase-3 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T17:59:43Z x-rbase-3 validate rc=0 all passed
+2026-11-15T18:01:29Z x-rbase-3 bench rc=0 p2k=1832.3 p8k=2121.6 p32k=2165.0 decode=63.7 multi4=124.2
+2026-11-15T18:01:52Z x-rbase-3 resume rc=0
+2026-11-15T18:02:07Z x-rbase-3 reuse rc=1 agent turn 3 (after another conversation): 11685 prompt tokens, 10240 cached (88%), 1.3 s prompt_reuse: FAILED: a turn resumed only 88% of its prompt 
+2026-11-15T18:02:52Z x-rbase-3 longctx rc=0
+2026-11-15T18:02:52Z x-ron-3 restart [SPILL_GIB=0 KV_SHARD=0 TF_DS_PREFILL_SLICE=0 TF_DS_EXACT_RESUME=1] 
+2026-11-15T18:04:50Z x-ron-3 up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T18:05:16Z x-ron-3 validate rc=1 FAILED: image
+2026-11-15T18:07:02Z x-ron-3 bench rc=0 p2k=1822.3 p8k=2123.5 p32k=2173.0 decode=62.0 multi4=129.6
+2026-11-15T18:07:21Z x-ron-3 resume rc=0
+2026-11-15T18:07:35Z x-ron-3 reuse rc=0 agent turn 3 (after another conversation): 11657 prompt tokens, 11452 cached (98%), 0.7 s prompt_reuse: OK 
+2026-11-15T18:08:20Z x-ron-3 longctx rc=0
+2026-11-15T18:08:20Z pass 3 done
+2026-11-15T18:08:20Z resume report rc=1
+2026-11-15T18:08:20Z x-final restart [] 
+2026-11-15T18:10:20Z x-final up image=tensorfold-dsv41:exl3-tp2-f3f69b951cd3
+2026-11-15T18:10:37Z x-final validate rc=0 all passed
+2026-11-15T18:10:37Z full run done

@@ -1,0 +1,27 @@
+--- a/zig/src/core/lane_host_robust_test.zig
++++ b/zig/src/core/lane_host_robust_test.zig
+@@ -154,13 +154,23 @@
+     try e.submit(2, &req, b.sink());
+     // refused while the stream decodes: asked again (at most each second, or when a stream ends), never prefilled
+     var asked = false;
++    var first: ?i96 = null;
++    var lead_done: ?i96 = null;
++    const start = std.Io.Clock.awake.now(io).toNanoseconds();
+     for (0..5000) |_| {
+-        if (@atomicLoad(u64, &r.tier.refused, .monotonic) >= 2) {
++        const now = std.Io.Clock.awake.now(io).toNanoseconds() - start;
++        const refused = @atomicLoad(u64, &r.tier.refused, .monotonic);
++        if (first == null and refused > 0) first = now;
++        if (lead_done == null and a.finished() != null) lead_done = now;
++        if (refused >= 2) {
+             asked = true;
+             break;
+         }
+         std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+     }
++    std.debug.print("\nobserved_ns_from_wait first_refusal={any} lead_finished={any}\n", .{ first, lead_done });
++    const status = r.stats();
++    std.debug.print("\nfixture asked={} refused={} leader_tokens={} leader_done={any} pending_done={any} pending_cut={any} room_waits={} room_expired={} disk_commits={}\n", .{ asked, @atomicLoad(u64, &r.tier.refused, .monotonic), a.count(), a.finished(), b.finished(), cachedNow(&b), status.restores_room_waits, status.restores_room_wait_expired, status.disk_hits_committed });
+     try std.testing.expect(asked);
+     try std.testing.expect(b.finished() == null and cachedNow(&b) == null);
+     try std.testing.expect(a.finished() == null);

@@ -1,0 +1,145 @@
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -291,9 +291,7 @@
+     // the logits (the caller sets it before the forward); `map_done` says the head wrote the pairs, so the pick is the
+     // reduce over them; amap holds them, [R, world, 2] u32 in rank order.
+     map: bool = false,
+-    map_done: bool = false,
+     amap: u64,
+-    amap_n: usize = 0, // a rank's columns of the head (the reduce's index offset)
+     taps: u64, // bf16 [R, taps * D]
+     // wo_a's suh concatenated a layer (wo_a_rot: torch.cat of the slices' suh, cached on the layer)
+     wo_suh: []u64,
+@@ -388,6 +386,7 @@
+         rd.cur_ratio = 0;
+         rd.clk = 0;
+         rd.bucket = 0;
++        rd.dead = 0;
+         rd.finer = ops_mod.onValue(if (std.c.getenv(bucket_finer_env)) |v| std.mem.span(v) else null);
+         rd.hot = null; // set by Model.open only when TF_DS_EXPERT_HOT_CACHE is on (rd starts undefined)
+         rd.has_cand = false;
+@@ -546,8 +545,6 @@
+         rd.logits = try a.take(R * e.world * hh * 4);
+         rd.amap = try a.take(R * e.world * 8); // (TF_DS_GREEDY_ARGMAX: pairs, tiny; allocated either way)
+         rd.map = false;
+-        rd.map_done = false;
+-        rd.amap_n = 0;
+         rd.taps = try a.take(R * @max(c.dspark_taps.slice().len, 1) * d * 2);
+         // wo_a_rot's suh: the slices' suh one after another (torch.cat's bytes)
+         rd.wo_suh = try gpa.alloc(u64, w.layers.len);
+@@ -1942,8 +1939,6 @@
+         // roundArgmax's reduce turns them into the pick (the same answer the whole logits would have given).
+         try e.ops.argmaxPair(e.s, rd.hl, hn, hn, R, rd.amap + e.comm.rank * R * 8);
+         try e.comm.allGatherInPlace(rd.amap, R * 8, e.s);
+-        rd.map_done = true;
+-        rd.amap_n = hn;
+         try rd.mark(e, .head);
+         return;
+     }
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -275,6 +275,13 @@
+         const m = try gpa.create(Model);
+         errdefer gpa.destroy(m);
+         m.* = undefined;
++        m.gside = null;
++        m.gside_fork = null;
++        m.gside_join = null;
++        m.clk_ph = @splat(0);
++        m.clk_cnt = @splat(0);
++        m.clk_rounds = 0;
++        m.accept_rows = 0;
+         m.gpa = gpa;
+         m.exact_resume = api.prompt_cache.exactResume(envOf("TF_DS_EXACT_RESUME")); // every rank alike
+         m.absorb_after_pick = envOnOff(envOf("TF_DS_ABSORB_AFTER_PICK")); // rank-local: an uneven pair stays bit-identical
+@@ -1874,9 +1881,8 @@
+ 
+     /// The round's token kernel over R rows into amax: the draw under setDraw rules, else the argmax.
+     fn launchPick(m: *Model, R: usize) !void {
+-        if (m.rd.map_done) { // TF_DS_GREEDY_ARGMAX: the head exchanged the pairs; the reduce is the pick
+-            m.rd.map_done = false;
+-            return m.ops.argmaxReduce(m.stream, m.rd.amap, m.eng.world, m.rd.amap_n, R, m.amax);
++        if (m.rd.map) { // TF_DS_GREEDY_ARGMAX: the head exchanged the pairs; the reduce is the pick
++            return m.ops.argmaxReduce(m.stream, m.rd.amap, m.eng.world, m.eng.w.head.n, R, m.amax);
+         }
+         if (m.draw_rows == 0) return m.ops.argmaxRows(m.stream, m.rd.logits, m.vocab, m.vocab, R, m.amax);
+         if (R != m.draw_rows) return error.BadRound;
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -188,6 +188,11 @@
+             return error.BadArgument;
+         }
+     }
++    // Match native.open's settings when the follower takes the standalone entry point.
++    o.bf16_partials = std.mem.eql(u8, spillEnv("TF_DS_BF16_PARTIALS") orelse "", "1");
++    o.greedy_argmax = std.mem.eql(u8, spillEnv("TF_DS_GREEDY_ARGMAX") orelse "", "1");
++    o.head_last_chunk = std.mem.eql(u8, spillEnv("TF_DS_HEAD_LAST_CHUNK") orelse "", "1");
++    o.snap_trim = std.mem.eql(u8, spillEnv("TF_DS_SNAP_TRIM") orelse "", "1");
+     const spill = try dsv41.spill_tier.Settings.follower(spillFlag, spillEnv);
+     // the spill tier's refusals from the arguments and environment alone, before the weights load
+     if (spill != null) {
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1433,9 +1433,25 @@
+         if (m.triage) |t| for (windows, wins[0..windows.len]) |w, *win| {
+             win.live = if (w.parents != null or w.tokens.len > 0) 0 else @intCast(triageLive(self.streams.getPtr(w.stream).?.confs[0..w.held], t));
+         };
++        // every row greedy: the device's argmax (R tokens back); every sampled row one the kernel reproduces and
++        // TF_DS_T27_DEVICE_DRAW on: the device's draw (R tokens back); else the logits for the host's draws. Read before
++        // the forward: TF_DS_GREEDY_ARGMAX decides the head's exchange from it.
++        var rules: sampling.RoundRules = .{};
++        for (windows) |w| if (w.stream.sampling) |sm| rules.add(sm.temperature, sm.top_k);
++        // a score stream's rows need every logit on the host
++        for (windows) |w| {
++            if (w.stream.score != null) rules.logits = true;
++        }
++        // TF_DS_SPEC_SAMPLE: a sampled round reads its logits on the host (the drafted rows' p), whatever the draw switch
++        const spec = m.ops.spec and m.dr != null and m.dr.?.sq != 0;
++        const path = if (spec and rules.sampled) .host_draw else rules.path(m.ops.draw_rows != null);
++        // TF_DS_GREEDY_ARGMAX (0186): a greedy round consumes nothing but the pick, so its head exchanges the ranks'
++        // (value, index) a row instead of the vocabulary halves; the round decides, so the stretch's graph carries it
++        m.rd.map = m.argmax_map and sampling.argmaxMapWorks(m.eng.world, m.two != null, path);
++        defer m.rd.map = false;
+         const t0 = m.now();
+         if (try self.begin(.verify)) {
+-            try self.wire.int(gpa, u32, @intCast(windows.len));
++            try self.wire.int(gpa, u32, @as(u32, @intCast(windows.len)) | (@as(u32, @intFromBool(m.rd.map)) << 31));
+             for (wins[0..windows.len]) |w| try writeWin(&self.wire, gpa, w, self.kv != null);
+             try self.flush();
+         }
+@@ -1453,22 +1469,6 @@
+         }
+         // 0160 (TF_DS_ABSORB_AFTER_PICK): forward, then the pick, then the taps' absorb left running under the host's
+         // accept and the pass frame's send; off: the served order (forward, absorb, pick)
+-        // every row greedy: the device's argmax (R tokens back); every sampled row one the kernel reproduces and
+-        // TF_DS_T27_DEVICE_DRAW on: the device's draw (R tokens back); else the logits for the host's draws. Read before
+-        // the forward: TF_DS_GREEDY_ARGMAX decides the head's exchange from it.
+-        var rules: sampling.RoundRules = .{};
+-        for (windows) |w| if (w.stream.sampling) |sm| rules.add(sm.temperature, sm.top_k);
+-        // a score stream's rows need every logit on the host
+-        for (windows) |w| {
+-            if (w.stream.score != null) rules.logits = true;
+-        }
+-        // TF_DS_SPEC_SAMPLE: a sampled round reads its logits on the host (the drafted rows' p), whatever the draw switch
+-        const spec = m.ops.spec and m.dr != null and m.dr.?.sq != 0;
+-        const path = if (spec and rules.sampled) .host_draw else rules.path(m.ops.draw_rows != null);
+-        // TF_DS_GREEDY_ARGMAX (0186): a greedy round consumes nothing but the pick, so its head exchanges the ranks'
+-        // (value, index) a row instead of the vocabulary halves; the round decides, so the stretch's graph carries it
+-        m.rd.map = m.argmax_map and sampling.argmaxMapWorks(m.eng.world, m.two != null, path);
+-        defer m.rd.map = false;
+         try m.verify(rows);
+         if (!m.absorb_after_pick) try m.absorbRows(rows, self.built.absorb[0..windows.len]);
+         const t2 = m.now();
+@@ -2680,7 +2680,11 @@
+                 if (m.fillSlice(seqs[slot].items[0 .. args.start + args.n], args, f.lo, f.hi)) |_| {} else |err| try roundRefused(err);
+             },
+             .verify => {
+-                const nw = try r.int(u32);
++                const header = try r.int(u32);
++                m.rd.map = header >> 31 != 0;
++                if (m.rd.map and !m.argmax_map) return error.BadFrame;
++                defer m.rd.map = false;
++                const nw = header & 0x7fffffff;
+                 if (nw == 0 or nw > max_streams) return error.BadFrame;
+                 var wins: [max_streams]Win = undefined;
+                 for (0..nw) |k| {

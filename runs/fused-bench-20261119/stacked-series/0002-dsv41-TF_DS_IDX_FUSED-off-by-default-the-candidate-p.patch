@@ -1,0 +1,545 @@
+From d02237695a7722e2f1dd792484068e3d09a8ff32 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Wed, 18 Nov 2026 23:04:58 -0800
+Subject: [PATCH 2/6] dsv41: TF_DS_IDX_FUSED (off by default): the candidate
+ pool's blockMax -> topk_indices -> poolPick in one launch
+
+TF_DS_IDX_FUSED gates the source chains of the indexer's candidate pool behind a switch that
+parses unset/""/0/1 (anything else refuses to start), off by default: the decode candidate-source
+layer (round.zig) and the prompt chunk's pooled source layer (prompt.zig). One block per row:
+the block maxima (the amax NaN-wins rule with the newest block pinned to +inf), the top-k over
+them (tf_ds_topk_select_row, the same selection tf_ds_topk_indices_kernel launches, extracted
+verbatim and shared) and the pool's mask u8 / block list (the pool_pick rule), in one launch.
+The mask application (applyPool) and the candFast case stay unfused: each is already one launch,
+so there is nothing to fold. Past 8192 maxima blocks (or a bad switch, or a cap on TF_DS_T13)
+the unfused launches run; the selection's vis stays the every_vis constant, as at both call sites.
+UNVERIFIED-BUILD on this machine (no nvcc): gated on the exact suite on a Spark like 0193/0194.
+---
+ zig/kernels/cuda/dsv41_ops.cu        |  90 +++++++++--
+ zig/src/families/dsv41/dsv41.zig     |   2 +
+ zig/src/families/dsv41/idx_fused.zig | 225 +++++++++++++++++++++++++++
+ zig/src/families/dsv41/ops.zig       |  42 +++++
+ zig/src/families/dsv41/prompt.zig    |  12 +-
+ zig/src/families/dsv41/round.zig     |  13 +-
+ 6 files changed, 364 insertions(+), 20 deletions(-)
+ create mode 100644 zig/src/families/dsv41/idx_fused.zig
+
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index 432f779..3b23290 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -136,21 +136,15 @@ __device__ __forceinline__ unsigned long long tf_ds_score_key(float x, int j) {
+     return key ^ 0x8000000000000000ull;                       // signed order as unsigned
+ }
+ 
+-// kernels.topk_indices(score, k), then torch.where(top < vis, top, -1) (model.py attention_k, the candidate pool's
+-// layers), a row a block (1024 threads): each score's int64 key (its bits, -0 as +0 (score + 0.0), ordered as signed
+-// integers, above the inverted column: a total order, ties to the lower column), the k largest keys by a radix select
+-// (eight 8-bit digits from the top), their columns ascending (a bitonic sort), a column at or past vis[r] as -1.
+-// score [rows, n] fp32 (row stride ss), vis [rows] int64, out [rows, k] int64; k <= 2048 and k <= n (the candidate
+-// pool's top blocks: k = 2048).
+-extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(const float* score, long long ss, int n,
+-                                                                              int k, const long long* vis,
+-                                                                              long long* out, int pdl) {
+-    pdl_enter(pdl);
++// The selection the topk_indices launch and the fused candidate-pool launch share (its eight eight-bit digits from
++// the top, its columns sort and the -1 mask): the k largest keys' columns ascending. `v` is the visible count the
++// mask applies (the caller's vis[r] here: a column at or past it is -1). One block a row; k <= 2048 and k <= n.
++__device__ __forceinline__ void tf_ds_topk_select_row(const float* row, int n, int k, const long long v,
++                                                       long long* out) {
+     __shared__ unsigned int hist[256];
+     __shared__ unsigned long long prefix_s, mask_s;
+     __shared__ int want_s, count_s;
+     __shared__ long long cols[2048];
+-    const float* row = score + (long long)blockIdx.x * ss;
+     if (threadIdx.x == 0) {
+         prefix_s = 0;
+         mask_s = 0;
+@@ -207,9 +201,20 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(con
+         }
+     }
+     __syncthreads();
+-    const long long v = vis[blockIdx.x];
+-    long long* o = out + (long long)blockIdx.x * k;
+-    for (int i = threadIdx.x; i < k; i += blockDim.x) o[i] = cols[i] < v ? cols[i] : -1;
++    for (int i = threadIdx.x; i < k; i += blockDim.x) out[i] = cols[i] < v ? cols[i] : -1;
++}
++
++// kernels.topk_indices(score, k), then torch.where(top < vis, top, -1) (model.py attention_k, the candidate pool's
++// layers), a row a block (1024 threads): each score's int64 key (its bits, -0 as +0 (score + 0.0), ordered as signed
++// integers, above the inverted column: a total order, ties to the lower column), the k largest keys by a radix select
++// (eight 8-bit digits from the top), their columns ascending (a bitonic sort), a column at or past vis[r] as -1.
++// score [rows, n] fp32 (row stride ss), vis [rows] int64, out [rows, k] int64; k <= 2048 and k <= n (the candidate
++// pool's top blocks: k = 2048).
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(const float* score, long long ss, int n,
++                                                                              int k, const long long* vis,
++                                                                              long long* out, int pdl) {
++    pdl_enter(pdl);
++    tf_ds_topk_select_row(score + (long long)blockIdx.x * ss, n, k, vis[blockIdx.x], out + (long long)blockIdx.x * k);
+ }
+ 
+ // The next kernels' weights touched into L2 ahead of them (the served build's paced l2_prefetch, as its trace shows it:
+@@ -878,6 +883,63 @@ extern "C" __global__ void tf_ds_apply_pool_kernel(float* score, long long ss, i
+     }
+ }
+ 
++// TF_DS_IDX_FUSED (off by default): the candidate pool's chain for a row in ONE launch - the block maxima
++// (tf_ds_block_max_kernel's rule: an amax over bsize scores, a NaN wins, the row's newest block pinned to +inf), the top
++// `k` over them (tf_ds_topk_select_row, the same selection tf_ds_topk_indices_kernel launches) and the pool's mask
++// and/or block list (tf_ds_pool_pick_kernel's rule). One block per row (1024 threads), grid (rows). Every phase runs
++// the source kernels' arithmetic op for op, so the bits match the unfused sequence; the maxima go through `bmax`
++// ([rows, nb] fp32, row stride bs, nb = ceil(width / bsize)) as the unfused launch wrote them, and the selection's vis
++// is `every` (the call sites pass the every_vis constant: no column masked at or past nb <= 2^40). A picked block
++// whose maximum is not above -inf (a NaN or an all-(-inf) block) is not in the pool: it sets no mask byte and lists -1.
++// score [rows, width] fp32 (row stride ss), vis, every [rows] int64, pidx out [rows, k] int64, mask out u8 [rows, nb]
++// (row stride ms) or null, cblk out int32 [rows, k] or null. k <= 2048 and k <= nb, like the topk kernel.
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const float* score, long long ss, int width,
++                                                                          int bsize, const long long* vis,
++                                                                          const long long* every, float* bmax,
++                                                                          long long bs, long long* pidx, int k,
++                                                                          uint8_t* mask, long long ms, int* cblk,
++                                                                          int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    const int nb = (width + bsize - 1) / bsize;
++    const float ninf = -__int_as_float(0x7f800000);
++    const float* row = score + (long long)r * ss;
++    float* out_b = bmax + (long long)r * bs;
++    // phase 1: the block maxima (tf_ds_block_max_kernel's rule, one thread a block)
++    const long long t = vis[r] - 1;
++    const long long last = t >= 0 ? t / bsize : -((-t + bsize - 1) / bsize);
++    for (int b = threadIdx.x; b < nb; b += blockDim.x) {
++        const float* s = row + (long long)b * bsize;
++        float m = ninf;
++        bool nan = false;
++        for (int j = 0; j < bsize && b * bsize + j < width; ++j) {
++            const float x = s[j];
++            if (x != x) nan = true;
++            else if (x > m) m = x;
++        }
++        float v = nan ? __int_as_float(0x7fc00000) : m;
++        if (b == last) v = __int_as_float(0x7f800000);
++        out_b[b] = v;
++    }
++    // phase 2: the top-k over the maxima (the same launch tf_ds_topk_indices_kernel makes, the maxima as its row)
++    __syncthreads();   // block-wide: phase 2 reads every bmax element this block wrote
++    tf_ds_topk_select_row(out_b, nb, k, every[r], pidx + (long long)r * k);
++    __syncthreads();   // block-wide: phase 3 reads the columns this block wrote
++    // phase 3: the pool (tf_ds_pool_pick_kernel's rule). A negative column (every[r] can mask one in principle) is not
++    // in the pool - the unfused launch would read bmax before the row here, which no call site passes every small
++    // enough to hit; treat it as not picked.
++    if (mask != nullptr) {
++        for (int b = threadIdx.x; b < nb; b += blockDim.x) mask[(long long)r * ms + b] = 0;
++        __syncthreads();
++    }
++    for (int j = threadIdx.x; j < k; j += blockDim.x) {
++        const long long c = pidx[(long long)r * k + j];
++        const bool ok = c >= 0 && out_b[c] > ninf;
++        if (mask != nullptr && ok) mask[(long long)r * ms + c] = 1;
++        if (cblk != nullptr) cblk[(long long)r * k + j] = ok ? (int)c : -1;
++    }
++}
++
+ // Rows of n16 16-byte words: dst row r = src row r (row strides in words). torch_ops' tf_strided_copy takes a block a
+ // row and a byte a thread; this one a word a thread over grid (ceil(n16 / blockDim), rows). Every pointer, stride and
+ // row length a multiple of 16 bytes (ops.copyRows checks).
+diff --git a/zig/src/families/dsv41/dsv41.zig b/zig/src/families/dsv41/dsv41.zig
+index 4190082..9f4ae25 100644
+--- a/zig/src/families/dsv41/dsv41.zig
++++ b/zig/src/families/dsv41/dsv41.zig
+@@ -54,6 +54,7 @@ pub const prompt_rows = @import("prompt_rows.zig");
+ pub const prefill_prof = @import("prefill_prof.zig");
+ pub const expert_prune = @import("expert_prune.zig");
+ pub const moe_route = @import("moe_route.zig");
++pub const idx_fused = @import("idx_fused.zig");
+ pub const lanes = @import("lanes.zig");
+ pub const pool = @import("pool.zig");
+ pub const spill_state = @import("spill_state.zig");
+@@ -115,6 +116,7 @@ test {
+     refAll(prefill_prof);
+     refAll(expert_prune);
+     refAll(moe_route);
++    refAll(idx_fused);
+     refAll(lanes);
+     refAll(pool);
+     refAll(spill_state);
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+new file mode 100644
+index 0000000..a1e8ab9
+--- /dev/null
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -0,0 +1,225 @@
++//! TF_DS_IDX_FUSED (off by default): the indexer's candidate pool in one launch - the block maxima
++//! (tf_ds_block_max_kernel), the top-k over them (tf_ds_topk_indices_kernel's selection) and the pool's mask / block
++//! list (tf_ds_pool_pick_kernel), one block per row. Pure: no cuda import; the launcher is Ops.idxFused and the call
++//! sites are round.zig's candidate-source arm (the decode rows) and prompt.zig's chunk path (the pooled source layer).
++//!
++//! The kernel's bit-level arithmetic is written to reproduce the three launches it replaces op for op (see the kernel in
++//! zig/kernels/cuda/dsv41_ops.cu). That reproduction is UNVERIFIED-BUILD on this machine (no nvcc): it is gated on the
++//! exact suite on a Spark before the switch is trusted, like 0193/0194. Past `max_nbk` blocks the row, or with a bad
++//! switch value, the unfused launches run (or the engine refuses to start).
++const std = @import("std");
++
++pub const env_name: [:0]const u8 = "TF_DS_IDX_FUSED";
++
++/// The switch's value: unset, "" or "0" off; "1" on; anything else is a refusal to start (the message is on stderr).
++pub fn parse(text: ?[]const u8) ?bool {
++    const t = text orelse return false;
++    if (t.len == 0 or std.mem.eql(u8, t, "0")) return false;
++    if (std.mem.eql(u8, t, "1")) return true;
++    std.debug.print("{s}: expected 1 or 0\n", .{env_name});
++    return null;
++}
++
++pub fn fromText(text: ?[]const u8) error{BadIdxFused}!bool {
++    return parse(text) orelse error.BadIdxFused;
++}
++
++/// The selection's k bound (the pool's top blocks: candidate_blocks at both call sites, 2048 on this checkpoint).
++pub const max_k = 2048;
++/// The maxima's block count past which the fused launch keeps one block a row for work the unfused launches spread
++/// over a 2D grid: the fused path covers the pool's regime (nbk > candidate_blocks) up to 8192 blocks (64K keys at
++/// the served block size); past it the unfused sequence runs.
++pub const max_nbk = 8192;
++
++/// Whether the fused launch supports this configuration. The call sites fall back to the unfused sequence when it
++/// does not. k > nbk (the selection's own bound) and nbk <= 0 refuse; `width` must agree with `bsize`.
++pub fn fuseOk(fused: bool, rows: usize, width: usize, bsize: usize, nbk: usize, k: usize) bool {
++    return fused and rows > 0 and width > 0 and bsize >= 1 and nbk == (width + bsize - 1) / bsize and nbk >= 1 and nbk <= max_nbk and k >= 1 and k <= max_k and k <= nbk;
++}
++
++// -- host reference -------------------------------------------------------------------------------------------------
++//
++// The kernel's arithmetic on the host, written to the same spec (used by the tests below). fp32 with IEEE semantics;
++// the selection is keyed on the same 64-bit key and is computed by sorting (the kernel's radix select is the same
++// total order, which is what the tests check the fused arm against semantically, not algorithmically).
++
++const ninf: f32 = -std.math.inf(f32);
++
++/// The key tf_ds_score_key makes: the score's bits (-0 as +0) ordered as signed integers, above the inverted column.
++pub fn scoreKey(x: f32, j: usize) u64 {
++    var bits: u32 = @bitCast(x);
++    if (bits == 0x80000000) bits = 0; // score + 0.0
++    const sb: i32 = @bitCast(bits);
++    const ordered: i32 = if (sb < 0) sb ^ 0x7FFFFFFF else sb;
++    const key = (@as(u64, @bitCast(@as(i64, ordered))) << 32) | @as(u64, 0xFFFFFFFF - @as(u64, @intCast(j)));
++    return key ^ 0x8000000000000000;
++}
++
++/// The block maxima (tf_ds_block_max_kernel's rule): an amax over each block of `bsize` scores (a NaN wins, the NaN is
++/// quiet 0x7fc00000), the row's newest block (floor((vis - 1) / bsize), floor division on negatives) +inf.
++pub fn blockMaxima(score: []const f32, width: usize, bsize: usize, vis: i64, out: []f32) void {
++    std.debug.assert(score.len >= width and out.len >= (width + bsize - 1) / bsize);
++    const nb = (width + bsize - 1) / bsize;
++    const t = vis - 1;
++    const last: i64 = if (t >= 0) @divFloor(t, @as(i64, @intCast(bsize))) else -@divFloor(-t + @as(i64, @intCast(bsize)) - 1, @as(i64, @intCast(bsize)));
++    for (0..nb) |b| {
++        var m: f32 = ninf;
++        var nan = false;
++        for (0..bsize) |j| {
++            if (b * bsize + j >= width) break;
++            const x = score[b * bsize + j];
++            if (x != x) nan = true else if (x > m) m = x;
++        }
++        var v: f32 = if (nan) @bitCast(@as(u32, 0x7fc00000)) else m;
++        if (@as(i64, @intCast(b)) == last) v = std.math.inf(f32);
++        out[b] = v;
++    }
++}
++
++/// The top-k of the maxima by the key order (ties to the lower column; k <= nb), ascending columns, a column at or
++/// past `every` as -1. Independent of the kernel's radix select (a sort, the same total order).
++pub fn topCols(bmax: []const f32, every: i64, k: usize, out: []i64) void {
++    std.debug.assert(bmax.len >= k and out.len >= k and k >= 1 and bmax.len <= max_nbk);
++    var keys: [max_nbk]u64 = undefined;
++    var cols: [max_nbk]usize = undefined;
++    for (0..bmax.len) |i| {
++        keys[i] = scoreKey(bmax[i], i);
++        cols[i] = i;
++    }
++    // selection sort of the k largest keys (descending); the keys are unique, so this is stable on columns
++    for (0..k) |n| {
++        var best = n;
++        for (n + 1..bmax.len) |i| {
++            if (keys[i] > keys[best]) best = i;
++        }
++        std.mem.swap(u64, &keys[n], &keys[best]);
++        std.mem.swap(usize, &cols[n], &cols[best]);
++    }
++    // the k largest, columns ascending (the kernel's bitonic sort of the same set)
++    std.mem.sort(usize, cols[0..k], {}, std.sort.asc(usize));
++    for (0..k) |n| {
++        const c: i64 = @intCast(cols[n]);
++        out[n] = if (c < every) c else -1;
++    }
++}
++
++/// The pool pick (tf_ds_pool_pick_kernel's rule): `mask` (if given) is zeroed and each picked block whose maximum is
++/// above -inf sets its byte; `cblk` (if given) lists the block, or -1 when its maximum is not above -inf (a NaN
++/// maximum is not above -inf either). A negative column is not picked (the unfused launch reads bmax before the row
++/// there, unreachable today: every is every_vis).
++pub fn poolPick(bmax: []const f32, idx: []const i64, mask: ?[]u8, cblk: ?[]i32) void {
++    if (mask) |m| @memset(m, 0);
++    for (idx, 0..) |c, j| {
++        const ok = c >= 0 and bmax[@intCast(c)] > ninf;
++        if (mask) |m| {
++            if (ok) m[@intCast(c)] = 1;
++        }
++        if (cblk) |cb| cb[j] = if (ok) @intCast(c) else -1;
++    }
++}
++
++// -- tests -----------------------------------------------------------------------------------------------------------
++
++const expectEqual = std.testing.expectEqual;
++
++test "the switch parses its forms and nothing else" {
++    try expectEqual(false, parse(null).?);
++    try expectEqual(false, parse("").?);
++    try expectEqual(false, parse("0").?);
++    try expectEqual(true, parse("1").?);
++    try expectEqual(@as(?bool, null), parse("2"));
++    try expectEqual(@as(?bool, null), parse("yes"));
++    try expectEqual(@as(?bool, null), parse("01"));
++    try std.testing.expectEqual(@as(bool, true), try fromText("1"));
++    try std.testing.expectError(error.BadIdxFused, fromText("2"));
++}
++
++test "fuseOk takes the pool's bounds" {
++    try std.testing.expect(fuseOk(true, 16, 16392, 8, 2049, 2048)); // the smallest pooled case
++    try std.testing.expect(fuseOk(true, 1, 64, 8, 8, 4));
++    try std.testing.expect(fuseOk(true, 2048, 65536, 8, 8192, 2048)); // the nbk cap, inclusive
++    try std.testing.expect(!fuseOk(true, 16, 65544, 8, 8193, 2048)); // past the cap
++    try std.testing.expect(!fuseOk(false, 16, 16392, 8, 2049, 2048));
++    try std.testing.expect(!fuseOk(true, 0, 16392, 8, 2049, 2048));
++    try std.testing.expect(!fuseOk(true, 16, 16392, 8, 2050, 2048)); // nbk disagrees with width/bsize
++    try std.testing.expect(!fuseOk(true, 16, 16392, 8, 2049, 3000)); // k past the 2048 cap
++    try std.testing.expect(!fuseOk(true, 16, 16392, 8, 2049, 2050)); // k past nbk
++    try std.testing.expect(!fuseOk(true, 16, 16392, 0, 16392, 4));
++    try std.testing.expect(fuseOk(true, 16, 100, 8, 13, 13)); // k == nbk is fine
++    try std.testing.expect(!fuseOk(true, 16, 100, 8, 13, 14)); // k > nbk is not
++}
++
++test "scoreKey matches the -0/+0 rule and orders scores like signed integers" {
++    // +0.0 and -0.0 get the same key modulo the column; a larger score always wins a smaller column
++    const a = scoreKey(5.0, 0);
++    const b = scoreKey(-5.0, 0);
++    try std.testing.expect(a > b);
++    const key_neg_zero = scoreKey(-0.0, 3);
++    const key_pos_zero = scoreKey(0.0, 3);
++    try expectEqual(key_pos_zero, key_neg_zero); // the -0 to +0 rule
++    // an inverted column: a tie breaks to the lower column
++    try std.testing.expect(scoreKey(1.0, 0) > scoreKey(1.0, 1));
++    // NaN above +inf, as the bit order makes it
++    try std.testing.expect(scoreKey(@bitCast(@as(u32, 0x7fc00000)), 1) > scoreKey(std.math.inf(f32), 1));
++    // -inf floor: the smallest key class
++    try std.testing.expect(scoreKey(0.0, 0) > scoreKey(-std.math.inf(f32), 0));
++}
++
++test "blockMaxima: NaN wins, the newest block is pinned, short blocks are padded -inf" {
++    var s = [_]f32{ 1, 2, 3, @as(f32, @bitCast(@as(u32, 0x7fc00000))), -std.math.inf(f32), 4, 5, 6, 7 };
++    var bmax: [3]f32 = undefined;
++    blockMaxima(&s, 9, 4, 100, &bmax); // vis past the row: nothing pinned (100's newest block is 24)
++    try expectEqual(@as(u32, 0x7fc00000), @as(u32, @bitCast(bmax[0]))); // block 0 holds the NaN: it wins
++    try expectEqual(@as(f32, 6), bmax[1]); // islands: idx 4..7 = -inf, 4, 5, 6
++    try expectEqual(@as(f32, 7), bmax[2]); // the short last block (idx 8), padded with -inf
++    // the newest block pinned to +inf whatever its scores
++    blockMaxima(&s, 9, 4, 7, &bmax); // vis = 7: the newest key is 6: block 1 pinned
++    try expectEqual(std.math.inf(f32), bmax[1]);
++    try expectEqual(@as(u32, 0x7fc00000), @as(u32, @bitCast(bmax[0])));
++    // vis at or below 0: t < 0, floor division pins nothing (a negative block index)
++    blockMaxima(&s, 9, 4, 0, &bmax);
++    try expectEqual(@as(f32, 6), bmax[1]);
++}
++
++test "topCols picks the k largest by key, ties to the lower block, every masks the tail" {
++    const bmax = [_]f32{ 1, 2, 2, -std.math.inf(f32), 9, 9, 0, 7 };
++    var out: [3]i64 = undefined;
++    topCols(&bmax, 100, 3, &out);
++    try expectEqual([_]i64{ 4, 5, 7 }, out); // 9, 9, 7 (ties between the two 9s: the lower column first)
++    // every = 5: columns at or past 5 become -1
++    topCols(&bmax, 5, 3, &out);
++    try expectEqual([_]i64{ 4, -1, -1 }, out);
++    // -inf columns rank last (they are still selected when k > the count of finite maxima)
++    const flat = [_]f32{ -std.math.inf(f32), -std.math.inf(f32) };
++    var o2: [2]i64 = undefined;
++    topCols(&flat, 100, 2, &o2);
++    try expectEqual([_]i64{ 0, 1 }, o2);
++}
++
++test "poolPick zeroes the mask, sets picked blocks above -inf, lists -1 otherwise" {
++    const bmax = [_]f32{ 5, -std.math.inf(f32), @bitCast(@as(u32, 0x7fc00000)) };
++    const idx = [_]i64{ 0, 1, 2 };
++    var mask = [_]u8{ 9, 9, 9 };
++    var cblk = [_]i32{ 99, 99, 99 };
++    poolPick(&bmax, &idx, &mask, &cblk);
++    try expectEqual([_]u8{ 1, 0, 0 }, mask); // only block 0 is above -inf; the NaN and -inf blocks are not picked
++    try expectEqual([_]i32{ 0, -1, -1 }, cblk);
++    // a negative column (an every-masked selection) is not picked
++    const idx2 = [_]i64{ -1, 0 };
++    var cblk2 = [_]i32{ 99, 99 };
++    poolPick(&bmax, &idx2, &mask, &cblk2);
++    try expectEqual([_]i32{ -1, 0 }, cblk2);
++}
++
++test "key negative-column rule: a column at or past every is -1 in the list and not in the pool" {
++    // end-to-end through the host reference: an every below some selected column
++    const bmax = [_]f32{ 3, 7, 8, 1 };
++    var out: [2]i64 = undefined;
++    topCols(&bmax, 2, 2, &out); // selects blocks 2 and 1; ascending columns; block 2 >= every -> -1
++    try expectEqual([_]i64{ 1, -1 }, out);
++    var mask = [_]u8{ 9, 9, 9, 9 };
++    var cblk = [_]i32{ 99, 99 };
++    poolPick(&bmax, &out, &mask, &cblk);
++    try expectEqual([_]u8{ 0, 1, 0, 0 }, mask); // only block 1 lands
++    try expectEqual([_]i32{ 1, -1 }, cblk);
++}
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 328839a..4a79c70 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -8,6 +8,7 @@ const std = @import("std");
+ const cuda = @import("cuda");
+ const expert_prune = @import("expert_prune.zig");
+ const moe_route = @import("moe_route.zig");
++const idx_fused = @import("idx_fused.zig");
+ 
+ /// The fused route's stats scratch, allocated (zeroed) only when both switches are on: u32[64] - 2x16 before/after
+ /// bitmask words and one ticket word for the last-block reduce.
+@@ -117,6 +118,8 @@ pub const Ops = struct {
+     fused_route: bool = false, // TF_DS_FUSED_ROUTE, read at load; a cap turns it off (printed there)
+     fused_route_fn: ?cuda.Function = null, // looked up only when the switch is on
+     fused_scratch: ?cuda.DeviceBuffer = null, // u32[64] the stats reduce and the prep barrier need; freed at unload
++    idx_fused: bool = false, // TF_DS_IDX_FUSED, read at load; off by default
++    idx_fused_fn: ?cuda.Function = null, // looked up only when the switch is on
+     dead_rows: cuda.Function, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' picks emptied
+     hot_track: cuda.Function, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picks counted per layer for the prefetch
+     keyed_noise: ?cuda.Function = null, // TF_DS_T26_KEYED_DRAFT or TF_DS_SPEC_SAMPLE, looked up only when on
+@@ -145,6 +148,7 @@ pub const Ops = struct {
+             std.log.err("dsv41: {s}", .{spec_keyed_why});
+             return err;
+         };
++        const idx_fused_on = try idx_fused.fromText(envSpan(idx_fused.env_name));
+         const pdl = onValue(envSpan(pdl_env));
+         return .{
+             .pointwise = pw,
+@@ -173,6 +177,8 @@ pub const Ops = struct {
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
+             .fused_route = fused,
+             .fused_route_fn = if (fused) try fm.function("tf_ds_fused_route_kernel") else null,
++            .idx_fused = idx_fused_on,
++            .idx_fused_fn = if (idx_fused_on) try fm.function("tf_ds_idx_fused_kernel") else null,
+             .fused_scratch = if (fused) cuda.DeviceBuffer.fromHost(d, std.mem.asBytes(&zero_scratch)) catch |err| {
+                 std.debug.print("{s}: the stats scratch did not allocate ({s})\n", .{ moe_route.env_name, @errorName(err) });
+                 return err;
+@@ -521,6 +527,33 @@ pub const Ops = struct {
+         try cuda.launch.launch(o.pool_pick, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
+     }
+ 
++    /// TF_DS_IDX_FUSED: the candidate pool's blockMax -> topk_indices -> poolPick in one launch (tf_ds_idx_fused_kernel),
++    /// one block per row. `mask` / `cblk` 0 leave one out (like poolPick); `every` is the vis the selection applies (the
++    /// call sites pass every_vis). The wrapper refuses (rather than falls back) when the bounds the caller passed to
++    /// fuseOk are not met - the call sites only call it after `idx_fused.fuseOk` agrees.
++    pub fn idxFused(o: *const Ops, s: cuda.Stream, score: u64, ss: usize, width: usize, bsize: usize, vis: u64, every: u64, bmax: u64, pidx: u64, k: usize, mask: u64, ms: usize, cblk: u64, rows: usize) !void {
++        if (rows == 0) return;
++        if (score == 0 or vis == 0 or every == 0 or bmax == 0 or pidx == 0) return error.BadIdxFusedArgs;
++        const nbk = (width + bsize - 1) / bsize;
++        if (bsize < 1 or nbk < 1 or nbk > idx_fused.max_nbk or k < 1 or k > idx_fused.max_k or k > nbk) return error.BadIdxFusedArgs;
++        var a: cuda.Args = .{};
++        a.add(score);
++        a.add(@as(c_longlong, @intCast(ss)));
++        a.add(@as(c_int, @intCast(width)));
++        a.add(@as(c_int, @intCast(bsize)));
++        a.add(vis);
++        a.add(every);
++        a.add(bmax);
++        a.add(@as(c_longlong, @intCast(nbk)));
++        a.add(pidx);
++        a.add(@as(c_int, @intCast(k)));
++        a.add(mask);
++        a.add(@as(c_longlong, @intCast(ms)));
++        a.add(cblk);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.idx_fused_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
++    }
++
+     /// model.py apply_candidates, in place: -inf at every column of score [rows, width] (row stride ss) whose block of
+     /// bsize the row's pool mask (u8, row stride ms) leaves out.
+     pub fn applyPool(o: *const Ops, s: cuda.Stream, score: u64, ss: usize, width: usize, bsize: usize, mask: u64, ms: usize, rows: usize) !void {
+@@ -748,3 +781,12 @@ test "TF_DS_FUSED_ROUTE parses: unset/0/empty off, 1 on, else refused" {
+     try std.testing.expectEqual(@as(bool, true), try moe_route.fromText("1"));
+     try std.testing.expectError(error.BadFusedRoute, moe_route.fromText("2"));
+ }
++
++test "TF_DS_IDX_FUSED parses: unset/0/empty off, 1 on, else refused" {
++    try std.testing.expectEqualStrings("TF_DS_IDX_FUSED", idx_fused.env_name);
++    try std.testing.expectEqual(@as(bool, false), try idx_fused.fromText(null));
++    try std.testing.expectEqual(@as(bool, false), try idx_fused.fromText(""));
++    try std.testing.expectEqual(@as(bool, false), try idx_fused.fromText("0"));
++    try std.testing.expectEqual(@as(bool, true), try idx_fused.fromText("1"));
++    try std.testing.expectError(error.BadIdxFused, idx_fused.fromText("2"));
++}
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 1803bc1..cfed4e0 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -40,6 +40,7 @@ const shard_ops = @import("shard_ops.zig");
+ const prompt_rows = @import("prompt_rows.zig");
+ const prefill_prof = @import("prefill_prof.zig");
+ const moe_route = @import("moe_route.zig");
++const idx_fused = @import("idx_fused.zig");
+ 
+ comptime {
+     std.debug.assert(prompt_rows.default_window == exl3_experts.exact_rows and prompt_rows.max_window == exl3_experts.max_window_rows);
+@@ -1415,9 +1416,14 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+             try tri_index.indexScore(e.t, q, k, wb, vr, n_comp_end, ch.score, null, false, null, false, m, ih, id);
+             const mrows = ch.pool + r0 * ch.pool_ms;
+             if (pooled and li == c.candidate_source) {
+-                try e.ops.blockMax(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.bmax, nbk, m);
+-                try e.ops.topkIndices(e.s, ch.bmax, nbk, m, nbk, pk, ch.every, ch.pidx);
+-                try e.ops.poolPick(e.s, ch.bmax, nbk, nbk, ch.pidx, pk, mrows, ch.pool_ms, 0, m);
++                // TF_DS_IDX_FUSED: the same three launches in one (off by default); the mask keeps its offset (mrows)
++                if (idx_fused.fuseOk(e.ops.idx_fused, m, n_comp_end, cb, nbk, pk)) {
++                    try e.ops.idxFused(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.every, ch.bmax, ch.pidx, pk, mrows, ch.pool_ms, 0, m);
++                } else {
++                    try e.ops.blockMax(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.bmax, nbk, m);
++                    try e.ops.topkIndices(e.s, ch.bmax, nbk, m, nbk, pk, ch.every, ch.pidx);
++                    try e.ops.poolPick(e.s, ch.bmax, nbk, nbk, ch.pidx, pk, mrows, ch.pool_ms, 0, m);
++                }
+             } else if (pooled and c.candidate_source < li) {
+                 if (!sh.pool) return error.NoCandidatePool;
+                 try e.ops.applyPool(e.s, ch.score, n_comp_end, n_comp_end, cb, mrows, ch.pool_ms, m);
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 7421c5a..7a80ec4 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -33,6 +33,7 @@ const shard_ring = @import("shard_ring.zig");
+ const graph_cache = @import("graph_cache.zig");
+ const expert_prune = @import("expert_prune.zig");
+ const moe_route = @import("moe_route.zig");
++const idx_fused = @import("idx_fused.zig");
+ 
+ const Engine = prompt.Engine;
+ const Chunk = prompt.Chunk;
+@@ -1207,9 +1208,15 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     // _candidate_blocks: the block maxima (the newest pinned), their candidate_blocks best (ties to the
+                     // lower block, ascending), those with a finite maximum as block ids, the rest -1
+                     const nbk = (nb + cb - 1) / cb;
+-                    try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
+-                    try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
+-                    try e.ops.poolPick(e.s, rd.bmax, nbk, nbk, rd.pidx, c.candidate_blocks, 0, 0, rd.cblk, R);
++                    // TF_DS_IDX_FUSED: the same three launches in one (off by default; the bounds keep the pool's
++                    // regime, past them the unfused sequence runs)
++                    if (idx_fused.fuseOk(e.ops.idx_fused, R, nb, cb, nbk, c.candidate_blocks)) {
++                        try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, rd.bmax, rd.pidx, c.candidate_blocks, 0, 0, rd.cblk, R);
++                    } else {
++                        try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
++                        try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
++                        try e.ops.poolPick(e.s, rd.bmax, nbk, nbk, rd.pidx, c.candidate_blocks, 0, 0, rd.cblk, R);
++                    }
+                     rd.has_cblk = true;
+                 } else {
+                     if (nb % cb != 0) return notPorted(@src()); // _candidates' padded path (buckets are whole blocks)
+-- 
+2.56.1
+

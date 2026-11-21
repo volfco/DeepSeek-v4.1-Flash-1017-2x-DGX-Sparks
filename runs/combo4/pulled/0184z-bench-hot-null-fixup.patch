@@ -1,0 +1,11 @@
+# bench-only (head): Round.init never sets rd.hot (0169/plan 0179, TF_DS_EXPERT_HOT_CACHE); rd starts undefined, so with the
+# hot cache off moe reads garbage through it once 0184 shifts the layout (segfault at 0xaaaa..., round.zig moe hotTrack)
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -383,4 +383,5 @@
+         rd.bucket = 0;
+         rd.finer = ops_mod.onValue(if (std.c.getenv(bucket_finer_env)) |v| std.mem.span(v) else null);
++        rd.hot = null; // set by Model.open only when TF_DS_EXPERT_HOT_CACHE is on (rd starts undefined)
+         rd.has_cand = false;
+         rd.kk = 0;

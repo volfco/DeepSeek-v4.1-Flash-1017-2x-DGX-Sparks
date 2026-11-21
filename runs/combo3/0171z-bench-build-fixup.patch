@@ -1,0 +1,50 @@
+# bench-only fixup (not from port-patches.sh): three compile errors in 0163/0164/0165 found by the 2026-11-17 image build
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index d471ae6..25c2531 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -115,7 +115,7 @@ fn promptCacheBudget(a: Allocator, io: std.Io, gib_opt: ?f64) u64 {
+     const base: u64 = @intFromFloat(0.5 * gib);
+     if (gib_opt) |g| return @intFromFloat(g * gib);
+     const v = getenv("TF_DS_PROMPT_CACHE_AUTO") orelse return base;
+-    if (!std.mem.eql(u8, std.mem.span(v), "1") and !std.mem.eql(u8, std.mem.span(v), "on")) return base;
++    if (!std.mem.eql(u8, v, "1") and !std.mem.eql(u8, v, "on")) return base;
+     const text = procText(a, io, "/proc/meminfo") orelse return base;
+     const info = budget.meminfo(text) orelse return base;
+     return cache_fit.autoBudget(info.total, info.total -| info.available, base);
+diff --git a/zig/src/server/http_body.zig b/zig/src/server/http_body.zig
+index ae68016..24f36d1 100644
+--- a/zig/src/server/http_body.zig
++++ b/zig/src/server/http_body.zig
+@@ -6,7 +6,8 @@ const Conn = @import("http_conn.zig").Conn;
+ const Allocator = std.mem.Allocator;
+ 
+ pub fn limit() usize {
+-    return limitOf(std.c.getenv("TF_DS_BODY_LIMIT_MB"));
++    const p = std.c.getenv("TF_DS_BODY_LIMIT_MB") orelse return limitOf(null);
++    return limitOf(std.mem.span(p));
+ }
+ 
+ /// The body limit: ``TF_DS_BODY_LIMIT_MB`` (a positive MiB count; unset, non-numeric or 0: the served 32) - 64 MiB
+@@ -14,7 +15,7 @@ pub fn limit() usize {
+ pub fn limitOf(mb: ?[:0]const u8) usize {
+     const base = 32 * 1024 * 1024;
+     const v = mb orelse return base;
+-    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return base;
++    const n = std.fmt.parseInt(usize, v, 10) catch return base;
+     return if (n >= 1) n *| (1024 * 1024) else base;
+ }
+ 
+diff --git a/zig/src/server/reply_text.zig b/zig/src/server/reply_text.zig
+index 4c6110b..f5dfba0 100644
+--- a/zig/src/server/reply_text.zig
++++ b/zig/src/server/reply_text.zig
+@@ -47,7 +47,7 @@ pub const FirstFind = struct {
+     at: ?usize = null,
+ 
+     pub fn find(f: *FirstFind, text: []const u8, tag: []const u8) ?usize {
+-        if (tag.len == 0) return find(text, tag);
++        if (tag.len == 0) return findTag(text, 0, tag);
+         if (f.base) |b| {
+             if (b != text.ptr or text.len < f.scanned) f.* = .{};
+         }
