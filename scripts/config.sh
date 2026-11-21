@@ -205,6 +205,12 @@ LOG_KEEP="${LOG_KEEP:-10}"
 # (issue #49). stop.sh saves what docker kept. LOG_MAX_SIZE= (empty) leaves the docker daemon's own log settings.
 LOG_MAX_SIZE="${LOG_MAX_SIZE-100m}"
 LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
+# The CPUs both ranks' containers may run on (docker --cpuset-cpus). On a GB10 the Cortex-X925 cores are 5-9 (8 MB L3
+# cluster) and 15-19 (16 MB L3 cluster, cpu_capacity 1017-1024); the A725 cores (0-4, 10-14; cpu_capacity 718-731) are
+# the slow ones. 15-19 gives the engine the fastest cores on the wide-L3 cluster, inside what the host's docker cgroup
+# parent already allows (spark-glm53's vllm.slice: AllowedCPUs=10-19, its system.slice on 0-9). Empty: inherit that
+# parent's set. A host without these CPUs refuses the start (docker: invalid --cpuset-cpus).
+CPUSET="${CPUSET-15-19}"
 HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 # Rank 0 can read the checkpoint over NFS too, from HEAD_NFS_SERVER (an address of the NFS server that reaches this Spark),
 # through a docker volume HEAD_NFS_VOLUME that start.sh creates here (the docker daemon mounts it: no root, and it survives a

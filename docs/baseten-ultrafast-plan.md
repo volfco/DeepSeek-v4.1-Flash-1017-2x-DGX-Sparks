@@ -3,15 +3,15 @@
 Four changes worth building after a read of [basetenlabs/deepseek-ultrafast](https://github.com/basetenlabs/deepseek-ultrafast)
 at `76766a9` (a Rust/CUDA engine for 4-8 B200/B300 GPUs on the unquantized checkpoint). Its kernels, NVLink
 comms and Redis/RDMA replica sharing do not transfer to an EXL3 TP2 pair on GB10; these four structural ideas do.
-**Nothing here is built or measured.** Every item is a proposal with its gates.
+This document preserves the original designs. The landed series is 0119 (token cache), 0120 (score), 0121 (off-grid resume, measured lossy) and 0122 (sampled speculation). The later switch screens and the outstanding gates are recorded in the [benchmark matrix](../to-benchmark.md) and [current handoff](../continue.md).
 
 Order (cheapest and safest first):
 
 | # | Item | Switch | Bits | Patch |
 | --- | --- | --- | --- | --- |
-| 1 | Tokenization cache | `TENSORFOLD_TOKEN_CACHE_MB` (rank 0) | identical | `0118` |
-| 2 | Teacher-forced scoring | `TF_DS_SCORE=1` (rank 0) + `tools/score.py` | identical when unused | `0119` |
-| 3 | Exact-position resume | `TF_DS_EXACT_RESUME=1` (both ranks) | **to be measured** (phase A), **LOSSY** (phase B) | `0120`, `0121` |
+| 1 | Tokenization cache | `TENSORFOLD_TOKEN_CACHE_MB` (rank 0) | identical | `0119` |
+| 2 | Teacher-forced scoring | `TF_DS_SCORE=1` (rank 0) + `tools/score.py` | identical when unused | `0120` |
+| 3 | Exact-position resume | `TF_DS_EXACT_RESUME=1` (both ranks) | **LOSSY** on observed off-grid cuts (phase A); phase B proposed | `0121` |
 | 4 | Speculative sampling | `TF_DS_SPEC_SAMPLE=1` (both ranks) | **LOSSY** for sampled streams | `0122` |
 
 ## Ground rules (this repo's, applied to every item)
@@ -436,7 +436,7 @@ host time to issue the whole `round.forward` (`model.zig:1504-1507`), which incl
 Engram rows between stretches (`round.zig:1537-1551`); `forward` contains it. So it is **not** launch overhead:
 it points at the Engram host step (item E and the second pass below) more than at items A and C.
 
-- Run one block with rank 0's `--profile` serve argument and nothing else changed (`runs/overnight/RESULTS.md`
+- Run one block with rank 0's `--profile` (an argument of the batch driver `tf-dsv41-lanes` run as rank 0, not of `tensorfold-native serve`, which has no profile) and nothing else changed (`runs/overnight/RESULTS.md`
   notes it was never run: it is a CLI argument, not a recipe setting). Its line (`families/dsv41/lanes_main.zig:425`)
   gives `step_ms`, `send_ms`, `enqueue_ms`, `forward_ms`, `absorb_ms`, `logits_ms`, `sample_ms`, `pass_ms` a round.
 - If `send + enqueue + logits + sample + pass` is a small share of `step_ms`, drop items A and C. If it is large,
@@ -559,7 +559,7 @@ How to read the tables:
 
 ### Instrumentation first
 None of the items below is sized. These four make them sizable, and are cheap:
-1. Rank 0's `--profile` serve argument, one block (`step_ms`, `send_ms`, `enqueue_ms`, `forward_ms`, `absorb_ms`,
+1. Rank 0's `--profile` (the batch driver `tf-dsv41-lanes` as rank 0; serve has none), one block (`step_ms`, `send_ms`, `enqueue_ms`, `forward_ms`, `absorb_ms`,
    `logits_ms`, `sample_ms`, `pass_ms`; `families/dsv41/lanes_main.zig:425`). Never run (`runs/overnight/RESULTS.md`).
 2. A send column for the draft pass's frame: the pass timer starts after the flush (`families/dsv41/lanes.zig:1335`),
    so that frame's cost is in no column today.

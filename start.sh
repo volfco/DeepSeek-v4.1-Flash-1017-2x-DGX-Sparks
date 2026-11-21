@@ -302,6 +302,8 @@ unset _cap _p2 _what
 # log only when rank 0 goes away first (docker stop rank 0, read rank 1's log, then ./stop.sh). It synchronizes the stream
 # at every chunk and round: for attribution only, never for speed figures. Empty or 0: off.
 [[ "${RANK1_PROFILE:-0}" == 0 ]] || FOLLOW+=" --profile $RANK1_PROFILE"
+# LOGITS_SHA=1: rank 1 prints each prompt pass's logits sha (--logits-sha; the 0121 step-0 identity experiment)
+[[ "${LOGITS_SHA:-0}" == 1 ]] && FOLLOW+=" --logits-sha 1"
 AUTH=()      # curl's Authorization header (a file, so the key stays out of ps) when API_KEY=1
 if [[ "$API_KEY" == 1 ]]; then
   if (( DRY )); then log "DRY_RUN: API_KEY=1: the key would be read from $API_KEY_FILE (created, mode 600, when missing)"

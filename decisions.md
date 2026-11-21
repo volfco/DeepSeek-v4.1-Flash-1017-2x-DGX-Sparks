@@ -3,6 +3,206 @@
 Short entries: what was decided, what else was considered, and why. Code references are patch numbers under
 `zig/patches/`.
 
+## 2026-11-20 deep-context quality: configuration kept; judge quality sampled, not greedy
+
+Change nothing in production after a reported degradation in a ~533K-token session. The configuration had not changed since the last validated deploy, the lead reader is bit-identical at 4K–530K, and cache resume equals cold prefill. The greedy probe's 530K failure (and the repo baseline's at 256K) did not survive sampling: at T=1.0 production recalled all eight codes and the sum at 530K on 5 of 5 seeds. What remains is a model property, not a switch: mid-context order slips at 530K, and 2 of 5 seeds at 64K reasoned to the 8,192 cap by over-verifying. Considered and not done: rolling back to the repo baseline (greedy it was no better, and sampled it is unmeasured); adopting upstream PR #138's `LOOP_GUARD` (unmerged, untested on a pair, and aimed at short repeated passages, which the observed runaway is not). Quality checks on this model use T=1.0/top_p 0.95/top_k 20 with explicit seeds, never greedy (upstream MiaAI-Lab#54). [Results](runs/depth-quality-20261120/RESULTS.md)
+
+## 2026-11-19 draft ladder built, not adopted; the six-draft block confirmed
+
+Keep `TF_DS_DRAFT_BLOCK=6` and leave `TF_DS_DRAFT_LADDER` out of the recipe. The ladder offers a seven-draft block's last draft only when this pass's survival through six drafts, times the stream's running share of right seventh drafts, reaches 0.43. On 21 code-like prompts it is 0.4% faster than six (±0.5% across prompts) and equal to plain block 7 (−0.03 ± 0.14% paired); its keep rule asked for 1%. The cost it cannot avoid is the seven-row pass: with the seventh draft unused that pass is 0.9% slower than six by rounds and verified drafts, and the seventh draft earns back about that much. A width ladder that picked six or seven perfectly per prompt would have reached 0.9%. The same arms measured six 3.2% faster than five (slower on none of the 21 prompts, equal on one by rate), which is the first broad measurement of the November 18 deployment. The ladder's replies equalled production's on validation and all 25 probe replies; the 39-case exact panel was not run on it. Considered first and dropped: a per-stream ladder with trial rounds at seven, because scoring a draft from the next round's tokens needs no trials. The bench image and the `draft-ladder` branch are kept. [Results](runs/draft-ladder-20261119/RESULTS.md)
+
+## 2026-11-19 production: Engram lead reader on, provisionally
+
+Set `TF_DS_ENGRAM_LEAD=1` in production's `.env`, at colum's instruction, ahead of its full test. The narrow run gave +4.9%, +5.0% and +4.5% cold prefill on natural text at 8K, 32K and 100K with decode at one and four streams unchanged and every reply identical; the screen had shown +7.5–11.6% on random-word prompts. It is a `.env` line and not a recipe default, so it stays easy to remove. What it has not passed: a soak of 1.5M uncached tokens, an hour or more of process age, the long-lived deep-session run, 300K prompts, the warm tail of a deep turn and the 39-case exact panel. It was on during the November 13 slowdown, together with the 256 MiB row cache, which is off here. Those tests are owed at the next full benchmark round, with production as the lead-on arm and a lead-off control. The draft-widening thresholds 3 and 2 and the seven-draft block were measured in the same run and not adopted: no threshold beat the control gap, and block 7 gained on three code prompts and lost on two others and at two streams. [Narrow run](runs/suite-20261119/RESULTS.md) · [Deploy record](runs/deploy-lead-20261119/deploy.log)
+
+## 2026-11-18 production: six-draft block deployed
+
+Run `TF_DS_DRAFT_BLOCK=6` with the default threshold. Of the four variants measured it is the only one with no cell below the control spread: Tetris +2.5%, the code and JSON prompts +2–3%, two code streams +2%, prose and four or more streams unchanged, every reply identical. Block 7 gained 9.5% on one code prompt and lost 0.7% on one sampled seed. Widening every pass cost about 1% on prose and 2.5% at four streams. The image is the pinned series plus one patch, promoted from the gated cross-build so the recipe starts it unaided; the spill namespace starts cold. A lower threshold and block 7 for code-heavy use remain unmeasured options. [Results and adoption](runs/draft-block-20261118/RESULTS.md)
+
+## 2026-11-18 production: tokenizer cache deployed
+
+Deploy `TENSORFOLD_TOKEN_CACHE_MB=32` on both ranks and change nothing else. It is the only candidate switch that held up on the pinned image at every depth tested. It saved 206–229 ms of first-token latency on 250K appends and 445–508 ms at 500K, and stayed within 0.2% of deployed four-stream output at 3K. The three Engram switches stay off: adding them to the cache changed 3K four-stream output by −4.1%/−2.1% against deployed. Those processes were under six minutes old, and the steady-state cost is unmeasured. The four GPU switches stay off because no pinned-image comparison shows a gain from them. Unkeyed drafts lower tokens per round, and snapshot trim needs a different image. The restart at 17:19 UTC kept the image and the spill namespace, and all eight saved replies matched. [Deploy evidence](runs/deploy-token-cache-20261118/production.validate.log) · [Pinned attribution](runs/overnight-opt/RESULTS.md#pinned-configuration-attribution-and-keyed-drafts)
+
+## 2026-11-18 follow-up benchmarks
+
+Prefer adaptive grace for a near-finished lead with queued followers on the benchmark image. It reproduced the five-second control’s lead completion at 4K and 100K and cut the follower’s wait for first output by ~6.1 s. Fixed 500 ms completed the followers’ first tokens about half a second earlier and delayed the lead by about three seconds. Maintain the general incumbent pending representative arrivals and a service objective. The 300K queue slowdown reproduced in four peak states, including an uneven partition split. Five of twelve revisits restored the complete prefix from disk. [Follow-up campaign](runs/engine-followup/RESULTS.md)
+
+Favor the 500 ms sharded held-prefix deadline for the tested four-request 300K pressure case. On balanced and asymmetric partitions it reduced maximum queue from about 25 s to 6.32–6.37 s, raised throughput ~18%, and preserved burst hashes, victim cache cuts and the armed 39-case exact output. Isolated builds tested the KV policy and adaptive scheduler separately. [Planner evidence](runs/engine-followup/RESULTS.md#shorter-held-prefix-patience)
+
+Keep fetch-mode KV decode. At matched low occupancy, 300K four-stream rounds took 79.68 ms for fetch and 80.34 ms for owner. The previous owner arm following exact was a high-occupancy run with very little overlap. Its timing is excluded. Prioritize fixed-row compressor/indexer measurements at depth. [Phase attribution](runs/engine-followup/RESULTS.md#eager-phase-attribution) · [Owner/fetch replay](runs/engine-followup/RESULTS.md#fetch-versus-owner-decode)
+
+Keep L2 prefetch on and retain the current uncapped T13 prune rule. Disabling prefetch lengthened median matched physical rounds by 5.6–6.3% for one stream and 2.2–2.5% for four. Cap 12,1 improved eight-way sampled task throughput by ~18%, but the held-out NLL increase exceeded the quality margin and all eight deterministic replies changed between solo and concurrent runs. Keep the 32 MiB tokenizer cache for immutable long chats. At 500K it saved 445–508 ms median client TTFT across three append sizes, including 436–437 ms of encoding. [Configuration record](best-runtime.md) · [Controlled measurements](runs/engine-followup/RESULTS.md)
+
+## 2026-11-18 admission and runtime configuration
+
+Keep the eight-switch `best` recipe as the general incumbent. The 500 ms finish grace on the benchmark image improved staggered short-reply throughput by 45% at 4K and 41% at 100K with ~2K uncached tokens. At both depths the first reply took over seven seconds longer to finish. Zero grace produced the fastest 4K bursts and the longest active-stream pauses. Track queue-oriented and batch-throughput choices separately until a service objective settles the trade-off. [Configuration record](best-runtime.md) · [Trial and controls](runs/admission-grace/RESULTS.md)
+
+## 2026-11-17 benchmarking decisions
+
+Keep the deployed image and settings as the control. After the cold-prefill gains, a sampled trial with a production return block and identical-input replay found ~5% lower warm TTFT for the eight-switch `best` configuration. Its sampled decode differences changed direction with depth. Exclude finer buckets from timing rankings until exact passes. The original T15 screens omitted the expert cap. The corrected eight-row trial with the cap held fixed found a 0.0–0.5% median decode-time reduction, below the timing threshold. [Handoff](continue.md) · [Benchmark matrix](to-benchmark.md)
+
+The new controlled 250K chat trial favors the 32 MiB token cache on persistent multi-turn histories. Prioritize the 257/258-token admission discontinuity and the controlled 300K placement-pressure case for engine changes. [Review round](runs/review-round/RESULTS.md)
+
+Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to eager MoE. Prioritize admission, warm-turn encoding and acceptance at depth. The existing off-grid and score-set runs establish output changes and regression coverage; quality bounds require independent continuations and concurrent workload evidence. [W4](runs/w4/RESULTS.md) · [Depth](runs/depth/RESULTS.md)
+
+## 2026-11-16: the benchmark-gap work packages land as `0129`-`0145`, off by default, unrun
+
+- Scope: major (seventeen patches: the Engram proposed rows of `to-benchmark.md`, W1/W4/W5/W10 of
+  `docs/benchmark-gaps-and-moe-review.md`, and the two second-pass instruments).
+- Considered: (a) land them on `series-0119` as the review's rules say, (b) land them on
+  `decode-step-structure` (the current `zig/patches` tip, including `0123`-`0128`), (c) keep them in a scratch
+  folder only. Chose (b), then export through `scripts/port-patches.sh` into `zig/patches/`: the docs' rule exists to
+  avoid conflicting with the in-flight series, and basing on its tip achieves that directly (two patches needed a
+  hand-resolved conflict with `0134`/`0141`, both taken as "keep both"). The export path is (a) + (c): the script
+  verifies on a clean `TF_REF` checkout that the patches apply in filename order and reproduce the branch, which
+  `git format-patch` alone does not.
+- Numbering: the review said "number new patches from `0130`", but the export numbers from the last hand-written
+  patch and produced `0129`-`0145`. Renaming the generated files would break the script's own bookkeeping, so the
+  files keep the numbers the script gave them and every doc carries the mapping (plan number → landed number).
+- Not landed: `TF_DS_ENGRAM_SPLIT=2` (`LEAD` already owns the second AIO ring `paio2`/`lead_ring`, and `aioGather`
+  writes contiguous id slices into contiguous destinations, so striping needs per-row destinations or a bounce copy —
+  not a minimal change) and the streamed-reply text scan (W10-b; the allocator question is unresolved and the change
+  must stay bit-identical for stop sequences).
+- Gates: host only. `zig build test` green per commit and `zig build` green after the merge (that is what compiles the
+  batch driver and the server, which the host test root does not reach). Nothing has run on the pair; the W1 row-cache
+  fix and `0143` (sequential class) carry their pair gates in `to-benchmark.md`.
+- Consequence: `zig/patches/README.md` gained seventeen rows and the image tag changes, so the next `./start.sh`
+  rebuilds; `runs/bench-prep/` (README, `run_arm.sh`, `r8.requests.json`, `env-vars.md`, `overnight-fold.md`) is the
+  other agent's entry point. `0142`'s `.cu` is UNVERIFIED-BUILD — if the image build fails on `probe.cu`, drop that
+  patch before rebuilding.
+
+## 2026-11-15: pair's first request after a restart fails deterministically (pre-existing, both images)
+
+- Scope: operational (the smoke step in `start.sh`; every matrix/ultrafast arm restart).
+- Symptom: `start.sh`'s 5/5 smoke test now fails on **every** restart, deterministically: the very first
+  request after a fresh process exits with `error: cuLaunchKernel: CUDA_ERROR_INVALID_VALUE`, logged as
+  `ended ... reason=error (CudaFailed) prompt=8 tokens=1`, HTTP 500. The identical request retried afterwards
+  passes (HTTP 200, `sha=207398c96af1`), and every arm's later requests pass — replies are unaffected.
+- Ruled out: not caused by the `0123`-`0128` series — reproduced on `exl3-tp2-f3f69b951cd3` (the pre-series
+  campaign image) with the same flags, same signature, 2/2 restarts. The ultrafast campaign (2026-11-15, image
+  `f3f69b951cd3`) passed the same smoke until at least ~18:10Z; the failure appeared later the same day, with no
+  reboot or driver change visible in the logs (CUDA Forward Compatibility 13.3 / driver 580.159.03 then and now).
+- Why it matters now: `bench_matrix.sh` treats restart rc≠0 as RESTART-FAILED and aborts the arm, so **no matrix
+  arm can run while this persists**. The arms reported here were driven with `just restart-head` + manual `bench.py`
+  against `http://100.95.49.21:8000` instead. `exact.py`/`validate.py` are unaffected (they never asserted on the
+  smoke, only on replies).
+- Unknown: the mechanism. It is deterministic per fresh process and benign in effect. Needs either the pair's
+  timing (reboot the pair once and retest before any bench or campaign), or an engine-side look at what the first
+  round's first `cuLaunchKernel` does differently (the log names no kernel; the failure hits before any token).
+  Not root-caused; not blocking; recorded so nobody re-derives it the hard way. Until it is, `start.sh`'s smoke
+  gate stays red and the harness's arms cannot be used as-is.
+
+## Decode-step structure (`0123`-`0128`): what landed from the plan's "To explore" A-E
+
+- Scope: major (six switches + one design note; every one is off by default and bit-identical to the base; nothing
+  ran on the pair).
+- Considered: (a) the plan's A-E end state (device accept chained into the pass, one frame, one graph a round, side
+  streams, PDL everywhere, fused kernels, Engram staging) as one implementation push — rejected: the rank-0 profile
+  (`runs/ultrafast/prof/*.log`, graphs on: send 0.005/0.006, absorb 0.26/0.29, logits 0.13/0.07, sample 0.00 ms of a
+  34.4/53.6 ms round; forward 89%; eager MoE 16.1/31.5 ms of 34/56; a_idx 0.57/0.61; Engram 0.47/0.57) says the
+  host path is ~1% of a round and the one-frame stretch cannot pay; (b) implement only what the operator picked per
+  item, each behind its own switch with its own gate; (c) drop A-E as unproven — rejected: the operator asked for the
+  implementation with the profile as the arbiter of keep/drop, not as a reason not to write the patches.
+- Decision: `0123` `TF_DS_ROUND_PROFILE` (the served process's profile at `/metrics`; attribution only); `0124`
+  `TF_DS_DEVICE_ACCEPT` (chain windows compute their keep on the device — the foundational piece of Baseten's on-device
+  accept; the one-frame verify+pass stretch stays unbuilt: the depth rule, the cuts and the T26 keys are rank-0 host
+  state); `0125` `TF_DS_COMPRESS_SIDE` (the compressor chain on its own stream); `0126` `TF_DS_PDL`
+  (`griddepcontrol` at every hand-written kernel's entry + the attribute on their launches + `tools/nsys_breakdown.py`
+  as the gap measure; the kit's Triton kernels already launch PDL); `0127` `TF_DS_FUSED_COMPRESS2` (the ratio-2
+  compressor chain in one kernel; the review-caught cross-block race in drafted verify windows closed by resolving
+  partners against `rslot` in-kernel); `0128` `TF_DS_ENGRAM_BOTH` (both Engram layers' rows land at the round's first
+  Engram cut; three stretches a round become two). Item E's full staging was **not** built: without GPUDirect Storage
+  the libaio completion is only observable on the host, so no kernel can wait on it — option A needs a cuFile demo on
+  the pair plus a measurement that the landing is on the critical path after `0128`; option B (poll a pinned host CQ
+  word) is rejected on risk/reward; the analysis is in `docs/engram-staging.md`. Also checked and dropped: the
+  drafter's blocks already group their stages' `wkv` into one `grouped` call at absorb time (`draft.zig:505`), so the
+  `mtp_wkv` analogy is spent.
+- Why: the plan's own sizing gate ("if send + logits + sample + pass is a small share of step_ms, stop here") answers
+  against the one-frame stretch and item C's urgency — the profile, not optimism. Each patch is one idea behind its
+  own switch, off by default, host-tested only, and owed the pair gates (`exact.py` IDENTICAL, then the smoke, then
+  `validate.py --compare`) before any is called done. Export: `/home/colum/Workspace/tfref-next-handover/` (format-patch,
+  applies onto `series-0119`; verified by tree hash on a scratch clone). The 0119/0121 run was live while these were
+  made, so no `.patch` file entered this checkout's `zig/patches/` — image hash unchanged; the six README rows and the
+  `to-benchmark.md` section ride the working tree uncommitted, like the 0119-0122 series. `AGENTS.md`'s rule that the
+  hardware smoke is part of landing any series applies unchanged: these are not landed until they pass it.
+
+## Baseten-ultrafast series 0119-0122: four switches, off by default, unmeasured
+
+- Scope: major (four new switches; `0119`, `0120` and `0121` are bit-safe, `0122` is LOSSY by construction).
+- Considered: (a) the plan's four items as one patch each, all off by default and host-tested only; (b) the two
+  identity-safe items only (`0119`, `0120`), deferring resume and speculative sampling; (c) all four plus resume phase B
+  (keeping the reply's decode-written rows). Chose (a): phase B is LOSSY and the plan itself gates it on phase A's
+  numbers, so it stays a proposal.
+- Decision: `0119` tokenization cache (`TENSORFOLD_TOKEN_CACHE_MB`, rank 0), `0120` teacher-forced scoring
+  (`TF_DS_SCORE=1` plus `tools/score.py`), `0121` exact-position resume phase A (`TF_DS_EXACT_RESUME=1`, both ranks,
+  in the fingerprint so a mismatch refuses at the hello; `TF_DS_DEBUG_SPLIT` for step 0), `0122` speculative sampling
+  (`TF_DS_SPEC_SAMPLE=1`, both ranks, in the fingerprint, refused with `TF_DS_T26_KEYED_DRAFT`). The plan's numbers
+  assumed `0118` was free; this repo already had `0117` (energy) and `0118` (LoRA), so the series starts at `0119`.
+  Refusals keep the LOSSY and structural cases apart: `0121` refuses the spill tier, `KV_SHARD`, `TF_DS_PREFILL_SLICE`
+  and image prompts and keeps off-grid states in memory; `0120` refuses anything but `n == 1`, `stream` false,
+  `temperature` 0, no other live stream.
+- Why: each switch is one idea with its own gate, so a failed idea can be dropped without touching the others, and the
+  ground rules are the series' (off by default, host tests, identity gate, then a hardware smoke). What is still
+  unmeasured, by design of this pass: `0119`'s `encode_s` share of TTFT at 100K/250K/500K, `0120`'s self-consistency set
+  (`tools/score_sets/` is not generated), `0121`'s step 0 (`TF_DS_DEBUG_SPLIT` against `--logits-sha 1`) and its
+  cold-equals-warm gate (`tools/resume_exact.py`), and `0122`'s distribution gate (`tools/samp_test.py`). Nothing ran on
+  the pair.
+
+## 0122: speculative sampling needs the drafter's full-vocabulary normaliser
+
+- Scope: major (the shape of the `0122` patch; a sampled stream's reply changes distributionally, not bit for bit).
+- Considered: (a) a greedy draft as a point-mass proposal — accept with probability p(x), residual p minus x: exact and
+  needs no normaliser, but its acceptance rate is p(argmax), which is the rate today's greedy drafting already gets, so
+  it cannot beat `0054`; (b) the textbook rule with q = the drafter's `softmax(logit / T)` over the full vocabulary,
+  which needs `sum exp(logit / T)` a step on the device and across both ranks (Baseten's own design); (c) comparing two
+  independent draws (draft against the target's own draw): exact with no normaliser, but its acceptance is `sum p q`,
+  below (a) and `0054`.
+- Decision: (b). Zq is accumulated in the noise kernel we own (`tf_ds_keyed_noise_kernel`, while the row is still
+  clean), gathered peer-to-peer a step; q at the target's candidate set comes from a new `tf_ds_gather_cols_kernel` with
+  the keyed Gumbel removed on the host. The accept and residual decisions rewrite `o.sampled[]` in `verifyFn`, so the
+  core's `acceptPath` implements the rule with no core, engine or wire change; the drafts' key is the stream's seed with
+  a draft tag, independent of the sampler's.
+- Why: (a) would have been the cheapest patch and is exactly why it was rejected — a switch that cannot raise acceptance
+  is not worth a LOSSY invariant. (b) is the only variant that can beat `0054`, which is the plan's own bar for keeping
+  the item. The residual needs q over the target's candidates, which is why the gather kernel exists; `0054` stays the arm
+  to beat and this switch should be dropped if it does not.
+
+## 0114 segfault: `Model.rc` undefined on the cache-off path — one-line init fix
+
+- Scope: major (a crash on every first request with default settings; caught before any benchmark counted).
+- Considered: (a) bisect the seven patches on the pair; (b) root-cause from the crash trace first; (c) ship with
+  `TF_DS_ENGRAM_ROWCACHE_MB` set (the cache-on path works) as a workaround.
+- Decision: (b) — trace (`engram_io.get` ← `engram_aio.submitLocked` ← `aioGather`) + experiments (cache-on works;
+  `ENGRAM_AIO=0` works; defaults crash) pinned it: `Model.open` builds from `m.* = undefined` (field defaults are
+  dead there), `0114` assigned `m.rc` only in the row-cache-on branch, and `m.aio.?.rc = m.rc` laundered the
+  undefined 0xAA optional into every ring (`RowCache.io` at +0x10 = the exact fault address). Fix: `m.rc = null`
+  in `Model.open`'s init list (also kills wild `deinit`s at errdefer/close), folded into `0114`'s own segment.
+- Why: (a) costs a rebuild per bisect step and the trace already named 0114's file; (c) hides a latent crash for
+  anyone running defaults and leaves the wild-`deinit` paths. Why every prior gate missed it: no host test runs
+  `Model.open` (GPU-only) and diffs cannot show `= undefined` construction — only hardware could. Standing rule
+  added to `todo.md`: a hardware smoke is part of landing any patch series. The pass after the fix: all 9 gates
+  `IDENTICAL`, `0114` signed + on its read-sum win (`to-benchmark.md` Results).
+
+## Hit-rate patches 0110-0116: implementation choices
+
+- Scope: minor (how the seven chosen findings landed; the finding choice is logged above).
+- Considered: (a) land as implemented, review after; (b) independent review first, fix, then land; and per-finding:
+  0112's supersede relation on unidentified ancestry (protect vs base behaviour), 0115's shared flag plumbing
+  (per-mark bits vs keep-position set), 0113's stride anchor (positional on the trimmed chain vs turn depth).
+- Decision: (b) — the review found one blocker (0113's reopen depths landed off the stride grid; the first publish
+  after a restart deleted every extra) and two majors (0112's `adopt` never marked a restored state's family copy
+  shared; 0116's miss split attributed `tail_window` before the token match). All fixed with regression tests
+  (0113's fix is mutation-verified) before landing. Per-finding: unidentified ancestry falls back to base eviction
+  (protection is never claimed on guesswork); 0115 keys on the shared cuts' keep positions (the deepest shared keep
+  is triggered by the history mark, so per-mark bits cannot cover the `min_gap` case); 0113 anchors the stride in
+  each point's turn depth with the root at 1 (a positional rule decays as the chain is pruned, and the depth grid
+  must survive a store reopen).
+- Why: the switches move eviction, spill manifests and metrics only — kept states stay exact copies and resume stays
+  bit-exact — but policy bugs still cost the hit rate the patches exist to win (the review's blocker would have made
+  `TF_SPILL_STRIDE` useless across restarts). Gates: host suite + 315 server tests per step, and a clean-room apply
+  of the seven exports (tree-identical to the chain). `0110`-`0116` in `zig/patches/`; measurement rows in
+  `to-benchmark.md`; none run on a pair yet.
+
 ## Hit-rate patches 0110-0116: scope, switches, and #4 as benchmark rows
 
 - Scope: major (which review findings become engine patches and how they are gated).
@@ -127,3 +327,375 @@ Short entries: what was decided, what else was considered, and why. Code referen
 - Why: today's checkpoint passes both checks, so an unconditional refusal would only be exercised by a future checkpoint;
   behind a switch it can be A/B'd against the warning path. The token-map bound is a no-op for every id the map was made
   for, so it needs no switch.
+
+## 0121 exact resume: LOSSY, not bit-identical — step-0 gate found the verdict (2026-11-16)
+
+- Scope: major (retention of the 0119-0122 series' 0121; bits).
+- Considered: (a) W8 phase 1 — resume off-grid only when the warm chunk's and replay's row counts equal the cold
+  pass's (the review's 3.2 candidate, kernel-class thresholds at 64/128 rows); (b) W8 phase 2 — inert-row padding to
+  cold cell M (experts -1 picks, zero rows, gate GEMM at cold M, replay split at grid); (c) LOSSY opt-in with a
+  quantified drift; (d) drop 0121.
+- Decision: (c). 0121 phase A stays `TF_DS_EXACT_RESUME=1`, opt-in, never default; grid resume (2048) stays production.
+- Why: step 0 (`docs/benchmark-gaps-and-moe-review.md` §6 W8, the plan's split-identity experiment, run on the pair
+  against `--prompt-cache-gib 0` with spill off): turn 6's reply `96d0fd7dcd8e` under `TF_DS_DEBUG_SPLIT=8228` equals
+  the warm-resume sha from the campaign run (float-NLL arms A-F, `runs/matrix/step0-cold-shape/`); bits move for EVERY
+  off-grid cut (`DEBUG_SPLIT` 8228/9300/9380/9440/9480), in both directions, at every second-part size tested
+  (16-2012). The cause is not the 64/128 kernel classes but any chunk-shape change (accumulation order under
+  different batch shapes). Phase 1 as approved at the time is vacuous (an off-grid keep whose shapes equal the cold
+  pass's is grid resume; no re-gate can bite). Phase 2 cannot restore equality either: the restored prefix's bits are
+  whatever the parent pass's tail shape produced (turn 5's M=36 tail pass vs turn 6's M=89 cell), baked into the kept
+  state no kernel emulation inside the later turn can rewrite. The full split-identity ladder: control arms bit-stable
+  (t3k identical in all arms), reward sha on splits; `--logits-sha 1` prints nothing on this build (no output on either
+  rank, TF_LOG=debug or not); the teacher-forced score was the working instrument (t10k 2.6198 -> 2.4719/2.5886/2.5609/
+  2.5496/2.4852; t70k 2.7811 -> 2.8846/2.7893/2.8104/2.8358/2.7581). Grid resume remains the only bit-stable resume.
+  Drift on agent traffic measured by the campaign: turns 6-8 of 8 replied differently from cold, deterministic 3/3
+  passes; TTFT 1.31 -> 0.26 s on the affected turn. Withdrawn the claim in continue.md/todo.md that phase A was
+  bit-identical (or «grid resume matches cold» as a reason exact-resume could be safe). Artifacts:
+  runs/matrix/step0-cold-shape/.
+
+## 0160-0181 the second-pass series: scope, gates and delivery (2026-11-16)
+
+- Scope: major (a new patch series on top of 0129-0145; no bits change where marked identical).
+- Considered: (a) only the plan's "Where to start" items; (b) every repo-side second-pass item;
+  (c) (b) plus the LOSSY opt-ins and the indexer buckets' repo half. For M3/M4/M5/M7 (whose "step 0 that can kill it"
+  gates are all unrun): mechanisms + kit contracts, M3+M4 only with M5/M7 as notes, or notes for all four. Test gate:
+  no tests / host tests per commit / host + CUDA type-check. Delivery: full landing in zig/patches/0160+, patches +
+  README only, or a scratch handover.
+- Decision: (c) for scope; mechanisms + kit contracts for M3/M4/M5/M7 (each off by default, M3/M7 sequential-class);
+  host tests (`zig build` + `zig build test`) per commit, no pair runs; full landing (the series' patches in
+  zig/patches/, README rows, runs/bench-prep2/env-vars.md, to-benchmark rows, doc updates) — the twelve built ones
+  landed as `0160`-`0171`, the rest of the plan's numbers are the odds (see the 0182 entry below). Numbering starts
+  at 0160 (0146-0159 left free), and `scripts/port-patches.sh` gained `--first` / `--keep-generated` so the new
+  series exports beside 0129-0145 without disturbing them.
+- Why: the operator asked for the 2nd-pass ideas as patches ready for a live-benchmark engine, explicitly including
+  M3/M4/M5/M7 and the zstd/Bloom checks; (c) is the widest set that is still patchable in this repo (kit-only items —
+  larger draft block, replay key scoring, old/new key split, the buckets' kit half — cannot be patched here at all).
+  The step-0 gates stay documented as gates-to-run, not gates-passed: the mechanisms are opt-in so the benchmark
+  engine can run the killing experiments (probe study, W4 pure-read probe, tail_window counter) as arms. zstd ships
+  as a check script (`runs/zstd-recompress/`, `just zstd-check`), Bloom as an off-by-default filter front plus its
+  lock-wait check counter. Host tests per commit match how 0129-0145 were gated; running the pair is the operator's
+  and the benchmark engine's step, not ours.
+
+## 0160-0171 the second-pass series: landing and numbering (2026-11-16)
+
+- Scope: minor (delivery mechanics of the series above).
+- Considered: (a) export the lanes' commits with the plan's item numbers (gaps at 0163-0166 etc.); (b) reorder the
+  M-commits to numeric and export contiguous-with-monotonic-map; (c) export contiguous in commit order with a
+  plan→landed map.
+- Decision: (c). `scripts/port-patches.sh --first 0160 --keep-generated` appended 12 patches (`0160`-`0171`) beside
+  the kept `0129`-`0145`; `runs/bench-prep2/env-vars.md` carries the map (the `0129`-`0145` batch's own precedent).
+- Why: (a) leaves filenames out of application order's numbering story and needs script surgery; (b)'s reorder
+  re-applies diffs against foreign context (three conflict regions for no user-visible gain). The export verifies
+  TF_REF + every patch in filename order equals the branch; the map is documentation, not machinery.
+
+## 0167 (M3) the dead-row sentinel goes on the row's INPUT, not its pick (2026-11-16)
+
+- Scope: major (the M3 mechanism's correctness rule).
+- Considered: (a) sentinel on the dead row's sampled pick (the scout's suggestion: "a sentinel no draft carries,
+  truncating acceptPath naturally"); (b) sentinel on the dead row's input token (the child match); (c) a mask
+  parameter through acceptPath/conclude.
+- Decision: (b). The dead row's `o.drafts` entry takes the sentinel, so acceptPath's child match breaks BEFORE the
+  row; the pick sentinel stays as a second guard.
+- Why: `conclude` commits the accepted drafts plus the DEEPEST PATH ROW's pick as the drawn token. With (a) a
+  wrong "dead" call puts the sentinel row IN the path and would emit the sentinel as the drawn token. With (b) the
+  path stops before it: a right call is identical to the unmarked run, a wrong one keeps one token of speculation
+  less and the deferred token comes from the next round's recomputation of the same position (same keyed draws) -
+  the reply's tokens are invariant. Pinned by the accept-truncation test in `lanes.zig`.
+
+## The unbuilt odds renumber from 0182; the named set was already exported (2026-11-16)
+
+- Scope: minor (numbering and docs; no code, no landed patch touched).
+- Considered: (a) keep the plan numbering and let the odds take 0172-0181; (b) number every unbuilt item from 0182,
+  the plan's 0172-0175 block first; (c) leave the unbuilt items unnumbered until they are built.
+- Decision: (b). `0182`-`0185` = top-k, prompt-gather overlap, indexer buckets, bf16 partials (plan 0172-0175);
+  `0186`-`0189` = greedy argmax, expert grid, discarded head, Markov trim (plan 0163-0166); `0190`/`0191` = Snap
+  decoder-ring trim and restore lookahead (plan 0168/0169, also unbuilt); `0192`-`0196` = the follow-up build items
+  (M7 batching, token-align splice, load staging + `uploadAsync`, reply per-round arena, M5's decoded-cache kit
+  contract). Measurement-only items (M3's probe study, the row-cache lock check, the zstd check) keep no number.
+  `just export-second-pass` now runs `--base ce4ea54 --first 0182`.
+- Why: 0176-0181 looked like free slots but are the named set's *plan* numbers, and that set had already landed
+  inside `0166`-`0171` (`runs/bench-prep2/env-vars.md`'s map; verified by applying `zig/patches/*` to TF_REF
+  `fbbc971` in a scratch worktree: tree `43cb8bc` = `second-pass-int` `ce4ea54`). A future `0176-…patch` would be
+  read as the M3/M4/M5/M7 items again, and plan 0172-0175 collide the same way with SERIES.md's rows. Leaving
+  0172-0181 empty makes every number >=0182 a patch that does not exist yet. (a) keeps the collision; (c) leaves
+  the manifest, todo and benchmark rows citing numbers with no code behind them.
+
+## 0182 the fast top-k: a sampled threshold, a shared-memory compaction, and the row select kept as the fallback (2026-11-16)
+
+- Scope: minor (one new kernel + one switch; the existing kernel untouched, both paths exact).
+- Considered: (a) Baseten's own shape, one read: sample a threshold, compact the keys above it straight into `out`,
+  rely on the count landing near k; (b) three reads: the sample, one compacting pass into shared memory, then the exact
+  k-th among the candidates, with the eight-digit select over the row as the fallback; (c) a two-level value-range
+  histogram over the row (deterministic bins, no sampling); (d) leave both top-k kernels and close the finding.
+- Decision: (b), for `topk_indices` only (`topk_i64` untouched: it is not the measured indexer path). Candidate cap
+  4096 a row in shared memory, the tail's `cols` buffer reusing it once the selection is done; the fallback is the
+  existing algorithm, so the result is the exact top-k under the same tie rule whichever path runs.
+- Why: (a) cannot promise identical bits - a sample that misreads a row (all scores equal, a sorted trend) would need
+  some fallback anyway, and its buffer check costs the same. (c) is distribution-blind in a way that matters: the keys
+  are fp32 bits, so bit-prefix bins degenerate on a narrow score range (8 bins for a whole octave), and a value-range
+  histogram needs the row's min/max first - a third read with no better guarantee than (b). (d) leaves the one place
+  the plan measured (`a_idx` at layers 24-36) alone. The three reads are what fits the 48 KB static shared limit with a
+  1024-thread block and keep room for the tail's 2048-entry sort; a bigger cap would not change the answer, only the
+  fallback rate. The algorithm was checked host-side against a brute force (51 rows, `runs/bench-prep2/topk-fast/`)
+  because nvcc is not on this host, so the CUDA remains UNVERIFIED-BUILD until the image build.
+
+
+## 0183 the gather overlap: a side stream with the post deferred at Engram layers, not a double-buffered gm (2026-11-16)
+
+- Scope: minor (one stream + two events + the post's placement; off by default, bits identical).
+- Considered: (a) double-buffered gm with the post deferred a layer (the scout's alternative); (b) a side stream with the
+  post joined where it stands, so the gather overlaps only the host's own work; (c) a side stream and the Engram layer's
+  post moved after that block's row read and upload; (d) nothing - record that prefill gathers have no slack.
+- Decision: (c). The gather runs on its own stream, and `engramApply` keeps its post first unless a gather is in flight;
+  then the post waits for the rows to be read and uploaded.
+- Why: the layer loop's only consumer of gm is the *first* step of the next layer (the pending post in engramApply, tap,
+  attnMixes or head), so at the 38 non-Engram layers there is nothing to defer behind - (a) would hold two gathers and
+  still have no work to overlap them with, and (b) buys nothing outside the same two layers. At the two Engram layers the
+  host reads and uploads the rows before any kernel needs h, so (c) is the one real window (≈70 ms of host read a layer
+  at 2,048 rows against a measured 8.31 ms an exchange), and hc_post writes `h` while the read and upload write `eb`:
+  independent, so the reorder is bit-identical. (d) was rejected because the window, though narrow, costs 30 lines and is
+  measurable; the switch says so and the row will close it if the chunk wall is flat.
+
+## 0184 finer indexer buckets: granularity 1024, ceiling the power-of-two bucket, the fused select given up (2026-11-16)
+
+- Scope: minor (one bucket function + one switch; off by default, bits identical).
+- Considered: (a) exact per-position sizing (nb = deepest/ratio, no rounding); (b) a multiple of 1024; (c) a multiple of
+  the candidate pool's block; (d) keep powers of two and close the finding.
+- Decision: (b), with the bucket clamped at `bucketFor`'s own power of two and `rd.bucket` taken from it.
+- Why: (a) makes every new position a new bucket, i.e. a new captured graph a round and a new capture on the hot path -
+  the plan's explicit cost. (c) is finer than the indexer's own 64-key tiles need (1024 is already a whole number of them
+  and of the pool's blocks, which is what `candFast` and `blockMax` need). The clamp at the power of two is what keeps
+  every buffer, the graph cache's sizing and the candidate pool's bounds valid, and 1024 keeps `idx_all`'s nb where it was.
+  The fused `_topk_sel` is lost for a non-power-of-two `nb` - two launches instead of one - which is the price the plan
+  names and the reason the row pairs this with `0182`'s fast select. (d) leaves the one measured step (`a_idx` at ~65,000
+  against ~66,000 tokens) unexplored for a change of one function.
+
+## 0185 bf16 partials: the GEMM writes bf16 rather than converting after it, and only the chunk path takes it (2026-11-16)
+
+- Scope: minor (one switch, one gather helper, one widen; LOSSY, off by default).
+- Considered: (a) keep `pa` fp32 and convert it to bf16 before the gather (one extra kernel a layer); (b) have the wo_b
+  GEMM write bf16 directly (the same RNE rounding, no convert); (c) apply it to the decode rounds too, where the gather
+  is the RDMA ring; (d) apply it to the 2D split as well.
+- Decision: (b), for the prompt chunk only, with the widen at `ffnMixes` (where the kit reads `ga`).
+- Why: (a) pays a launch for a rounding the GEMM already does when asked for bf16 output - the whole point of a LOSSY
+  switch is to buy payload with bits, not to buy it with a launch. (c) is unreachable without changing the ring's
+  transport (fp32 only) and the decode gather is 4 rows wide - the plan's finding is the prompt's 41.9 MB a rank. (d) is
+  not ours: the 2D split's partials are the pair's own columns written by `prompt2d`, and its quarters post on the main
+  stream. `pb`/`gb` are allocated only when the switch arms, so the off path's memory and launches are untouched, and the
+  recorder lane builds its own Engine and never arms the flag - its fixtures stay exact whatever the environment says.
+
+## 0186 the argmax exchange: what the reduce owes the pick kernel, and where the round decides (2026-11-16)
+
+- Scope: medium (two kernels, a per-round flag, a graph-key bit; off by default, bits identical).
+- Considered: (a) each rank's argmax of its half, exchanged and reduced with strict `>` in rank order, the pair's index
+  offset by the rank's width, rank 0's row[0] rule carried as a sentinel; (b) the same but reduced only on rank 0 and
+  sent back; (c) exchange (value, index) but keep writing `logits` for the non-pick readers; (d) leave the head's gather
+  and close the finding with the measured `head` phase.
+- Decision: (a), armed per round by lanes.zig before the forward (`Round.map`), with the switch `TF_DS_GREEDY_ARGMAX`
+  and the rule in `sampling.argmaxMapWorks`; the reduce writes the picks where `argmaxRows` wrote them, so the device
+  accept chain and the host read are untouched, and the round's graph key gains the choice.
+- Why: (b) adds a second collective and a host hop for nothing - every rank needs the pick anyway (rank 1 verifies its
+  own window), and an all-gather of R * 8 bytes is the cheapest symmetric answer. (c) keeps the very payload the item
+  removes. (d) leaves the plan's measured ceiling unexplored. The rule that had to be got exactly right is the *index
+  space*: `argmaxRows` answers in the whole row's columns (rank 0's half first), so a rank's local column must be offset
+  by `rank * n` - the host simulation (`runs/bench-prep2/argmax-map/`, 58 cases) caught the first version missing that,
+  which is why the patch's ASCII claim of "identical" rests on that run rather than on the reading. The NaN rule follows
+  the same logic: only rank 0's `row[0]` is the whole row's first value, so the pair carries it as an index sentinel and
+  the reduce maps it to pick 0.
+
+## 0164/0187 the expert grid bound: already built for decode, closed for prefill (2026-11-16)
+
+- Scope: none - a closed finding, no patch, the number `0187` stays unused.
+- Considered: (a) build `TF_DS_MOE_GRID_BOUND` as planned; (b) reuse `TF_DS_T15_PLACE_BOUND` and extend it to prompt
+  chunks; (c) close the finding with what already exists.
+- Decision: (c) for prefill, and (a) is void because the decode half exists: `expert_prune.placeBound` under an applied
+  `TF_DS_T13_EXPERT_PRUNE` cap already sizes the decode window's grids and work lists (`round.zig`'s `moe`, landed in
+  `zig/patches/0053`).
+- Why: (b) has no bound to pass. The pruner runs on decode windows only, so a prompt chunk has no applied cap, and the
+  only other candidate - the distinct experts the picks produce - lives on the device while the kit's `rot_in` and
+  `gateup_epilogue` derive `(row, slot)` from `blockIdx.x`; a grid smaller than `rows * slots` needs a place list,
+  which is the kit's half (the plan says so: "the empty-place cost is kit-side"). Applying the cap to prefill to create
+  a bound would be a lossy behaviour change of its own (dropped expert slots on prompt rows), not a grid tweak, and it
+  belongs to whoever measures the cap on prefill. The [November 17 retest](runs/review-round/RESULTS.md#applied-cap-t15) subsequently measured T15 at eight fixed decode rows with an applied cap.
+
+## 0166/0189 the Markov chain stop: a test, because the cheap variant already ships (2026-11-16)
+
+- Scope: none but a host test; the number `0189` carries the evidence, not a mechanism.
+- Considered: (a) add `TF_DS_MARKOV_TRIM` as a toggle around a granted+slack cap; (b) build Baseten's in-graph confidence
+  stop; (c) pin the shipped behaviour with a test and close the item.
+- Decision: (c). (a) would wrap a behaviour that is already the served default - `Lanes.facts` sets
+  `draft_probabilities = drafting`, so `depth.Rule.budgets` takes its node-probability branch, which asks
+  `@min(head depth, granted + draft_slack)` a stream, and the pass's `steps` is the largest of those. (b) needs
+  conditional nodes agreed by both ranks (the plan's own caveat) and is not a repo-only change.
+- Why: a switch that toggles the shipped path is either a no-op or a behaviour change nobody asked to measure. The test
+  is the durable part: it fails if the cap (or the "never under 1" floor) ever regresses, which is what the plan's claim
+  needs in order to stay true. It also corrects the odds list: 0166 was never unbuilt.
+
+## 0190 the Snap trim: the layout carries the trim, so no format version bump (2026-11-16)
+
+- Scope: medium (a layer-shape flag, the snap's ring range, a refusal; off by default, bits identical).
+- Considered: (a) trim `snapCopy` only, leaving the layout as it is; (b) carry the trim in the layout (`LayerShape.ring`)
+  and let planes, sizes and digest follow; (c) ship both (b) and a `format.version` bump, as the scout suggested.
+- Decision: (b), plus the refusal without `TF_DS_REPLAY_FLOOR=1`.
+- Why: (a) desynchronises `snapBytes` from the layout the spill tier packs against (`SpillLayoutMismatch`), and leaves a
+  stored point of the other layout indistinguishable. (c) would invalidate every store on every deployment for a switch
+  that ships off: the layout digest is already part of the rank fingerprint and of the store's compat digest
+  (`spill_tier` -> `format.compatDigest(storeCommon(rank), ...)`), so an untrimmed store is foreign to a trimmed build and
+  the pair refuses a mixed start - which is exactly what a version bump would buy, without touching the deployments that
+  never enable it. The refusal stands because `TF_DS_REPLAY_FLOOR=0` reads ring rows below the floor, where a trimmed
+  Snap holds nothing; the deployment's default is `REPLAY_FLOOR=1`.
+## 0193/0194/audit the kit's sources exist — the gate moves to byte-identity (2026-11-19)
+
+- Scope: major (changes the premise behind the "do not touch the kit" rule; no code change).
+- Considered: (a) leave `continue.md`'s "no source, no safe replication" as-is; (b) keep the do-not-touch rule but
+  correct its reason and record the provenance audit; (c) start replicating kit cubins now, since source exists.
+- Decision: (b). Full mapping in [docs/kernel-kit-provenance.md](docs/kernel-kit-provenance.md). The kit
+  (`bertholomus/deepseek-v4.1-tensorfold-tp2-2xgb10` @ `abe07c7`, `KIT_REF`) is public and manifest-pinned; its Triton
+  AOT cubins' source is `bertholomus/TensorFold` @ `deepseek-v41-tp2` (`kernels.py`); its EXL3 cubins come from that
+  branch's `cuda/exl3/` (built in the nvcr container); PyTorch's sm_120 cubin and NCCL are binaries; the RDMA
+  all-gathers and all host-side Engram/row code are repo-owned. `../TensorFold` (ashhart fork) holds a parallel native
+  implementation, not the served build's source.
+- Why: "no source" was false and would have kept future agents from even considering in-repo equivalents (the
+  0193/0194 fused route already replicates `_rowmm_parts`/`_route_parts` arithmetic on CPU). What actually blocks
+  kit replacement is byte-identity: a rebuild differs (nvcc/Triton build-to-build), and only the exact suite on the
+  Spark pair adjudicates bits. (c) is premature: every replication candidate still owes the same gate as 0193/0194,
+  and the deployed recipe stays pinned. The do-not-touch rule is retained, restated as "a new kit artifact owes the
+  Spark exact gate", not "source does not exist".
+## 0195/0196 the indexer pool fusion and the drafter route: built, reviewed, gated on the Spark suite (2026-11-19)
+
+- Scope: major (two new off-by-default candidates in the series; not deployed; no image changes).
+- Considered: (a) leave `continue.md` item 4 as not-started; (b) build (a)+(b) as off-by-default patches behind
+  switches, verify on CPU, export, independent review, carry gated on the Spark exact suite; (c) also build
+  (c)/(d); (d) adopt immediately in an image.
+- Decision: (b). A = **0195** (`TF_DS_IDX_FUSED`, off by default, refusal on bad values): one launch for the candidate
+  pool's `blockMax -> topk_indices -> poolPick` (shared `tf_ds_topk_select_row` extracted verbatim; `applyPool` and
+  `candFast` left unfused, already single launches). B = **0196** (`TF_DS_FUSED_ROUTE` reused, no new switch): the
+  drafter's gate + routing through the same fused launch, `do_prune=0, dead=0`; `two = e.two != null` mirrors the
+  main model's 2D refusal (flagged, two-token change if preferred otherwise). Engine branch `fused-route`
+  (b1033b4 + b31f3a6 + 25eeab5); patches in `zig/patches/0195-dsv41-tf-ds-idx-fused.patch` and
+  `0196-dsv41-tf-ds-fused-route-draft.patch`; `second-pass-int` untouched; nothing pushed or deployed.
+- Why: (c) is gated on the PDL gap profiler and would double the surface ahead of evidence; (d) puts unproven bits in
+  production. Verification: `zig build test` at base and after both commits shows exactly the two known pre-existing
+  failures (`prompt_cache.test.0178`, `round.hotPick`); the g++ emulation harness of the exact kernel source shows
+  1070 rows / 0 mismatches vs the three unfused kernels and an independent sort-by-key reference; the patches
+  apply clean (0195 onto b1033b4, 0196 onto b1033b4+0195) and the patched tree is file-identical to the branch tip;
+  the independent reviewer found no blockers and could not execute builds (source review). GB10 bit-identity is
+  unproven everywhere — 0195's selection is integer-exact but shares the gate; 0196 inherits 0193/0194's open
+  Triton/libdevice question. Adoption order: 0193/0194 exact suite first, then an A-only arm, then B; none ahead of
+  the gate; both ship behind their unset switches until their own arms pass.
+## 0197/0198 the compressor-norm and rope-store fusions: built, one real defect caught and fixed (2026-11-19)
+
+- Scope: major (two new off-by-default candidates; not deployed; no image changes).
+- Considered: (a) leave (c)/(d) of continue.md item 4 unstarted; (b) build both as off-by-default patches with the same
+  gate discipline as 0193-0196 (switch parse that refuses bad values, fuseOk bounds, exact unfused fallback, CPU
+  emulation of the exact kernel source against the launches replaced and an independent reference); (c) fold Engram's
+  `add2Bf16`+`_engram_gate` too; (d) adopt ahead of the 0193/0194 gate.
+- Decision: (b), and Engram parked (c). C = **0197** `TF_DS_FUSED_COMPRESS2_NORM` (ratio-2 compressor chain + trailing
+  RMSNorm in one launch, decode and prompt; supersedes 0127 when set). D = **0198** `TF_DS_FUSED_ROPE_STORE` (decode
+  indexer key/latent/query and prompt key/latent rope-store chains in one launch each). Engine `fused-route`:
+  `20001bc`, `44e725a`. Patches exported and verified to reproduce the tree from 25eeab5 (and 0197 builds and passes the
+  suite alone: 788/790, the two known failures).
+- Why: the launch counts are small (C ~3, D ~20 a round, 0.05-0.2%) so both are gated on the PDL gap profiler; (c)
+  buys two launches a pass for a `tl.sum`+`tl.exp` reduction-order risk, a bad trade at this size. The per-call-site
+  bit rule was the deciding constraint: the decode path launches Triton kernels and the prompt path torch-parity Exact
+  kernels, so each fused kernel replicates its own call site's kernel rather than a shared one.
+- Verification: C's CPU harness 8100 rows / 0 fused-vs-unfused failures; D's 28,161 rows / 0, plus 923k grid checks and
+  independent references. **D's harness caught a real defect**: the E4M3 scale encoder had transcribed the Triton
+  saturation arm as `fb >= (1087 << 23)` (thought dead) instead of `fb >= (1087 << 20)`, so every f >= 496 encoded as
+  0x80 (-0.0) where the kit saturates to 0x7E (448) — 22,161 of 923,076 blocks. Fused and unfused agreed with each
+  other because both used the same helper; only the independent contract check caught it. Fixed in the kernel and the
+  Zig reference, host test now pins amax 2879/2880/1e4. The independent review then found two more, both fixed:
+  `tf_ds_torch_rmsnorm_row`'s shared reduction array was 128 lanes where rmsLanes is up to 512 (now 512), and the launch
+  decisions ignored `fuseOk`, so an unsupported shape hard-errored instead of falling back to the unfused path (all
+  call sites now gate on `fuseOk`, the 0195/0196 discipline). `zig build test` 622/624 with only the two known failures.
+- Open: GB10 bit-identity unproven (as 0193-0196); the honest risk is `_rmsnorm`'s reconstructed `tl.sum` order and the
+  Triton fma contraction in `_rope_heads`. Adoption order stays 0193/0194 -> A -> B -> C -> D, switches unset until
+  their own arm passes.
+## 0200-0212 the 0195-0199 follow-up review, thirteen items built ahead of the gate (2026-11-21)
+
+- Scope: major (thirteen patches changing four off-by-default fused paths; no new switch but `TF_DS_CHECK_INVALID`; not
+  deployed, no image change).
+- Considered: which of `todo.md`'s nineteen 0195+ items to build before the benchmark: (a) the whole list including the
+  five that their own text says to inspect SASS or re-sweep first; (b) only the four "operational overhead" items
+  (1, 2, 4, 18); (c) everything decidable from source without a profiler — items 1-4, 8-11, 13, 15 and 17-19; (d) wait
+  for the GB10 measurements before any of it. Also: one patch an item, one patch a family, or one squash (chosen: one an
+  item, so a losing item can be dropped without editing a shared patch), and how to handle item 15's dead `ch.invalid`
+  flag — a host reader, an always-on read, or an in-kernel trap (chosen: an opt-in switch with a logged error, no
+  production cost, no synchronisation when off).
+- Decision: (c). Patches `0200`-`0212`, one an item, each riding the switch its parent patch already has: 0200 dead
+  fused-path scratch stores (item 1), 0201 the prompt query on 0198's kernel (2), 0202 the `L == 32` norm barrier (4),
+  0203 `TF_DS_CHECK_INVALID` plus the host slot-distinctness check (15), 0204 the recorded and asserted warp-alignment
+  invariant (17), 0205 `keyFuseOk` (18), 0206 the 0195 key/tile-maxima fold that drops `_score_keys` (3), 0207 the
+  single-exponential finite pair softmax (8), 0208 the shared high-word cache (9), 0209 the packed-column key store with
+  rotation folded in (10), 0210 the norm storing its held pair results (11), 0211 the prune prefix early-out (13), 0212
+  the flattened/wider prompt packing (19). Items 5-7 (explicitly profile-gated), 12, 14 and 16 (SASS or a GB10 re-sweep
+  as their gate) stay unbuilt in `todo.md`.
+- Why: (c) is the largest set whose correctness can be argued and tested from the source plus host tests; (a) spends the
+  benchmark's measurement budget on changes already prescribed to be measured first, and (d) leaves the free deletions
+  and the two silent-invariant guards undone for no gain. 0200 alone deletes 229 KiB of stores at 0195's seven-row
+  shape; 0203/0204 turn two "true because nothing checks it" assumptions into checked ones. Two items are arithmetic
+  arguments rather than refactors and are flagged as such (0207: `expf(0) == 1` exactly with the full path's operand
+  order; 0211: a nondecreasing rounded prefix), so their parity must be checked against the unfused path.
+- Verification: a clean `TF_REF` (fbbc971) + `zig/patches` 0001-0212 applies with every `git apply --check` green (146
+  patches) and reproduces the work tree byte for byte (`diff -r`); `zig build test` passes every suite (73/23/465 test
+  binaries plus the focused `idx_fused`/`rope_store`/`compress2_norm`/`expert_prune`/`exact`/`round`/`ops` cases) in the
+  work tree and in the reproduced one; `clang++ -fsyntax-only` over `dsv41_torch.cu`, `dsv41_ops.cu` and
+  `dsv41_shard.cu` with stub CUDA headers is clean. New host tests pin 0206's key bytes against `scoreKey`, 0208's
+  rebuilt keys and validity bytes, 0209's codes/scales against the separate-pass pipeline at four shapes, 0207's two
+  softmax forms, 0211's early-out against the full rule, and 0205/0204/0212's predicates. **Nothing has run on a GB10:
+  the kernels' bit identity, the SASS claims 0202/0210/0212 owe, and every timing question are open** and are the
+  benchmark's first work.
+- Open: the batch's one gate (39 exact cases, long greedy hashes, PDL both ways, fused-vs-unfused bytes for 0206/0208-0210,
+  and the unfused comparison for 0207/0211) is recorded in `todo.md` and `continue.md`. `0211` adds six predicate tests
+  to a six-slot rule to save two adds and two compares: it may well be a net loss at the served shape and should be
+  judged by the measurement, not kept by default.
+
+## 0200-0212 bench: how it was compared, and the key-encoding mismatch it found (2026-11-21)
+
+- Scope: major (the thirteen patches' first GPU gate: standalone parity, timings, SASS, and eight paired arms).
+- Considered: (a) build the full recipe series 0001-0212 for the bench image; (b) layer 0200-0212 over the prune-six tree
+  that the previous two campaigns measured; (c) skip the bench image and change switches on production's pinned image.
+  Also: which exact-suite reference to judge the fused arms against - (a) production, (b) the previous fused bundle, (c)
+  both; and whether to extend the audit harness or start a new one.
+- Decision: (b) layered image over `bench-prune-six-20261120` (production source + 0195/0197/0198/0199 + the 13), shipped
+  to both ranks as `bench-followup-0212`; (c) both references - production for the inert/single-switch arms, the previous
+  fused bundle for the bundle; the existing `probe.py`/`decode.py` harness extended rather than replaced
+  (`runs/fused-followup-20261121/probe.py`, `build2.sh`, `sass.py`).
+- Why: the full series also carries 0182-0190 (measured and not adopted), so a full-series image would confound the 13
+  with unrelated patches; the prune-six base makes every arm differ from the previous bundle by exactly these thirteen.
+  Production is the right reference only where the switch is off (the patches must be inert); the previous bundle is the
+  right reference where it is on, because 0197 alone is known to move a 1,024-token greedy reply, so production equality
+  is unachievable for `TF_DS_FUSED_COMPRESS2_NORM` arms by construction.
+- Finding: the standalone gate passes (byte parity on every live output, dead buffers unwritten, no spills) but
+  `TF_DS_IDX_FUSED=1` changes 4 of 39 exact cases (`len_20000`/`30000`/`50000`/`64000`; `len_100000` and everything
+  shorter match). The previous bundle never produced keys at those widths, so one of the thirteen changed what the pruned
+  selector sees. First suspect: the fold's key encoding - `idx_fused.zig:scoreKey` XORs the key's top bit where the kit's
+  `_score_keys` does not (`0x80000000ffffffff` vs `0x00000000ffffffff` on the same cell), which would reverse
+  negative-vs-positive scores under a signed comparison in the kit's `topk_select_pruned`. It is unproven: it does not
+  explain `len_100000`, so the width window needs instrumenting before either side is edited.
+- Harness limits worth keeping: the kit's `_score_keys` faults with `CUDA_ERROR_MISALIGNED_ADDRESS` unless `width % 4 ==
+  0`, so it cannot be the byte reference for odd served widths; both trees' decode compressor must be launched with `d`
+  threads (at 128 both disagree with the kit on ~200 bytes a row, which is a harness error, not a tree difference).
+- Open: nothing deployed; production restored and validated. `all`/`allpdl` inherit the `idx` difference; PDL on the
+  fused bundle is unmeasured. The kit `_score_keys` launch the fold replaces is still unpriced.
+
+## Fused follow-up collapse: six folded into 0195, seven kept separate (2026-11-21)
+
+- Considered: (a) leave all thirteen as separate patches; (b) fold all thirteen into 0195; (c) fold only the six that
+  measured faster (0200, 0201, 0202, 0209, 0210, 0212) and keep the seven that measured worse or remain unproven
+  separate (0203, 0204, 0205, 0206, 0207, 0208, 0211); (d) fold by file rather than by measurement.
+- Decision: (c). `0195-dsv41-tf-ds-fused-paths.patch` now carries the four switches plus the six wins; the seven stay
+  as separate patches in the same order. 137 patches total (`zig/patches`), down from 146.
+- Why: the user's rule was "collapse the faster patches into the base patches, leave the patches that had negative
+  performance." The winners are 0200 (dead stores), 0201 (prompt query), 0202 (barrier), 0209 (key store rotation),
+  0210 (held pair results) and 0212 (wider packing). 0207 measured 13-17% slower on the served decode shape, so it is
+  kept despite being a speed win at the fastest shape; 0206 costs the key writes it adds and changed four long-prompt
+  replies in the gate; 0208 caches 0206's words; 0203/0204/0205/0211 are diagnostics and gates.
+- Build: the collapse was done in a scratch tree (`~/Workspace/fold-scratch`) by un-applying 0195-0212, re-applying
+  the four bases, then applying only the winners as one combined patch, then replaying the seven kept patches in order.
+  Conflicts were resolved by keeping both sides; the final tree is byte-identical to the pre-collapse tip
+  (`git diff --stat ffdce65 HEAD` empty).
+- Rejected (d): folding by file would split one measurement's change across two patches, which loses the "this patch
+  is the one that costs X" property the gate depends on.
+- Open: the series now needs a fresh `git apply --check` on a clean 0194 tree (done: all 137 green) and the same
+  pre-collapse gate re-run on the collapsed image, which is a follow-up, not part of this change.

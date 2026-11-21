@@ -52,6 +52,18 @@ ARMS=(
   "nocopies-depth3|TF_DS_NO_COPIES=1 TF_DS_DRAFT_DEPTH3=1|1"
   "fixk3|TF_DS_FIX_K=3|1"
   "base-final||0"
+  # Hit-rate patches (zig/patches/0110-0116): one block each. Every switch is bit-safe, so every gate must read
+  # IDENTICAL against runs/matrix/base.validate.json — the PREVIOUS image's save (these names never overwrite it),
+  # which makes each block a cross-image identity check as well. hr-base/hr-base-final bookend for drift.
+  "hr-base||0"
+  "hr-cuts|TF_DS_SHARED_CUTS=1|0"
+  "hr-edit|TF_DS_EDIT_MARK=1|0"
+  "hr-protect|TF_DS_KEEP_PROTECT=1|0"
+  "hr-stride|TF_SPILL_STRIDE=8|0"
+  "hr-rowcache|TF_DS_ENGRAM_ROWCACHE_MB=256|0"
+  "hr-plan|TF_DS_SHARED_PLAN=1|0"
+  "hr-metrics0|TF_DS_CACHE_METRICS=0|0"
+  "hr-base-final||0"
 )
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$OUT/status.log"; }
@@ -109,10 +121,10 @@ run_arm() {
   t_bench=$(date -u +%FT%TZ)
   # The read histogram around the block (bench.py truncates raw snapshots at 20k chars, past which the engram
   # series sit; the counters reset every restart, so only a per-arm scrape can attribute them).
-  curl -s "$URL/metrics" | grep '^tensorfold:engram_lookup_seconds' > "$OUT/$name.engram-before.txt" 9>&- || true
+  curl -s "$URL/metrics" | grep -E '^tensorfold:(engram_lookup_seconds|prompt_cache|prefix_cache)' > "$OUT/$name.engram-before.txt" 9>&- || true
   "${bench[@]}" > "$OUT/$name.bench.log" 2>&1 9>&-
   rc=$?
-  curl -s "$URL/metrics" | grep '^tensorfold:engram_lookup_seconds' > "$OUT/$name.engram-after.txt" 9>&- || true
+  curl -s "$URL/metrics" | grep -E '^tensorfold:(engram_lookup_seconds|prompt_cache|prefix_cache)' > "$OUT/$name.engram-after.txt" 9>&- || true
   local bench_note="bench-ok"
   (( rc == 0 )) || bench_note="BENCH-FAILED-rc$rc"
 
@@ -123,6 +135,23 @@ run_arm() {
   local accept
   accept=$(sed -n 's/.*accept=\([0-9.]*\)%.*tokens_per_round=\([0-9.]*\).*/\1 \2/p' "$OUT/$name.done.log" |
     awk '{a+=$1; t+=$2; n++} END {if (n) printf "accept %.1f%% tokens/round %.2f (n=%d)", a/n, t/n, n; else print "no-accept-lines"}')
+
+  # hr-* arms: the hit-rate probes after the bench window (their done lines must not join the accept figures).
+  # prompt_reuse: an agent's turns must resume >=90% with other same-system conversations interleaved (exit 1 below,
+  # 2 = the server reports no counter); prefix_fanout: common-system-prompt fan-out, duplicate prefill per follower.
+  local reuse_note="" fan_note=""
+  if [[ "$name" == hr-* ]]; then
+    python3 -I tools/prompt_reuse.py 12000 --require-counter > "$OUT/$name.reuse.log" 2>&1 9>&-
+    rc=$?
+    case $rc in
+      0) reuse_note="reuse=ok";; 1) reuse_note="reuse=BELOW90";; 2) reuse_note="reuse=no-counter";;
+      *) reuse_note="reuse=rc$rc";;
+    esac
+    python3 -I tools/prefix_fanout.py --out "$OUT/$name.fanout.json" --label "$name" > "$OUT/$name.fanout.log" 2>&1 9>&-
+    rc=$?
+    fan_note="fanout=ok"; (( rc == 0 )) || fan_note="fanout=rc$rc"
+    curl -s "$URL/metrics" | grep -E '^tensorfold:(engram_lookup_seconds|prompt_cache|prefix_cache)' > "$OUT/$name.counters.txt" 9>&- || true
+  fi
 
   kill "$sampler" 2>/dev/null
   local mh mw
@@ -141,10 +170,18 @@ except Exception as e:
     print("no-summary", e)
 EOF
 )
-  log "$name DONE gate=$gate $bench_note $sig $accept mem_head_kb=${mh:-?} mem_worker_kb=${mw:-?}"
+  log "$name DONE gate=$gate $bench_note $sig $accept $reuse_note $fan_note mem_head_kb=${mh:-?} mem_worker_kb=${mw:-?}"
 }
 
 log "matrix start: ${*:-all arms}"
+# `just matrix-start arms="a b"` lands here as the words "arms=a" "b" (just substitutes into the shell line
+# unquoted), so strip a leading "arms=" from every argument: both that documented form and a plain positional
+# list then work.
+if (( $# )); then
+  _args=()
+  for a in "$@"; do _args+=("${a#arms=}"); done
+  set -- "${_args[@]}"
+fi
 if (( $# )); then
   for a in "$@"; do
     found=0

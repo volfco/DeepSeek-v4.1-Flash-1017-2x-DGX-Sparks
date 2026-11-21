@@ -2,6 +2,8 @@
 
 What was checked on a pair of Sparks, and how it was measured. The headline decode and prefill numbers are in the [README](../README.md#performance).
 
+The [runtime configuration record](../best-runtime.md) tracks the tested settings for long-lived serving. The [November 18 component report](../runs/overnight-opt/RESULTS.md) compares that configuration with the two-rank serving baseline and gives local GB10 read, compute, storage and fabric measurements.
+
 ## What is checked
 
 - `DRY_RUN=1 ./start.sh` prints the link it found (on a pair of Sparks) and both ranks' docker commands; `./stop.sh`
@@ -69,7 +71,7 @@ with real prompts decode is above them (one stream: prose 80.7 against 59.0, cod
 154.0 for prose and 166.1 for code against 118.9), and prefill is ~10-11% under them from 8K to 64K prompts (~2,136-2,155 against ~2,400 tok/s).
 
 A needle-in-a-haystack test at `CONTEXT=524288` (`tools/bench.py --suite needle`, a passphrase hidden at 10%, 50% and 90%
-depth of a 479,012-token prompt) found it 3 of 3 times; each prefill took ~280 s (~1,710 tok/s). The head's lowest free
+depth of a 479,012-token prompt) found it 3 of 3 times; each prefill took ~280 s (~1,710 tok/s). A harder recall probe (November 20, production image `exl3-tp2-ea522d353626`, eight codes at 2–98% depth, list them in order and sum them; `runs/depth-quality-20261120`) at T=1.0/top_p 0.95/top_k 20 with five seeds: 530K all codes and sum on 5/5 but order wrong on 5/5, 256K 4/5, 64K 3/5 (two seeds reasoned to the 8,192-token cap). Greedy it failed at 530K by reasoning to the cap; greedy is not a fair test of this model (upstream MiaAI-Lab#54). The head's lowest free
 memory during it was 2.67 GiB, 0.17 GiB above the 2.5 GiB floor `memguard` was set to, so a 512K window is the practical
 limit for a head that carries ~6 GiB of other software. A reported run at `CONTEXT=655360` (issue #17; 4.9 GiB free after the load on
 a head with its other services stopped) fell under the 2 GiB floor for the 4 s `MEMGUARD_HOLD_S` and had rank 0 killed on a turn

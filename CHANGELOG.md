@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- `zig/patches/0129`-`0145` (the benchmark-gap work packages, all off by default and none run on a pair yet): seventeen
+  patches exported from engine `bench-prep` over `decode-step-structure`, each host-gated in that checkout
+  (`zig build test` green per commit; `zig build` green, which is what compiles the batch driver and the server).
+  Engram knobs: `TF_DS_ENGRAM_SCALES=map-warm` (`0129`, `map` plus a detached `MADV_WILLNEED` walk of the scale
+  mappings, so `map`'s page-fault cost can be separated from its steady state), `TF_DS_ENGRAM_DECODE_THREADS`
+  (`0130`), `TF_DS_ENGRAM_POOL` (`0131`, the `ENGRAM_AIO=0` pread pool), `TF_DS_ENGRAM_CPUS` (`0132`, per-thread
+  `sched_setaffinity` for every Engram host thread, a bad spec refusing the start) and `TF_DS_ENGRAM_AIO_BATCH`
+  (`0133`, the prompt ring's rows a batch; `TF_DS_ENGRAM_SPLIT=2` was not landed — `LEAD` owns the second ring and
+  `aioGather` writes contiguous slices). Attribution: `engram_host_ms` on the done line (`0134`, riding the existing
+  `TF_DS_ENGRAM_METRICS` counters), `queue_s`/`restore_s` plus 3-decimal TTFT (`0138`), `pass_send_ms` on both profile
+  lines (`0144`), `Ring.probes()`' first caller behind `TF_DS_RDMA_PROBES` (`0145`), a prefill phase profile behind
+  `TF_DS_PREFILL_PROFILE` (`0141`), per-round expert place bytes behind `TF_DS_EXPERT_BYTES` (`0140`), and the depth
+  pins/`TF_DS_FIX_K` now read by the batch driver (`0139`) so fixed-rows cells can run there. Fixes:
+  `TF_DS_SPILL_SHARED_MIN_TOKENS` (`0135`, a shared cut is written below `SPILL_MIN_TOKENS`, pair-wide through the
+  features string), the Engram row cache's tombstone-free map (`0136`, W1 — Zig 0.17's `removeByIndex` left the slot in
+  `available`, so a full cache never rehashed and every miss probed the table) and `core.RehashMap` (`0137`, W10-c, on
+  the spill tier's `points` and the AIO's `batches`). `TF_DS_ALLOCATE_LEARNED` (`0143`) prices a round's rows from the
+  depth rule's learned costs instead of the static table — sequential class. `tf-dsv41-probe` (`0142`) is the MoE
+  pure-read GB/s probe; its `.cu` has never been through nvcc (UNVERIFIED-BUILD: the image build is its first compile).
+  What to measure, per switch, is in [`to-benchmark.md`](to-benchmark.md) "Ready to benchmark"; defaults and rank scope
+  in [`runs/bench-prep/env-vars.md`](runs/bench-prep/env-vars.md)
+
+- `zig/patches/0103`-`0106` (`TF_DS_DRAFT_DEPTH2=1` .. `TF_DS_DRAFT_DEPTH5=1`, off unless set): four benchmark
+  toggles, one a patch, that pin every head draft a round asks for, and every head window it verifies, to 2, 3, 4 or 5
+  whatever the round loop's cost rule and allocation price, in the first round after a prompt and in every later one. Copies, forced rows and a finished stream are
+  unchanged; the checkpoint's draft count and the stream's room clamp a pin. At most one may be on, and two refuse the
+  start (`error.BadDraftPin`). Greedy replies keep their bits; a sampled stream's draws can differ. Host tests in
+  `zig/src/core/lanes/depth.zig`, `config.zig` and the dsv41 family (the toggles parse, refuse a pair, and a pin wins
+  over the costs, the probes and the shared allocation); not yet run on a pair. What to measure is in
+  [`to-benchmark.md`](to-benchmark.md)
 - `zig/patches/0094-engram-trim.patch` (`TF_DS_ENGRAM_TRIM=1`, off unless set; `start.sh` mounts `/engram` writable
   with it): each rank reads only its own 12 of the 24 hash columns, so half of each Spark's ~203 GB Engram copy is never
   touched; the trim punches those rows out of both tensors (~101 GB a Spark) and the files keep their names and sizes, so

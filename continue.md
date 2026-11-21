@@ -1,8 +1,53 @@
 # Continue
 
-**0193/0194 rework.** The active recipe uses the kit gate, router, and parallel expert prep. `TF_DS_FUSED_ROUTE=1` now combines pruning with the dead-row mask when both are active. The earlier 0196 drafter fusion was removed from the recipe. The November 19 results below describe the original kernels.
+**Next: fix 0206's key encoding, then re-run the `TF_DS_IDX_FUSED` arm (2026-11-21).** The follow-up series was
+collapsed: `0195` now carries the six faster follow-ups (0200, 0201, 0202, 0209, 0210, 0212) folded in, and the four
+diagnostic/gate follow-ups stay separate (0203, 0204, 0205, 0211). **0206, 0207 and 0208 are parked in
+`zig/patches-parked/`** (not built; none has its own switch, and 0206 is the `TF_DS_IDX_FUSED` mismatch below) - 134
+patches in the series. The first flattening wrote unresolved merge markers and 0207's test into 0195, so no subset of
+it compiled; it was regenerated from the engine commits. The series alone gives the engine tip with 0206-0208 reverted
+(tree `e449cb6`), series plus the parked three gives `ffdce65` byte for byte. That 134-patch tree has not been built
+into an image or gated on the pair. The thirteen patch follow-up (0200-0212) has now
+run on a GB10, in two halves. **The standalone half passes:** every live output is byte-identical to
+the path it replaces (norms, both compressors, all five rope-store chains, the key fold's keys and tile maxima against
+`scoreKey`, and 8,516 pair-softmax and 4,111 six-slot cases against the previous forms), the buffers 0200 stopped
+writing stay unwritten, and no kernel spills. Timings: the prompt compressor is 28-67% faster (0210/0202), the rope-store
+chains 14-45% faster (0200/0209/0212), the decode compressor 13-17% slower (0207's `isfinite` branch, ~0.03% of a round),
+and 0206's fold costs the key writes it adds (38.5 vs 41.0 µs at R=128 width 32,768 without the fold). 0207 measured
+13-17% slower on the served decode shape, so it stays a separate patch rather than a folded one. **The paired half
+is split:** `base`, `TF_DS_FUSED_COMPRESS2_NORM`, `TF_DS_FUSED_ROPE_STORE`, `TF_DS_FUSED_ROUTE` and the previous fused
+bundle are 39/39 identical to production, but **`TF_DS_IDX_FUSED=1` differs on 4 of 39 cases** - `len_20000`, `len_30000`,
+`len_50000` and `len_64000` change completion length and token hash (`len_100000` and every shorter case match). The
+previous bundle never produced keys at those widths - its call site always ran the kit's `_score_keys` - so one of the
+thirteen changed what the pruned selector sees. **First suspect: the fold's key encoding.** It writes
+`idx_fused.zig:scoreKey`'s key, which XORs the top bit the kit's `_score_keys` leaves alone (`0x80000000ffffffff` vs
+`0x00000000ffffffff` on the same cell); if the kit's `topk_select_pruned` compares signed, that flip reverses
+negative-vs-positive scores. It does not explain why `len_100000` still matches, so confirm the width window before
+changing either side. `TF_DS_PDL=1` on the fused bundle is bit-identical to the same bundle without it (exact panel;
+its speed is unmeasured). Nothing is deployed; production was restored and validated. [Results, parity, timings and
+SASS](runs/fused-followup-20261121/RESULTS.md) · [Rows](zig/patches/README.md) · [Decision](decisions.md)
 
-**Measured on the pair, November 20 (18:38–19:09 UTC): the rework is bit-identical and speed-neutral; nothing fused is faster.** One image (`bench-fused-rework-20261120`: production source + reworked 0193/0194 + 0195/0197/0198, no 0196), one switch per arm. With `TF_DS_DRAFT_TRIAGE=conf:0.2`, adding `TF_DS_FUSED_ROUTE=1` gave 39/39 identical exact cases, unchanged long-reply hashes and the same speed (the merged launch runs on every layer while triage is on). It passes because the original fusion was dropped, not repaired, and it does nothing under production's switches (no triage). **0197 alone causes the 1024-token greedy Tetris reply change** (`053b9e`, 195 rounds); 0195 and 0198 change no hashes, but nothing shows whether their fused paths ran. Every arm is within ~0.5% of the two controls (off vs off2 differ ~0.6%, the resolution floor); triage alone is ~0.5% below both. Not run: `TF_DS_T13_PRUNE_STATS=0`, PDL. Production restored and validated; nothing deployed. [Results](runs/fused-bench-20261120/RESULTS.md)
+**0199 six-slot decode prune, November 20.** The opt-in `TF_DS_FUSED_ROUTE=1` path now uses one thread per row for the applied, uncapped 0.85/3/kept rule with six routed picks and one shared slot. It works with triage off. On GB10 at seven mixed synthetic rows, median kernel time with counters enabled fell from 9.782 to 2.547 µs. With counters disabled, 0199 took 1.819 µs versus 2.133 µs for the earlier six-slot prototype. The kernel skips sorting when the shares are already ordered, tests only the three ranks eligible to drop, and updates one distinct-expert bitmap per pick. GPU comparisons matched pick IDs, FP32 weight bits and all six counters at six window sizes from 1 to 64 rows. Both service binaries built. Serving throughput and long-reply parity for 0199 are still open. The earlier two-rank test of disabling counters on the generic kernel was within control variation, so keep counters enabled. [0199 results and build](runs/prune-six-20261120/RESULTS.md) · [Generic-kernel stats A/B](runs/prune-stats-20261120/RESULTS.md)
+
+**Before the 0199 serving A/B.** Use the same 0199-capable image on both ranks and in both arms. Keep triage and PDL off, graphs and prune stats on, and vary only `TF_DS_FUSED_ROUTE=0/1`. This isolates the six-slot kernel from 0194’s dead-row launch fusion. Compare the 39 exact cases and long greedy reply hashes, then bracket the throughput measurements with controls and compare matched round counts and draft acceptance. At seven rows the kernel saving projects to 0.29 ms in a 42 ms round if all 40 layers realize it. The existing probe derives `ms_per_round` from `decode_s` rounded to 0.1 s, a 0.52 ms step at 194 rounds. Use the server’s directly reported `tok_per_s` for the greedy comparison, or record higher-precision decode duration for round timing. [Probe calculation](runs/draft-block-20261118/probe.py) · [Recorded control](runs/prune-stats-20261120/control1.timing.json)
+
+The standalone harness also passed a correctness-only graph replay on GB10. It restored the input rows between two launches of the same graph and retained a shared stats buffer across both. Pick IDs and weight bits matched the generic eager reference, and all six cumulative counters matched the sums of the reference windows, including across a 32-bit carry. This covered five datasets and six row counts with PDL off. [Graph replay check](runs/prune-six-20261120/graph-verify.log)
+
+**Final 0197 decode compressor, November 20.** Set `TF_DS_FUSED_COMPRESS2_NORM=1` on both ranks to fuse 0127’s ring writes, partner lookup and pair compression with the pinned RMSNorm in one launch at widths 128 and 512. This switch takes precedence over `TF_DS_FUSED_COMPRESS2` at those widths. Each thread handles one channel and reuses the current row’s KV and score from registers. The kernel preserves the bf16 rounding and reduction order from the mismatch repair.
+
+| Decode shape | 0127 + RMSNorm | First repaired 0197 | Final 0197 | Speedup over 0127 + RMSNorm |
+| --- | ---: | ---: | ---: | ---: |
+| 1 × 512 | 3.48 µs | 3.54 µs | 1.75 µs | 1.98× |
+| 7 × 512 | 3.99 µs | 3.62 µs | 2.00 µs | 1.99× |
+| 32 × 512 | 6.74 µs | 3.61 µs | 2.01 µs | 3.36× |
+
+The final kernel was fastest at every measured shape in both standalone GB10 runs. Both runs matched every checked byte in the normalized output, stride padding, raw rings and invalid flag. The original mismatch cases passed at both widths, and the 0195 and 0198 regression checks passed. Production kept running throughout. The two-rank 1,024-token Tetris hash, serving throughput and hardware performance ceiling remain unverified. [Full comparison and reproduction](runs/fused-kernel-audit-20261120/RESULTS.md#final-0197-decode-compressor)
+
+**0195/0197/0198 revised and tested on a GB10, November 20.** The old 0197 decode RMSNorm disagreed with the pinned kit on nine bf16 output bytes across 4,096 rows of width 512. Changing only its square root and reciprocal to the kit's instructions removed all nine differences. A failing row also matched after replay through the repaired decode compressor. In standalone CUDA graphs at seven rows, the revised compressor took 3.67 µs versus 11.11 µs unfused and 4.13 µs with 0127. The 0195 indexer took 9.80 versus 44.77 µs at 4,096 blocks with random scores. All five revised 0198 paths matched their references and ran faster at their measured shapes. The switches remain opt-in. The revised two-rank Tetris hash and serving throughput have yet to be measured. [Review, regression probe and timings](runs/fused-kernel-audit-20261120/RESULTS.md)
+
+**0193/0194 rework, before 0199.** The rework uses the kit gate, router, and parallel expert prep. With both pruning and a dead-row mask active, `TF_DS_FUSED_ROUTE=1` combines them in one launch. The earlier 0196 drafter fusion was removed from the recipe. The November 19 results below describe the original kernels.
+
+**Measured on the pair, November 20 (18:38–19:09 UTC): the rework is bit-identical and speed-neutral; nothing fused is faster.** One image (`bench-fused-rework-20261120`: production source + reworked 0193/0194 + 0195/0197/0198, no 0196), one switch per arm. With `TF_DS_DRAFT_TRIAGE=conf:0.2`, adding `TF_DS_FUSED_ROUTE=1` gave 39/39 identical exact cases, unchanged long-reply hashes and the same speed (the merged launch runs on every layer while triage is on). It passes because the original fusion was dropped, not repaired, and it does nothing under production's switches (no triage). **0197 alone causes the 1024-token greedy Tetris reply change** (`053b9e`, 195 rounds); 0195 and 0198 change no hashes, but nothing shows whether their fused paths ran. Every arm is within ~0.5% of the two controls (off vs off2 differ ~0.6%, the resolution floor); triage alone is ~0.5% below both. This bracket left prune stats enabled and PDL off. Production restored and validated; nothing deployed. [Results](runs/fused-bench-20261120/RESULTS.md)
 
 DeepSeek-V4.1-Flash on two DGX Sparks, TensorFold EXL3 TP2. Use the [best runtime configuration and challenger history](best-runtime.md), [deployment recipe](README.md), [measurement definitions](docs/measurements.md), [benchmark matrix](to-benchmark.md) and [decision record](decisions.md).
 
@@ -42,7 +87,7 @@ To turn it off, delete the `TF_DS_ENGRAM_LEAD` line from the head's `.env` and t
 
 **Draft ladder, November 19: built, measured, not adopted.** `TF_DS_DRAFT_LADDER` gates a seven-draft block's last draft by each stream's own record. On 21 code-like prompts it and plain block 7 are both 0.4% faster than production's six (±0.5% across prompts), and six is 3.2% faster than five. Production is unchanged. The bench image `tensorfold-dsv41:bench-draft-ladder-0bd63fda950f` is on both ranks and the source is branch `draft-ladder` in `~/Workspace/tfref-draftblock`; the patch is not in `zig/patches`. [Results](runs/draft-ladder-20261119/RESULTS.md)
 
-Do not run `just sync-head` as things stand. It pushes this checkout's 129-patch series over the head's 118. The recipe hash would change, and the next restart would stop the server and build from source on the head, a build that has not been run. The head's copies of `continue.md`, `best-runtime.md` and `decisions.md` are older than these; copy single files instead. The campaign drivers in `runs/overnight-opt` and `runs/review-round` expect that pinned tag and unset candidate switches, so they refuse on the image as well as the token cache.
+Do not run `just sync-head` as things stand. It pushes this checkout's 134-patch series over the head's 118 (which ends at 0192). The recipe hash would change, and the next restart would stop the server and build from source on the head, a build that has not been run. The head's copies of `continue.md`, `best-runtime.md` and `decisions.md` are older than these; copy single files instead. The campaign drivers in `runs/overnight-opt` and `runs/review-round` expect that pinned tag and unset candidate switches, so they refuse on the image as well as the token cache.
 
 ## Serving configuration and benchmark images
 

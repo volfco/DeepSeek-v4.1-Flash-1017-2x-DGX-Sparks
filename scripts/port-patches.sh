@@ -13,6 +13,7 @@
 #
 # Usage: scripts/port-patches.sh [--dry-run] [--engine DIR] [--branch REF] [--base REF] [--mode squash|commits]
 #                                [--name SLUG] [--title TEXT] [--exclude PATH]... [--no-default-excludes] [--keep]
+#                                [--first NNNN] [--keep-generated]
 #   --dry-run         build and check the patches in a temporary folder, print what would change, write nothing
 #   --engine DIR      the engine repository (default ~/GitHub/tensorfold-dsv41)
 #   --branch REF      what to export (required): engine work on top of BASE
@@ -24,6 +25,12 @@
 #   --title TEXT      its README description (default: Robert Wojciechowski's (X @rwojo) GLM 0088/0110/0111/0118/0119, ported to the native engine)
 #   --exclude PATH    leave PATH out of the patches as well (repeatable); --no-default-excludes keeps PORT.md, docs/port
 #   --keep            keep the temporary folder (printed) for inspection
+#   --first NNNN      number the emitted patches from NNNN (default: one past the last hand-written patch's number)
+#   --keep-generated  append a series beside the already exported ones instead of replacing them: the previously
+#                     exported patches and their README rows are kept and are also applied to reach --base (so --base
+#                     may be their tip, e.g. the last exported commit); the new patches take --first's numbers. Use
+#                     this to add a new series on top of an exported base; regenerating a kept series is not supported
+#                     (delete its patch files and export its branch again)
 # Env: TF_REF, TF_REPO (default: scripts/config.sh's pins). TF_REF is taken from the engine repository when it has the
 # commit, else fetched from TF_REPO (network). Runs on Linux and macOS (bash 3.2 or later, git).
 [[ "${PORT_PATCHES_LIB:-0}" == 1 ]] || set -euo pipefail
@@ -51,11 +58,13 @@ newreadme() {  # <readme> <rows file>: the README with the generated rows replac
 
 engine="$HOME/GitHub/tensorfold-dsv41"; branch=""; base=port/series-pair-370daf0; mode=commits; name=spill-kvshard
 title="Robert Wojciechowski's (GitHub wojo, X @rwojo) GLM-5.3-Flash patches 0088/0110/0111/0118/0119 (spill v2, continuation, KV sharding with prompt borrowing and the ring exchange on 0008's pool, parked pages; GLM PRs #78 #124 #128 #152 #149), ported by him to the native dsv41 engine"
-dry=0; keep=0; defaults=1; excludes=()
+dry=0; keep=0; defaults=1; kg=0; first=0; excludes=()
 while (( $# )); do
   case "$1" in
     --dry-run) dry=1 ;;
     --keep) keep=1 ;;
+    --first) first=${2:?--first needs a number}; shift ;;
+    --keep-generated) kg=1 ;;
     --engine) engine=${2:?--engine needs a directory}; shift ;;
     --branch) branch=${2:?--branch needs a ref}; shift ;;
     --base) base=${2:?--base needs a ref}; shift ;;
@@ -72,6 +81,9 @@ done
 [[ -n "$branch" ]] || die "--branch names the engine work to export, on top of $base (--base)"
 [[ "$mode" == squash || "$mode" == commits ]] || die "--mode is squash or commits, not $mode"
 [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--name is a lowercase slug (a-z 0-9 -), not $name"
+[[ "$first" == 0 || "$first" =~ ^[0-9]+$ ]] || die "--first is a number, not $first"
+first=$((10#$first)) # no octal: --first 0168 is 168
+(( first == 0 || (first >= 1 && first <= 9999) )) || die "--first is 1..9999, not $first"
 (( defaults )) && excludes=(PORT.md docs/port ${excludes[@]+"${excludes[@]}"})
 
 # the pins, as scripts/config.sh sets them (read, not sourced: config.sh needs bash 4 and a Spark's tools)
@@ -98,6 +110,11 @@ for p in $(cd "$root/zig/patches" && LC_ALL=C ls -1 -- *.patch 2>/dev/null); do
   [[ "$p" =~ ^([0-9]+)- ]] && (( 10#${BASH_REMATCH[1]} > last )) && last=$((10#${BASH_REMATCH[1]}))
 done
 (( ${#hand[@]} )) || die "no hand-written patches in zig/patches: refusing to guess the base"
+if (( kg )); then
+  base_set=("${hand[@]}" ${old[@]+"${old[@]}"}) # the kept exported patches reach --base too
+else
+  base_set=("${hand[@]}")
+fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/port-patches.XXXXXX")
 if (( keep )); then trap 'log "kept $tmp"' EXIT; else trap 'rm -rf -- "$tmp"' EXIT; fi
@@ -105,7 +122,7 @@ mkdir -p "$tmp/out"
 
 # ---------------------------------------------------------------- 1. the patches
 slug() { tr '[:upper:]' '[:lower:]' <<<"$1" | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-48 | sed -E 's/-+$//'; }
-num=$last; new=(); subjects=()
+num=$last; (( first )) && num=$((first - 1)); new=(); subjects=()
 emit() {  # <from> <to> <slug> <subject>  (the diff goes to the file as git prints it: a binary hunk ends in a blank line)
   local f
   num=$((num + 1)); f=$(printf '%04d-%s.patch' "$num" "$3")
@@ -152,12 +169,12 @@ same_as() {  # <commit>: the checkout (untracked and ignored files too: -f) equa
   git -C "$tmp/tf" add -A -f >/dev/null
   git -C "$tmp/tf" diff --cached --quiet "$1" -- "${spec[@]}"
 }
-for p in "${hand[@]}"; do apply "$root/zig/patches/$p" "zig/patches/$p"; done
+for p in "${base_set[@]}"; do apply "$root/zig/patches/$p" "zig/patches/$p"; done
 if ! same_as "$base_sha"; then
   git -C "$tmp/tf" diff --cached --stat "$base_sha" -- "${spec[@]}" | tail -15 >&2
-  die "$base is not TF_REF plus zig/patches ${hand[*]} (the differences above): export relative to the base the image is built from"
+  die "$base is not TF_REF plus zig/patches ${base_set[*]} (the differences above): export relative to the base the image is built from"
 fi
-log "TF_REF + ${#hand[@]} hand-written patches = $base (${base_sha:0:12})"
+log "TF_REF + ${#base_set[@]} patches = $base (${base_sha:0:12})"
 
 # ---------------------------------------------------------------- 3. the new patches apply, and reproduce BRANCH
 for p in "${new[@]}"; do apply "$tmp/out/$p" "$p"; log "  $p applies ($(grep -c '^diff --git ' "$tmp/out/$p") files, $(wc -c <"$tmp/out/$p" | tr -d ' ') bytes)"; done
@@ -187,7 +204,12 @@ rows() {
       "${new[$i]}" "$d" "${subjects[$i]//|/\\|}" "$branch" "${branch_sha:0:12}"
   done
 }
-rows > "$tmp/rows"
+if (( kg )); then
+  # the kept series' rows survive (newreadme drops every marker row and re-inserts the rows file after the last
+  # hand-written row): the old rows go in first, the new ones after them
+  awk -v re="$ROW_RE" '$0 ~ re' "$readme" > "$tmp/rows"
+fi
+rows >> "$tmp/rows"
 newreadme "$readme" "$tmp/rows" > "$tmp/README.md"
 grep -qE "$ROW_RE" "$tmp/README.md" || die "found no patch table in $readme to add the rows to"
 if (( dry )); then
@@ -195,7 +217,15 @@ if (( dry )); then
   diff -u "$readme" "$tmp/README.md" | sed 's/^/    /' || true
   exit 0
 fi
-for p in ${old[@]+"${old[@]}"}; do rm -f -- "$root/zig/patches/$p"; done
+if (( kg )); then
+  : # kept: the previously exported patches stay
+else
+  for p in ${old[@]+"${old[@]}"}; do rm -f -- "$root/zig/patches/$p"; done
+fi
 for p in "${new[@]}"; do cp -- "$tmp/out/$p" "$root/zig/patches/$p"; done
 cp -- "$tmp/README.md" "$readme"
-log "Wrote ${new[*]} (removed ${old[*]:-none}); zig/patches/README.md updated. The image tag changes: ./start.sh restart rebuilds it"
+if (( kg )); then
+  log "Wrote ${new[*]} (kept ${old[*]:-none}); zig/patches/README.md updated. The image tag changes: ./start.sh restart rebuilds it"
+else
+  log "Wrote ${new[*]} (removed ${old[*]:-none}); zig/patches/README.md updated. The image tag changes: ./start.sh restart rebuilds it"
+fi

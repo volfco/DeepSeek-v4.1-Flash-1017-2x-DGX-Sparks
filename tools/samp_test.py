@@ -66,8 +66,8 @@ def log(*m):
 
 def ask(url, model, seed, max_tokens, timeout):
     body = {"model": model, "messages": [{"role": "user", "content": PROMPT}], "max_tokens": max_tokens,
-            "temperature": 1.0, "top_k": 20, "top_p": 0.95, "min_p": 0.0, "seed": seed, "stream": False,
-            "chat_template_kwargs": {"thinking": False}}
+            "temperature": 1.0, "top_k": 20, "top_p": 0.95, "min_p": 0.0, "seed": seed, "stream": False, "return_token_ids": True,
+            "chat_template_kwargs": {"enable_thinking": False}}
     r = post(url, body, timeout)
     ids = (r.get("tensorfold") or {}).get("token_ids")
     if not ids:
