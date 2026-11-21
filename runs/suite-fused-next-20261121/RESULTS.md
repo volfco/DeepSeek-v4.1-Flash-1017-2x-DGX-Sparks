@@ -22,7 +22,8 @@ All five blocks: status ok, 14/14 cells, validation passed, arm proof clean, clo
 
 ## Correctness
 
-- **Exact panel: s02, s03, s04 and s05 are each identical to s01 on all 39 cases** (text, token hash, token count,
+- **Exact panel: the three new-image blocks (s02, s03, s05) and the second base block (s04) are each identical to s01 on
+  all 39 cases** (text, token hash, token count,
   finish reason). This is the gate that caught 0206 last round; the review's B1 (0241) is fixed in this image.
 - Decode/thinking replies equal base in every pairing (dec1 18/18, dec4 48/48, dec8 144/144, t1 12/12, t4 24/24); probe
   replies equal s01 in every block; sampled identity repeats within each block and matches across blocks.
@@ -51,8 +52,9 @@ All five blocks: status ok, 14/14 cells, validation passed, arm proof clean, clo
 
 - Every non-long-context difference between base and next is within about +-1% and inside or near the base-to-base
   spread of the same cell. The consistent signs are small: dec4 ms/round -0.19%/-0.78%, think t4 +1.04%/+0.61% (base
-  spread +0.50%); dec8 aggregate -0.59%/-0.69% against a -0.17% spread, but dec8 ms/round is +0.06%/-0.43%, so that is
-  a draft-acceptance/wall effect, not kernel time. Prefill is within +-1%.
+  spread +0.50%); dec8 aggregate is -0.59%/-0.69% in both pairs against a -0.17% base spread while its ms/round is
+  +0.06%/-0.43% and replies are identical: unresolved (not explained by kernel time; a wall-clock/scheduling effect is
+  possible but not shown). Prefill is within +-1%.
 - This is the expected size: the round's kernel gains are a few microseconds per launch (wp1-wp4) against 33-87 ms
   rounds, i.e. well under the ~0.5% the suite resolves. The suite is the correctness gate and a regression check here.
 - PDL (s05) is within -0.6%/+0.4% of the base mean everywhere outside long context: no measurable gain from 0250 at
@@ -63,14 +65,23 @@ All five blocks: status ok, 14/14 cells, validation passed, arm proof clean, clo
 - The previous suite's fused blocks ran exactly today's production config (last column). ms/round agrees: dec1
   33.69 then vs 33.45-33.62 now, dec8 86.33-86.40 vs 86.48-86.92, think and prefill within +-0.5% (8K 1988-1996 vs
   1976-1998; 100K 2043-2044 vs 2040-2048; 300K 1797-1804 vs 1789-1806).
-- dec1/dec4 aggregate tok/s moved (+5.7% / -2.8%) between suites with tokens a round changing in step: each suite
-  builds its own corpus (`corpus/`), so those prompts differ; compare ms/round across suites, tok/s within one.
+- dec1/dec4 aggregate tok/s moved (+5.7% / -2.8%) between suites with tokens a round changing in step. Checked: the two
+  suites' `corpus/prose.json` differ (md5 d20c26b2 vs dec68bb6; `code.json` is identical) and the dec prompts differ
+  (394/294/335 vs 319/290/271 tokens), so compare ms/round across suites and tok/s within one.
 
 ## Caveats
 
-- Engagement is inferred, not traced: the image and switches are proven on both ranks, but `TF_DS_FUSED_TRACE` was off,
-  so no log shows each new arm (0215's small-row form, 0216's bypass, 0241's pair geometry) ran on served shapes.
-- Review item B2 (WP2's unreproduced new-only byte difference) has no mechanism; four exact blocks and every reply
-  hash here are clean, which is the evidence the review asked for before promotion.
+- Engagement is inferred, not traced: the image and switches are proven on both ranks, but `TF_DS_FUSED_TRACE` was off
+  (and 0216's bypass has no trace arm at all). Depth matters for two items: 0215's small-row form needs >= 6144 blocks
+  (~98K tokens on a ratio-2 layer) and 0217's range needs > 8192 blocks. The only compared cell that deep is the
+  greedy `len_100000` exact case (~50K compressed keys = ~6.2K blocks on ratio-2 layers, ~12.5K on ratio-1 layers if
+  the engine's test config `config.zig:287` matches the model), so both are probably exercised there, once each, at the
+  margin. The 300K and long-context cells reach further but are salted per block and not compared.
+- Review item B2 (WP2's unreproduced new-only differences, one at `idx-small R=1 nb=8192`) still has no mechanism.
+  The clean panel narrows it but does not close it for 0215/0217 at depth; an unsalted greedy 150K-300K prompt on both
+  images (a traced run) would.
+- Supervisor review scope: the host dispatch diffs (`round.zig`, `prompt.zig`, `ops.zig`, `idx_fused.zig`) and a sweep of
+  every added fma; the kernel bodies in `dsv41_ops.cu`/`dsv41_torch.cu` and `exact.zig` were reviewed by pi's six
+  reviewers and by harness parity, not read line by line by the supervisor.
 
 Tabulation: [table.py](table.py) (per block), [compare_next.py](compare_next.py) (pooled, reply equality).
