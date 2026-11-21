@@ -1,0 +1,22 @@
+WP3 done. Final state: engine tip `9d4232a` (3 commits), full parity 146/146 three times, host tests 606/608 with only the two pre-existing failures.
+
+**Item verdicts**
+
+| item | verdict | commit |
+|---|---|---|
+| 2. E8M0 scale from BF16 bits, exact reciprocal, warp int max | landed | `cfa54ab` (0240) |
+| 0. query geometry at R=32/48 | landed (row-count dispatch) | `50a70e1` (0241) |
+| 1. skip partner shuffles on unrotated warps | landed (latent only) | `9d4232a` (0242) |
+| 3. CUDA FP4 intrinsics | closed, no change | — |
+| 4. skip latent packing on non-owner rows | closed, no change | — |
+| 5. larger fusion (compressor+latent) | closed, no change | — |
+
+**Measured (old `b28310e` → new, µs; kit-chain reference in brackets)**
+- query: R=1 1.442→1.336, R=7 1.563→1.405, R=32 2.975→2.587 [2.710], R=48 4.020→2.812 [2.996] — the WP0 regression is gone at every served decode row; R=128 9.24→5.80 [5.02] still 15% above the chain (pre-existing), R=1024 68.9→36.9 [51.8].
+- key 1.77→1.62, latent 1.54→1.40, prompt key 4.18→1.91 / 6.18→3.09, prompt latent 4.21→1.66 / 10.27→6.39.
+- Item 2's latent half-warp REDUX was 0.10 µs slower at every row, so the latent keeps the shuffle max; item 1's guard was slower on the key (1.62→1.69) and neutral on the query, so only the latent carries it; item 3 is exact (0/16,711,680 pairs) with a zero-sign mask but emulated on the pinned `sm_121` (faster only under `sm_121a`: 2.55→2.26 at R=32); item 4 can't pay because the latent is per-block latency bound (own=24: 1.546→1.582); item 5's boundary is one launch floor plus ~0.05 µs.
+
+Evidence: `runs/fused-next-20261121/wp3/{RESULTS.md,NCU_REQUESTS.md,variants.cu,vbench.py,*.json,*.log,sass.json}`. Harness changes in `tools/fused_bench/` (stale old-arm signatures fixed, query dispatch + prompt rows, param-count signature detection, `latent-owner` cases, REDUX histogram) are uncommitted for the supervisor; `todo.md` was also dirty when I finished but I did not touch it.
+
+Skipped: no `ncu` counters (two requests written down); the `sm_121a` build flag is left as a follow-up, and the prompt latent's per-group E4M3 scale broadcast is unmeasured.
+pi exit 0

@@ -1,0 +1,107 @@
+MemAvailable 6.59 GiB
+health: connections=0
+health before: {'prompt_tokens_total': 166670490, 'generation_tokens_total': 1064525}
+health: connections=0
+rope key R=1 D=128: ref=2.955[0.010] old=1.788[0.023] new=1.626[0.020] newnf=0.457[0.008]
+health: connections=0
+rope key R=7 D=128: ref=2.934[0.004] old=1.767[0.002] new=1.607[0.015] newnf=0.457[0.005]
+health: connections=0
+rope key R=32 D=128: ref=2.935[0.002] old=1.771[0.001] new=1.623[0.002] newnf=0.457[0.002]
+health: connections=0
+rope key R=48 D=128: ref=2.977[0.001] old=1.808[0.002] new=1.647[0.002] newnf=0.457[0.002]
+health: connections=0
+rope latent R=1 D=512: ref=2.076[0.001] old=1.540[0.006] new=1.401[0.001] newnf=0.455[0.002]
+health: connections=0
+rope latent R=7 D=512: ref=2.083[0.026] old=1.544[0.017] new=1.424[0.021] newnf=0.473[0.027]
+health: connections=0
+rope latent R=32 D=512: ref=2.074[0.002] old=1.522[0.001] new=1.399[0.001] newnf=0.457[0.000]
+health: connections=0
+rope latent R=48 D=512: ref=2.076[0.001] old=1.543[0.001] new=1.417[0.003] newnf=0.457[0.001]
+health: connections=0
+rope query R=1 D=128: ref=2.141[0.013] old=1.442[0.002] new=1.336[0.002] newnf=0.456[0.002]
+health: connections=0
+rope query R=7 D=128: ref=2.177[0.002] old=1.563[0.001] new=1.405[0.013] newnf=0.516[0.007]
+health: connections=0
+rope query R=32 D=128: ref=2.710[0.001] old=2.975[0.002] new=2.587[0.002] newnf=0.498[0.002]
+health: connections=0
+rope query R=48 D=128: ref=2.996[0.002] old=4.020[0.003] new=2.812[0.001] newnf=0.517[0.006]
+health: connections=0
+rope query R=128 D=128: ref=5.024[0.022] old=9.242[0.031] new=5.801[0.020] newnf=0.703[0.013]
+health: connections=0
+rope query R=1024 D=128: ref=51.767[2.326] old=68.900[4.211] new=36.942[0.130] newnf=2.747[0.014]
+health: connections=0
+rope prompt key R=128 D=128: ref=7.242[0.041] old=4.182[0.068] new=1.912[0.008] newnf=0.497[0.003]
+health: connections=0
+rope prompt key R=1024 D=128: ref=9.272[0.033] old=6.181[0.014] new=3.086[0.014] newnf=1.110[0.009]
+health: connections=0
+rope prompt latent R=128 D=512: ref=6.179[0.009] old=4.209[0.126] new=1.664[0.002] newnf=0.497[0.002]
+health: connections=0
+rope prompt latent R=1024 D=512: ref=10.848[0.082] old=10.268[0.007] new=6.393[0.016] newnf=0.993[0.013]
+all 65,536 bf16 encodings through the latent store: 0 differing bytes
+health: connections=0
+latent-owner R=7 own=4 D=512: ref=2.075[0.002] old=1.527[0.014] new=1.419[0.003] floor=0.459[0.006]
+health: connections=0
+latent-owner R=48 own=24 D=512: ref=2.095[0.003] old=1.540[0.014] new=1.417[0.005] floor=0.457[0.001]
+health: connections=0
+latent-owner R=48 own=1 D=512: ref=2.093[0.002] old=1.542[0.002] new=1.401[0.002] floor=0.457[0.001]
+health: connections=0
+latent-owner R=32 own=0 D=512: ref=2.053[0.001] old=1.542[0.002] new=1.419[0.002] floor=0.459[0.001]
+
+== parity
+PASS  0198-key                 rope key R=1 D=128                                   {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-key                 rope key R=7 D=128                                   {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-key                 rope key R=32 D=128                                  {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-key                 rope key R=48 D=128                                  {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-key                 rope key R=7 D=128 special                           {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-latent              rope latent R=1 D=512                                {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-latent              rope latent R=7 D=512                                {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-latent              rope latent R=32 D=512                               {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-latent              rope latent R=48 D=512                               {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-latent              rope latent R=7 D=512 special                        {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-query               rope query R=1 D=128                                 {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-query               rope query R=7 D=128                                 {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-query               rope query R=32 D=128                                {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-query               rope query R=48 D=128                                {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-query               rope query R=128 D=128                               {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-query               rope query R=1024 D=128                              {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-query               rope query R=7 D=128 special                         {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-prompt-key          rope prompt key R=128 D=128                          {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-prompt-key          rope prompt key R=1024 D=128                         {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-prompt-key          rope prompt key R=128 D=128 special                  {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-prompt-latent       rope prompt latent R=128 D=512                       {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-prompt-latent       rope prompt latent R=1024 D=512                      {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-prompt-latent       rope prompt latent R=128 D=512 special               {'new_vs_ref': 0, 'old_vs_ref': 0}
+PASS  0198-latent              all 65,536 bf16 encodings                            {'new_vs_ref': 0}
+PASS  0198-latent              latent-owner R=7 own=4 D=512                         {'old': 0, 'new': 0}
+PASS  0198-latent              latent-owner R=48 own=24 D=512                       {'old': 0, 'new': 0}
+PASS  0198-latent              latent-owner R=48 own=1 D=512                        {'old': 0, 'new': 0}
+PASS  0198-latent              latent-owner R=32 own=0 D=512                        {'old': 0, 'new': 0}
+
+== timing (us, median[iqr])
+0198-key                 rope key R=1 D=128                                   ref=2.955[0.010] old=1.788[0.023] new=1.626[0.020] newnf=0.457[0.008]
+0198-key                 rope key R=7 D=128                                   ref=2.934[0.004] old=1.767[0.002] new=1.607[0.015] newnf=0.457[0.005]
+0198-key                 rope key R=32 D=128                                  ref=2.935[0.002] old=1.771[0.001] new=1.623[0.002] newnf=0.457[0.002]
+0198-key                 rope key R=48 D=128                                  ref=2.977[0.001] old=1.808[0.002] new=1.647[0.002] newnf=0.457[0.002]
+0198-latent              rope latent R=1 D=512                                ref=2.076[0.001] old=1.540[0.006] new=1.401[0.001] newnf=0.455[0.002]
+0198-latent              rope latent R=7 D=512                                ref=2.083[0.026] old=1.544[0.017] new=1.424[0.021] newnf=0.473[0.027]
+0198-latent              rope latent R=32 D=512                               ref=2.074[0.002] old=1.522[0.001] new=1.399[0.001] newnf=0.457[0.000]
+0198-latent              rope latent R=48 D=512                               ref=2.076[0.001] old=1.543[0.001] new=1.417[0.003] newnf=0.457[0.001]
+0198-query               rope query R=1 D=128                                 ref=2.141[0.013] old=1.442[0.002] new=1.336[0.002] newnf=0.456[0.002]
+0198-query               rope query R=7 D=128                                 ref=2.177[0.002] old=1.563[0.001] new=1.405[0.013] newnf=0.516[0.007]
+0198-query               rope query R=32 D=128                                ref=2.710[0.001] old=2.975[0.002] new=2.587[0.002] newnf=0.498[0.002]
+0198-query               rope query R=48 D=128                                ref=2.996[0.002] old=4.020[0.003] new=2.812[0.001] newnf=0.517[0.006]
+0198-query               rope query R=128 D=128                               ref=5.024[0.022] old=9.242[0.031] new=5.801[0.020] newnf=0.703[0.013]
+0198-query               rope query R=1024 D=128                              ref=51.767[2.326] old=68.900[4.211] new=36.942[0.130] newnf=2.747[0.014]
+0198-prompt-key          rope prompt key R=128 D=128                          ref=7.242[0.041] old=4.182[0.068] new=1.912[0.008] newnf=0.497[0.003]
+0198-prompt-key          rope prompt key R=1024 D=128                         ref=9.272[0.033] old=6.181[0.014] new=3.086[0.014] newnf=1.110[0.009]
+0198-prompt-latent       rope prompt latent R=128 D=512                       ref=6.179[0.009] old=4.209[0.126] new=1.664[0.002] newnf=0.497[0.002]
+0198-prompt-latent       rope prompt latent R=1024 D=512                      ref=10.848[0.082] old=10.268[0.007] new=6.393[0.016] newnf=0.993[0.013]
+0198-latent              latent-owner R=7 own=4 D=512                         ref=2.075[0.002] old=1.527[0.014] new=1.419[0.003] floor=0.459[0.006]
+0198-latent              latent-owner R=48 own=24 D=512                       ref=2.095[0.003] old=1.540[0.014] new=1.417[0.005] floor=0.457[0.001]
+0198-latent              latent-owner R=48 own=1 D=512                        ref=2.093[0.002] old=1.542[0.002] new=1.401[0.002] floor=0.457[0.001]
+0198-latent              latent-owner R=32 own=0 D=512                        ref=2.053[0.001] old=1.542[0.002] new=1.419[0.002] floor=0.459[0.001]
+health after: {'prompt_tokens_total': 166670490, 'generation_tokens_total': 1064525}  every timing block verified idle
+
+wrote wp3/final-timing.json
+
+PASS

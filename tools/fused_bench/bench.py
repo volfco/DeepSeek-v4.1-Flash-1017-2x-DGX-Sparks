@@ -154,6 +154,27 @@ def native(mod, name, grid, block, *args, shared=0):
     launch(mod, "tf_ds_" + name + "_kernel", grid, block, shared, *args, 0)
 
 
+def param_count(path, name):
+    """How many parameters the kernel declares: a tree that predates a signature change would otherwise read past the
+    argv array in cuLaunchKernel (a driver-side fault, not a CUDA error)."""
+    fn = function(path, name)
+    n, off, size = 0, I(), I()
+    while cuda.cuFuncGetParamInfo(fn, ct.c_uint(n), ref(off), ref(size)) == 0:
+        n += 1
+    return n
+
+
+def native_any(mod, names, grid, block, *args, shared=0):
+    """The first of `names` the module exports: the decode compressor's per-width kernels exist on some trees only."""
+    for name in names:
+        try:
+            launch(mod, "tf_ds_" + name + "_kernel", grid, block, shared, *args, 0)
+            return name
+        except RuntimeError as err:
+            if "named symbol not found" not in str(err):
+                raise
+
+
 def free_all():
     global allocated
     cu("cuStreamSynchronize", stream)
@@ -178,6 +199,56 @@ def compare(label, actual, expected):
             failures.append(f"{label} buffer {i}: {len(mismatch)} bytes differ (first {mismatch[0]})")
             total += len(mismatch)
     return total
+
+
+def case_latent_owner(rows, own, timing=True):
+    """TF_DS_KV_SHARD's decode latent: `own` rows target this rank's plane, the rest the trash area (one row a round
+    row, past the part's rows). Both arms write every target, so the packed bytes are compared whole - this is the
+    dest-indirection case the shard path really runs."""
+    d = 512
+    label = f"latent-owner R={rows} own={own} D={d}"
+    if not shape_ok(label):
+        return None
+    src = bf((rows, 1, d))
+    pos = Buffer(rng.permutation(rows).astype("i8"))
+    angle = rng.uniform(-np.pi, np.pi, (rows, 32))
+    cos, sin = Buffer(np.cos(angle).astype("f4")), Buffer(np.sin(angle).astype("f4"))
+    owned = rng.permutation(own)
+    dest = np.concatenate([owned, np.arange(own, rows)]).astype("i8")   # the rest: trash rows above the part
+    destb = Buffer(dest)
+    chains, states, names, floors = [], [], [], []
+    for arm in ["ref", "old", "new"]:
+        x = Buffer(src)
+        rot = Buffer(src)
+        codes, scales = out((rows, d // 2), "u1"), out((rows, d // 16), "u1")
+
+        def chain(arm=arm, x=x, rot=rot, codes=codes, scales=scales):
+            if arm == "ref":
+                aot("rope512", rows, x, cos, sin, pos)
+                aot("store512", rows, x, d, codes, scales, destb)
+            elif arm == "new":
+                native(opts.new_torch, "fused_rope_store", rows, min(d // 2, 256), x, cos, sin, pos, codes, scales,
+                       destb, d, 64, own, 0)
+            else:
+                native(opts.old_torch, "fused_rope_store", rows, min(d // 2, 256), x, cos, sin, pos, codes, scales,
+                       destb, d, 64, 0)
+
+        chain()
+        chains.append(chain)
+        names.append(arm)
+        states.append([codes, scales])
+        floors.append(arm)
+    diffs = {}
+    for k, arm in enumerate(names):
+        if arm == "ref":
+            continue
+        diffs[arm] = compare(f"{label} {arm}", states[k], states[0])
+    row = {"kernel": "0198-latent", "shape": label, "rows": rows, "d": d, "parity": diffs}
+    if timing and DO_TIMING:
+        floor = lambda: launch(opts.floor, "empty_kernel", rows, min(d // 2, 256), 0)
+        row["timing"] = time_graphs(label, chains, names, floor, opts.batch, opts.reps)
+    results.append(row)
+    return row
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -493,6 +564,11 @@ def case_idx_fold(rows, width, dist="mixed", special=False, timing=True):
     vis = Buffer(np.full(rows, width, dtype="i8"))
     every = Buffer(np.full(rows, 1 << 40, dtype="i8"))
     chains, states = [], []
+    # WP1 closed the fold (0206) with no engine change: a tree whose idx_fused has no keys/tmax parameters cannot
+    # write them, and the case then compares the mask/list only.
+    fold_present = param_count(opts.new_ops, "tf_ds_idx_fused_kernel") >= 13
+    if not fold_present:
+        print(f"  {label}: the tree's idx_fused has no fold outputs; comparing the mask/list only", flush=True)
     for i, mod in enumerate((opts.old_ops, opts.old_ops, opts.new_ops, opts.new_ops)):
         mx, ix = out((rows, nbk), "u4"), out((rows, k), "i8")
         blocks = out((rows, k), "i4")
@@ -506,8 +582,12 @@ def case_idx_fold(rows, width, dist="mixed", special=False, timing=True):
             elif i == 1:
                 native(mod, "idx_fused", rows, 1024, x, L(width), width, 8, vis, every, k, P(), 0, blocks, shared=nbk * 4)
             elif i == 2:
-                native(mod, "idx_fused", rows, 1024, x, L(width), width, 8, vis, every, k, P(), 0, blocks, keys, tmax,
-                       shared=nbk * 4)
+                if fold_present:
+                    native(mod, "idx_fused", rows, 1024, x, L(width), width, 8, vis, every, k, P(), 0, blocks, keys,
+                           tmax, shared=nbk * 4)
+                else:
+                    native(mod, "idx_fused", rows, 1024, x, L(width), width, 8, vis, every, k, P(), 0, blocks,
+                           shared=nbk * 4)
             else:  # the same new kernel without the fold: the fold's marginal cost
                 native(mod, "idx_fused", rows, 1024, x, L(width), width, 8, vis, every, k, P(), 0, blocks, P(), P(),
                        shared=nbk * 4)
@@ -518,12 +598,14 @@ def case_idx_fold(rows, width, dist="mixed", special=False, timing=True):
         chains.append(chain)
         states.append([blocks, keys, tmax])
     ref_state = states[0]
-    diff_old = compare(f"idx-fold old R={rows} width={width}", states[1], ref_state)
-    diff_new = compare(f"idx-fold new R={rows} width={width}", states[2], ref_state)
-    diff_cross = compare(f"idx-fold new-vs-old R={rows} width={width}", states[2], states[1])
+    nlive = 3 if fold_present else 1
+    diff_old = compare(f"idx-fold old R={rows} width={width}", states[1][:nlive], ref_state[:nlive])
+    diff_new = compare(f"idx-fold new R={rows} width={width}", states[2][:nlive], ref_state[:nlive])
+    diff_cross = compare(f"idx-fold new-vs-old R={rows} width={width}", states[2][:nlive], states[1][:nlive])
     # the kit wrote keys/tmax into the same buffers on every arm: the reference is the kit's own bytes
     row = {"kernel": "0195-idx-fold", "shape": label, "rows": rows, "width": width, "nbk": nbk, "k": k,
-           "parity": {"new_vs_ref": diff_new, "old_vs_ref": diff_old, "new_vs_old": diff_cross}}
+           "parity": {"new_vs_ref": diff_new, "old_vs_ref": diff_old, "new_vs_old": diff_cross},
+           "fold_present": fold_present}
     row["bytes"] = rows * width * 4 + rows * width * 8 + rows * nt * 8 + rows * k * 4
     if timing and DO_TIMING and not special:
         floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, nbk * 4)
@@ -603,11 +685,9 @@ def case_compress_decode(rows, d, layout="mixed", timing=True, special=False):
                 native(mod, "compress2x", rows, 256, *prefix, mid, L(d), rows, d, flag)
                 aot(f"norm{d}", rows, mid, d, w, dst, d + 16, eps)
             else:
-                if i >= 2:  # this tree exports one kernel per served width
-                    native(mod, "compress2x_norm128" if d == 128 else "compress2x_norm512", rows, d, *prefix, w,
-                           dst, L(d + 16), rows, d, eps, flag)
-                else:
-                    native(mod, "compress2x_norm", rows, d, *prefix, w, dst, L(d + 16), rows, d, eps, flag)
+                # the per-width kernels where a tree exports them, the older combined one otherwise
+                native_any(mod, ["compress2x_norm128" if d == 128 else "compress2x_norm512", "compress2x_norm"],
+                           rows, d, *prefix, w, dst, L(d + 16), rows, d, eps, flag)
 
         chain()
         chains.append(chain)
@@ -649,11 +729,12 @@ def case_compress_prompt(rows, d, timing=True, special=False):
                 height = min(512 // lanes, 64)
                 native(mod, "rms_norm", (rows + height - 1) // height, (lanes, height), mid, L(d), w, dst,
                        L(d + 16), rows, d, factor, eps, shared=lanes * height * 4 if lanes > 32 else 0)
-            elif i == 2:  # this tree's kernel also takes the raw-ring window (0: the caller scatters them)
+            elif param_count(mod, "tf_ds_compress2_norm_kernel") >= 16:
+                # the raw-ring window this tree's kernel folds in (zeros: the caller scatters them)
                 groups = max(1, min(d, prompt_target(rows)) // lanes)
                 native(mod, "compress2_norm", rows, (lanes, groups), x, s, w, dst, L(d + 16), rows, d,
                        factor, eps, 0, 0, 0, 0, L(0), 2 * rows, 2 * rows)
-            else:
+            else:  # a tree before the window fold
                 groups = max(1, min(d, prompt_target(rows)) // lanes)
                 native(mod, "compress2_norm", rows, (lanes, groups), x, s, w, dst, L(d + 16), rows, d,
                        factor, eps)
@@ -726,27 +807,28 @@ def case_rope(path, rows, special=False, timing=True):
                 if key and prompt:
                     lanes = rms_lanes(d, rows)
                     y = pack_lanes(lanes, d // 2)
-                    if i == 2:  # this tree derives the group id and rotation position from the chunk
-                        native(mod, "fused_prompt_idx_key", rows, (lanes, y), x, L(d), weights, eps, F(1 / d),
-                               cos, sin, L(base), 1, codes, scales, d, 64)
-                    else:
-                        native(mod, "fused_prompt_idx_key", rows, (lanes, y), x, L(d), weights, eps, F(1 / d),
-                               cos, sin, pos, codes, scales, dest, d, 64)
+                    # both trees derive the group id and rotation position from the chunk (the pos/dest uploads
+                    # above are the unfused chain's; the fused arms do not read them)
+                    native(mod, "fused_prompt_idx_key", rows, (lanes, y), x, L(d), weights, eps, F(1 / d),
+                           cos, sin, L(base), 1, codes, scales, d, 64, 0)
                 elif key:
                     native(mod, "fused_idx_key", rows, 128, x, L(d), weights, cos, sin, pos, codes,
-                           scales, dest, d, 64, eps)
+                           scales, dest, d, 64, eps, 0)
                 elif query:
-                    native(mod, "fused_rope_qd", rows * heads, 128, x, dq, cos, sin, pos, heads, d, 64)
-                elif prompt:
-                    if i == 2:
-                        native(mod, "fused_prompt_latent", rows, min(d // 2, 256), x, cos, sin, L(base), 1, codes,
-                               scales, d, 64)
+                    # this tree picks the geometry on the row count (a warp a head above decode's largest window)
+                    if i == 2 and rows >= 32:
+                        native(mod, "fused_rope_qd_pair", (rows, heads // 8), 256, x, dq, cos, sin, pos, heads, d,
+                               64, 0)
+                    elif i == 2:
+                        native(mod, "fused_rope_qd", (rows, heads), 128, x, dq, cos, sin, pos, heads, d, 64, 0)
                     else:
-                        native(mod, "fused_prompt_latent", rows, min(d // 2, 256), x, cos, sin, pos, codes,
-                               scales, dest, d, 64)
+                        native(mod, "fused_rope_qd", rows * heads, 128, x, dq, cos, sin, pos, heads, d, 64, 0)
+                elif prompt:
+                    native(mod, "fused_prompt_latent", rows, min(d // 2, 256), x, cos, sin, L(base), 1, codes,
+                           scales, d, 64, 0)
                 else:
                     native(mod, "fused_rope_store", rows, min(d // 2, 256), x, cos, sin, pos, codes, scales,
-                           dest, d, 64)
+                           dest, d, 64, 0)
                 return
             if key:
                 if prompt:
@@ -793,7 +875,11 @@ def case_rope(path, rows, special=False, timing=True):
             block = 128
         else:
             block = min(d // 2, 256)
-        grid = rows * heads if query else rows
+        if query:
+            grid = (rows, heads // 8) if rows >= 32 else (rows, heads)
+            block = 256 if rows >= 32 else 128
+        else:
+            grid = rows
         floor = lambda: launch(opts.floor, "empty_kernel", grid, block, 0)
         row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
     results.append(row)
@@ -820,7 +906,7 @@ def case_latent_values(timing=False):
     expected = [out((rows, d // 2), "u1"), out((rows, d // 16), "u1")]
     aot("rope512", rows, x, cos, sin, pos)
     aot("store512", rows, x, d, *expected, dst)
-    native(opts.new_torch, "fused_rope_store", rows, min(d // 2, 256), rot, cos, sin, pos, codes, scales, dst, d, 64)
+    native(opts.new_torch, "fused_rope_store", rows, min(d // 2, 256), rot, cos, sin, pos, codes, scales, dst, d, 64, 0)
     diff = compare("all bf16 encodings through packed latent", [codes, scales], expected)
     results.append({"kernel": "0198-latent", "shape": label, "parity": {"new_vs_ref": diff}})
     print(f"all 65,536 bf16 encodings through the latent store: {diff} differing bytes", flush=True)
@@ -931,8 +1017,13 @@ def case_prompt_source(rows, d, special=False, timing=True, odd=False):
                 native(mod, "rms_norm", (rows + height - 1) // height, (lanes, height), mid, L(d), w, lat,
                        L(d + 16), rows, d, factor, eps, shared=lanes * height * 4 if lanes > 32 else 0)
             elif i == 1 and rows:  # the WP1 tree's fused compressor (the launch this item replaces)
-                native(mod, "compress2_norm", rows, (lanes, groups), x, sc, w, lat, L(d + 16), rows, d,
-                       factor, eps)
+                if param_count(mod, "tf_ds_compress2_norm_kernel") >= 16:
+                    # the raw-ring window is already written by the scatters above: zeros leave it to them
+                    native(mod, "compress2_norm", rows, (lanes, groups), x, sc, w, lat, L(d + 16), rows, d,
+                           factor, eps, 0, 0, 0, 0, L(0), 2 * rows, 2 * rows)
+                else:
+                    native(mod, "compress2_norm", rows, (lanes, groups), x, sc, w, lat, L(d + 16), rows, d,
+                           factor, eps)
             elif rows == 0:  # prompt.zig keeps the upload + scatters when the chunk has no complete pair
                 cu("cuMemcpyHtoDAsync_v2", idxb.addr, P(idx.ctypes.data), ct.c_size_t(idx.nbytes), stream,
                    ct.c_uint(0))
@@ -997,6 +1088,7 @@ PROMPT_SHAPES = [(r, d) for r in (128, 1024) for d in (512, 2048)]
 ROPE_SHAPES = [("key", r) for r in (1, 7, 32, 48)] + \
               [("latent", r) for r in (1, 7, 32, 48)] + \
               [("query", r) for r in (1, 7, 32, 48)] + \
+              [("query", r) for r in (128, 1024)] + \
               [("prompt key", r) for r in (128, 1024)] + \
               [("prompt latent", r) for r in (128, 1024)]
 PRUNE_SHAPES = [1, 7, 32, 48]
@@ -1156,6 +1248,8 @@ def main():
             free_all()
         if selected("latent"):
             case_latent_values()
+            for rows, own in ((7, 4), (48, 24), (48, 1), (32, 0)):
+                case_latent_owner(rows, own)
             free_all()
         if selected("prune"):
             for rows in PRUNE_SHAPES:
