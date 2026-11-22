@@ -35,7 +35,7 @@ def run(label, prompt, sampled, seed, max_tokens, thinking=False):
             "chat_template_kwargs": {"enable_thinking": thinking}, "stream_options": {"include_usage": True}}
     body.update(dict(temperature=1.0, top_p=0.95, top_k=20) if sampled else dict(temperature=0))
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
-    pieces, rid, usage, problem = [], None, None, None
+    pieces, stamps, rid, usage, problem = [], [], None, None, None
     try:
         with urllib.request.urlopen(req, timeout=900) as r:
             for raw in r:
@@ -54,6 +54,7 @@ def run(label, prompt, sampled, seed, max_tokens, thinking=False):
                 text = (d.get("reasoning_content") or "") + (d.get("content") or "")
                 if text:
                     pieces.append(text)
+                    stamps.append(time.perf_counter())
     except Exception as e:  # an HTTP error or a dropped stream: the row says so
         problem = f"{type(e).__name__}: {e}"[:300]
     counts, text, prev = [], "", 0
@@ -70,7 +71,8 @@ def run(label, prompt, sampled, seed, max_tokens, thinking=False):
     row = {"label": label, "sampled": sampled, "seed": seed, "events": len(pieces), "tokenized_total": prev,
            "completion_tokens": (usage or {}).get("completion_tokens"), "hist": dict(sorted(hist.items())),
            "rounds": f.get("rounds"), "accepted": f.get("accepted"), "tokens_per_round": f.get("tokens_per_round"),
-           "tok_per_s": f.get("tok_per_s"), "decode_s": f.get("decode_s"), "sha": f.get("sha"), "per_round": counts}
+           "tok_per_s": f.get("tok_per_s"), "decode_s": f.get("decode_s"), "sha": f.get("sha"), "per_round": counts,
+           **gaps(stamps, prev)}
     if problem or not f.get("rounds"):
         row["failed"] = problem or f"no done line ({(usage or {}).get('completion_tokens')} of {max_tokens} tokens streamed)"
     if f.get("rounds") and f.get("decode_s"):
@@ -79,6 +81,60 @@ def run(label, prompt, sampled, seed, max_tokens, thinking=False):
         row.update(ms_per_round=round(1000 * float(f["decode_s"]) / rounds, 2), drafted_per_round=round(drafted / rounds, 3),
                    exact_tokens_per_round=round(tokens / rounds, 3), exact_tok_s=round(tokens / float(f["decode_s"]), 2))
     return row
+
+
+def pct(xs, q):
+    xs = sorted(xs)
+    return round(xs[min(len(xs) - 1, int(q * len(xs)))], 2) if xs else None
+
+
+def gaps(stamps, tokens):
+    """Client-side timing of the content events (one a round): inter-chunk gaps (a chunk carries a round's tokens, so
+    this is inter-round latency as the client sees it, not inter-token), first chunk excluded; and the first-to-last
+    chunk duration, which resolves finer than the engine's decode_s."""
+    g = [1000 * (b - a) for a, b in zip(stamps, stamps[1:])]
+    span = stamps[-1] - stamps[0] if len(stamps) > 1 else None
+    return {"chunk_gap_ms_p50": pct(g, 0.50), "chunk_gap_ms_p95": pct(g, 0.95), "client_span_s": round(span, 4) if span else None,
+            "client_tok_s": round(tokens / span, 2) if span else None}
+
+
+def stream_burst(label, width, seed0, max_tokens):
+    """`width` sampled Tetris requests at once, streamed: pooled inter-chunk gap p50/p95 across the streams (the
+    multi-stream latency the non-streamed burst() cannot see) and aggregate tokens a second by wall."""
+    import threading
+    res = [None] * width
+
+    def one(i):
+        body = {"model": "DeepSeek-V4.1-Flash-1017", "messages": [{"role": "user", "content": TETRIS}], "max_tokens": max_tokens,
+                "seed": seed0 + i, "temperature": 1.0, "top_p": 0.95, "top_k": 20, "stream": True,
+                "chat_template_kwargs": {"enable_thinking": False}, "stream_options": {"include_usage": True}}
+        req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
+        stamps, usage, err = [], None, None
+        try:
+            with urllib.request.urlopen(req, timeout=900) as r:
+                for raw in r:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:") or line[5:].strip() == "[DONE]":
+                        continue
+                    o = json.loads(line[5:].strip())
+                    usage = o.get("usage") or usage
+                    d = (o.get("choices") or [{}])[0].get("delta", {}) if o.get("choices") else {}
+                    if (d.get("reasoning_content") or "") + (d.get("content") or ""):
+                        stamps.append(time.perf_counter())
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"[:300]
+        res[i] = (stamps, (usage or {}).get("completion_tokens") or 0, err)
+
+    t0 = time.perf_counter()
+    th = [threading.Thread(target=one, args=(i,)) for i in range(width)]
+    for t in th: t.start()
+    for t in th: t.join()
+    wall = time.perf_counter() - t0
+    g = [1000 * (b - a) for st, _, _ in res for a, b in zip(st, st[1:])]
+    tokens = sum(n for _, n, _ in res)
+    bad = [e for _, _, e in res if e]
+    return {**({"failed": json.dumps(bad)[:300]} if bad else {}), "label": label, "width": width, "seed0": seed0, "tokens": tokens,
+            "wall_s": round(wall, 3), "agg_tok_s_wall": round(tokens / wall, 2), "chunk_gap_ms_p50": pct(g, 0.50), "chunk_gap_ms_p95": pct(g, 0.95)}
 
 
 def burst(label, width, seed0, max_tokens):
@@ -122,6 +178,7 @@ def main():
     label, out = sys.argv[1], sys.argv[2]
     quick = "--quick" in sys.argv
     narrow = "--narrow" in sys.argv   # the shortened suite: five solo rows, two bursts, the four extra code rows
+    stream_bursts = "--stream-bursts" in sys.argv   # also streamed x1/x4 bursts: pooled inter-chunk gap p50/p95 (new rows)
     sampled_all = "--sampled" in sys.argv   # every class at the clients' sampling (T=1.0, top_p 0.95, top_k 20), two seeds each
     jobs = [("tetris greedy", TETRIS, False, 1, 2048)]
     if sampled_all:
@@ -157,6 +214,12 @@ def main():
             if b.get("failed"):
                 stop(b)
             print(label, b["label"], {k: b[k] for k in ("agg_tok_s_wall", "tokens_per_stream_round", "drafted_per_stream_round", "accept_pct", "wall_s")}, flush=True)
+        for width, seed0 in (((1, 830), (4, 840)) if stream_bursts else ()):
+            b = stream_burst(f"tetris sampled x{width} stream", width, seed0, 768)
+            rows.append(b)
+            if b.get("failed"):
+                stop(b)
+            print(label, b["label"], {k: b[k] for k in ("agg_tok_s_wall", "chunk_gap_ms_p50", "chunk_gap_ms_p95", "wall_s")}, flush=True)
     if not quick:
         # more code-like and structured prompts than the first 15 rows had (one a class), and one with thinking on
         for name, prompt, n in ([] if sampled_all else EXTRA):
