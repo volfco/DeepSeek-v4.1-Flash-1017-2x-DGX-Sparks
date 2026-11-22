@@ -85,7 +85,7 @@ No engine work past `0258` exists in any `tfref-*` checkout, so this is the next
 1. **Reuse fetched KV and renumbered picks between decode layers (sharded fetch mode).**
    - The served checkpoint has eight stretches of layers that share a KV source and pick set. 30 of 38 fetches are repeats, 29.53 MiB of logical payload per round at 7 rows / 512 picks.
    - It targets the largest repo-owned decode stage (`sh_rows` + `sh_fetch`: 3.7% head, 9.8% worker).
-   - First step, no restart: confirm on a stage trace that pick sets really repeat inside a stretch, then size the fetch's share with graphs on.
+   - Structure confirmed in the checkpoint config (2026-11-22): `kv_source_layer_ids [2, 8, 14, 20]` and `index_source_layer_ids [2, 8, 14, 20, 24, 28, 32, 36]`. So layers 2–39 form eight stretches (2–7, 8–13, 14–19, 20–23, 24–27, 28–31, 32–35, 36–39), each sharing one KV source and one pick set, and `fetchDecode` (`round.zig:1380`) runs once per compressed layer. Next, with no restart: size `sh_fetch`/`sh_rows` with graphs on, using the `84806bb` stage trace on the idle head.
    - Invalidate on a new round, a KV update or a pick update, and keep both ranks' ring schedules identical. (`round.zig:1329–1374`, `config.zig:287–290`)
 2. **Sampled verification: exchange rank-local top-k instead of full logits.** Clients run at T=1.0, so this is on every real decode round. Each rank's collective input drops from 258,560 to 448 bytes per row (`top_k` ≤ 56). The host check matched 96 cases. Benchmark selection + exchange + draw with graphs on. (`lanes.zig:1449–1523`, `round.zig:2009–2027`)
 3. **Prefill: score only retained blocks in later prompt indexers (layers 24/28/32/36).**
