@@ -801,3 +801,19 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
 - The recipe image (the rebased `zig/patches/`) is still unbuilt and has never run on hardware. Building it and gating
   it against this image is open. Do not `just sync-head` until that is done.
 - From now on, `bench-fused-next-84806bb` is the control arm for every A/B.
+
+## 2026-11-22: 0259 `TF_DS_KV_FETCH_REUSE` adopted (`bench-fused-next-69335b8`)
+
+- What it does: fetch decode packs and exchanges a run's picked KV rows once. A layer reading the same KV source
+  through the same selection with the same kk attends the rows already gathered. The checkpoint's 38 compressed layers
+  form eight runs, so 30 of 38 exchanges are skipped. Source: branch `kv-fetch-reuse` `69335b8` in
+  `~/Workspace/tfref-kvreuse` (worktree of `tfref-fused-next`, on `84806bb`).
+- Sizing (`runs/kvreuse-size-20261122`): `sh_fetch` + `sh_rows` were 3.6–4.2% of a decode round, projecting 3.0–3.5%.
+- Gate (`runs/kvreuse-ab-20261122`): ABBA on one image. Exact 39/39 identical in every arm, reuse engaged on both ranks,
+  graphs-on rounds 0.5–2.5% shorter (mean −1.7%). About half the projection was realized; the rest is likely
+  cross-rank wait that moves to the next collective.
+- Decision (operator's rule: exact plus faster gets adopted): deployed 07:07–07:10 UTC by
+  `runs/deploy-kvreuse-20261122/deploy.sh`. `IMAGE=bench-fused-next-69335b8` and `TF_DS_KV_FETCH_REUSE=1` were added to
+  the head's `.env`. `validate.py --compare`: all passed, 8/8 saved replies. Undo:
+  `cp ~/dsv41-env-backups/.env.bak-20261122-pre-kvreuse .env && ./start.sh restart`.
+- Open: export 0259 onto the rebased recipe tree (`zig/patches/`); the recipe image is still unbuilt.

@@ -1,17 +1,18 @@
 # Continue
 
-**Current state (2026-11-22 06:05 UTC): production runs `84806bb`; testing the next set has started.**
+**Current state (2026-11-22 07:15 UTC): production runs `84806bb` + 0259 `TF_DS_KV_FETCH_REUSE`; candidate 1 is done, candidate 3 is next.**
 
-- **Deployed 05:58–06:01 UTC.** Both ranks run `tensorfold-dsv41:bench-fused-next-84806bb` with production's unchanged switches. Smoke ok. `validate.py --compare` passed all checks, 8/8 saved replies, concurrent == solo 8/8. The operator made the call: exact plus neutral plus faster standalone gets adopted. **Undo:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-fnext .env && ./start.sh restart`. The image change started a fresh spill namespace. [Deploy record](runs/deploy-fnext-20261122/) · [decision](decisions.md)
-- **Candidate 1 sized (06:05–06:31 UTC): the sharded-KV fetch and exchange cost 3.6–4.2% of a decode round, and about 3% is recoverable.**
-  - `sh_fetch` + `sh_rows` = 1.18–1.29 ms a round at one stream and 2.48–2.62 ms at four. The cost is flat from 4K to 128K and grows with rows, so it is exchange wait, not bytes.
-  - Skipping the 30 repeated exchanges of 38 projects to 0.93–2.06 ms, 3.0–3.5% of the graphs-on round. That exceeds everything the fused rounds won.
-  - Production was restored and validated (8/8). [Results](runs/kvreuse-size-20261122/RESULTS.md)
-- **Patch `0259` `TF_DS_KV_FETCH_REUSE` (off by default) is written and host-tested.** Branch `kv-fetch-reuse` `69335b8` in `~/Workspace/tfref-kvreuse` (worktree of `tfref-fused-next`, on `84806bb`).
-  - A layer whose `(sh.kv_layer, index layer of rd.cidx, kk)` equals the round's last fetch attends `rd.fc`/`rd.fs`/`rd.fidx` as already gathered. `shardRound` resets the key each round. Both ranks run the same layers, so the ring order holds.
-  - Graph capture records the skip. A skipping graph reads only buffers an earlier graph or eager layer in the same round wrote, so the worst case is an extra fetch.
-  - `zig build test`: the only failures are `0178` and `hotPick`, which fail identically on unpatched `84806bb`.
-  - **Next:** build `bench-fused-next-69335b8` (in progress), then run the ABBA gate `runs/kvreuse-ab-20261122/run.sh` (off/on/on/off on one image: 39-case exact panel `--like`, graphs-on `forward_ms` workload, reuse banner on both ranks, production restore + validate).
+- **Production: `tensorfold-dsv41:bench-fused-next-69335b8` with `TF_DS_KV_FETCH_REUSE=1`, since 07:10 UTC.** All other switches are unchanged. Smoke ok. `validate.py --compare`: all passed, 8/8 saved replies. **Undo to `84806bb`:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-kvreuse .env && ./start.sh restart`. **Undo to before today:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-fnext .env && ./start.sh restart`. [Deploy](runs/deploy-kvreuse-20261122/) · [decision](decisions.md)
+- **Candidate 1 is done: bit-identical, decode rounds 1.7% shorter.**
+  - Sizing found the sharded-KV fetch and exchange at 3.6–4.2% of a round, projecting 3.0–3.5%. [Sizing](runs/kvreuse-size-20261122/RESULTS.md)
+  - The ABBA gate on one image: 39/39 identical in every arm, reuse engaged on both ranks, rounds −0.5 to −2.5% (mean −1.7%). [A/B](runs/kvreuse-ab-20261122/RESULTS.md)
+  - About half the projection was realized. The likely reason is cross-rank wait that moves to the next collective. The next lever there is rank balance, not the exchange.
+  - Source: branch `kv-fetch-reuse` `69335b8` in `~/Workspace/tfref-kvreuse`. **Not yet exported to `zig/patches/`.**
+- **Earlier today:** `84806bb` was deployed 05:58–06:01 UTC (image swap; [record](runs/deploy-fnext-20261122/)).
+- **Candidate 3 (prefill: score only pooled blocks at layers 24/28/32/36) is being priced.**
+  - The kit already ships `_index_score` with `HAS_CAND=1 SKIP_DEAD=1`, but only in the keyed decode form (`KEYS=1 HAS_BASE=1`), plus `_index_score_cand` over a block list.
+  - Prompt blocks of more than 16 rows run `_index_score_rows` (`KEYS=0`, variant `739ce7`), which has no candidate input.
+  - `tools/fused_bench/bench.py --kernel index-score` times it at 128 rows × 16,384–131,072 columns, to size what scoring only the pool's 16,384 columns would save. It needs an idle head.
 - The operator has authorized restarts and config changes for this testing (2026-11-22).
 - **Production runs the `fused-next` binary, while `zig/patches/` holds the rebased equivalent, which has never run on hardware.** Building and gating an image from the recipe (a full source build on the head) is still open. It does not block the image swap. Do not `just sync-head` or restart with changed `zig/patches` until that build has been run.
 
