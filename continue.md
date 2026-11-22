@@ -31,7 +31,7 @@
   - 0275 `COPY_MIN=3` is neutral (probe +0.14%), so it's held.
   - 0272 trace overhead at N=16: forward +0.2%, x4 chunk-gap p95 −2.4%.
   - **Trace finding:** the proxy is not the cost (0.7 µs doorbell→post, 32 ns completion→flag).
-  - **Rank 0 is the late producer on every hidden gather:** about 6–8 µs (3%) more GPU time between gathers. Rank 1 waits 18–21 µs p50 against rank 0's 7–8 µs, which is ≈1 ms a round of rank-1 idle (upper bound ~2.5%). KV exchanges run the other way.
+  - **Rank 0 is the late producer at 1–7 rows** (p50 waits: r1 18–21 µs vs r0 7–8 µs). **Corrected cost (B2):** imbalance costs about half the producer gap per gather (each rank proceeds when its peer's data lands), so ≈0.25 ms a round (~0.7%) at 1–7 rows. At 8+ rows it reverses (rank 1 late, ≈0.23 ms). The earlier "≈1 ms / 2.5%" was wrong. KV exchanges run the other way.
   - Ruled out: clocks (both 2,380 MHz, no throttle), config (rank 1's flags match), other GPU processes.
   - **Next, B2:** nsys per-kernel diff of rank 0 vs rank 1 over the same decode rounds.
 - **k272 suite (staged 20:30 UTC):** image `10c9866` is `kernel-stack-0272` (`~/Workspace/tfref-kstack3`) = `27baa93` + 0272 + 0273 + 0274 + 0275. The picks were clean and `zig build test` passes; the syntax error set equals the base's.

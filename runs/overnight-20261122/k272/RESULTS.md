@@ -29,11 +29,13 @@ Same-clock intervals paired by ring sequence (`h0272/summarize.py`), p50 per op 
 
 - **The proxy is not the cost.** Doorbell→last write posted is ~0.7 µs, and completion→flag published is 16–32 ns on
   both ranks. With A2's zero involuntary switches, proxy service is ruled out.
-- **Rank 0 is the late producer on the hidden gathers.** Its GPU time between gathers is ~6–8 µs (≈3%) longer for both
-  attention and MoE. Rank 1 therefore waits ~11–13 µs more per hidden gather (p50 18–21 µs vs 7–8 µs). The fast side's
-  7–8 µs is close to the protocol price measured in A1 (flight portion of a ~17 µs gather). Across 80 hidden gathers that
-  is ≈0.9–1.0 ms a round (~2.5% of a 39 ms round) of rank-1 idle that a balanced rank 0 would remove. Note: it is an
-  upper bound, since the round is paced by the slower rank, not the sum.
+- **Rank 0 is the late producer on the hidden gathers, at low row counts.** Its GPU time between gathers is longer,
+  and rank 1 waits more (p50 18–21 µs vs 7–8 µs). **Correction (B2):** that is not ~1 ms a round. Each rank proceeds
+  when its peer's data lands, so imbalance costs about half the producer difference per gather. Paired by sequence and
+  averaged: at 1–7 rows the mean producer gap (r0 − r1) is +6.2 / +6.7 µs, so ≈3.2 µs a gather, **≈0.25 ms a round
+  (~0.7%)**. At 8+ rows it *reverses* (−5.4 / −6.0 µs: rank 1 late), ≈0.23 ms a round. The balanced wait (mean of the
+  two ranks' waits) is 19.6 µs at 1–7 rows and 28 µs at 8+, which is the transfer floor, not the fast side's 7–8 µs.
+  See `runs/sched-20261122/b2/` for the root-cause work.
 - KV exchanges run the other way (rank 0 waits ~47 µs, rank 1 ~6 µs). They are ~5× rarer.
 - **Not the cause** (checked): GPU clocks (both ~2,380 MHz under a 4-stream burst, no throttle reasons); configuration
   (rank 1's command line carries `--graphs 1 --side 1 --prefetch 1 --aio 1`, the same as rank 0's env); other GPU
