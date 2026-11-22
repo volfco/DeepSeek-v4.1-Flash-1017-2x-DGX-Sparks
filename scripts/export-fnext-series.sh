@@ -66,7 +66,11 @@ log "emitted $n patches: $(ls "$out" | head -1) … $(ls "$out" | tail -1)"
 
 git clone -q --no-checkout --shared "$engine" "$out/tf"
 git -C "$out/tf" -c advice.detachedHead=false checkout -q --detach "$TF_REF"
+first=$((10#$(ls "$out" | grep -m1 -E '^[0-9]{4}-' | cut -c1-4)))
 for p in "$root"/zig/patches/*.patch; do
+  # a re-export: the round's own earlier files (numbered from the first exported one up) are replaced, not stacked
+  pn=$(basename "$p" | cut -c1-4)
+  [[ "$pn" =~ ^[0-9]{4}$ ]] && (( 10#$pn >= first )) && continue
   ( cd "$out/tf" && git apply --check "$p" && git apply "$p" ) 2>"$out/err" ||
     { sed 's/^/    /' "$out/err" >&2; die "$(basename "$p") does not apply on a clean TF_REF in filename order"; }
 done

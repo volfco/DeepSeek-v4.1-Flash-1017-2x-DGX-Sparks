@@ -179,6 +179,7 @@ it was regenerated from the engine commits, and every patch now applies and buil
 | `0256-dsv41-make-fused-trace-thread-safe-unify-call-si.patch` | none (host) | unchanged | `fused_trace` becomes thread-safe and the call sites dispatch their arms through its single-source helpers, with 0254/0255 coverage and `TF_DS_TOPK_FAST` precedence preserved (review S1/S4/S5) |
 | `0257-dsv41-extract-0231-prompt-source-dispatch-plan-w.patch` | none | unchanged | 0231's prompt source dispatch plan is extracted and pinned by multi-chunk host tests; tile-prefix warp zeroing fixed (review S9/S10/S12) |
 | `0258-dsv41-align-fused-trace-compress2-norm-row-units.patch` | none (host) | unchanged | `compress2_norm`'s trace row unit aligns with its call site and the `topk_fast` precedence aligns with the recipe's 0182 (review P2). Paired gate: `runs/suite-fused-next2-20261121/RESULTS.md` |
+| `0259-dsv41-tf-ds-kv-fetch-reuse-off-by-default-fetch.patch` | `TF_DS_KV_FETCH_REUSE=1` | off | fetch decode packs and exchanges a run's picked KV rows once: a layer with the same KV source, selection and kk attends the rows already gathered (30 of 38 exchanges a round). Exact 39/39, decode rounds −1.7% on the pair: `runs/kvreuse-ab-20261122/RESULTS.md`; production since 2026-11-22 07:10 UTC (`bench-fused-next-69335b8`) |
 
 
 

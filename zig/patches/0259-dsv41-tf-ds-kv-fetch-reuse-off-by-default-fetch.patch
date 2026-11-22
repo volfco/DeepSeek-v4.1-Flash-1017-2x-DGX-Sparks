@@ -1,0 +1,114 @@
+# export-fnext-series.sh: recipe-0259 @ a5a582200891 over c3b3859 @ c3b3859952fd (commit a5a582200891)
+# 0259 dsv41: TF_DS_KV_FETCH_REUSE (off by default): fetch decode gathers a run's KV rows once
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index ef6c78f8b18ea19a3dbd3203bac7f406011dd13c..419f41453a523f5054d88bb195cead7423496a84 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -353,6 +353,15 @@ pub const Round = struct {
+     fit_fetch: usize = 0,
+     fit_owner: usize = 0,
+     rcur: shard_ring.Cursor = .{},
++    // TF_DS_KV_FETCH_REUSE (off by default): fetch decode packs and exchanges the picked KV rows once per run of
++    // layers that read the same KV source (sh.kv_layer) through the same selection (rd.cidx, written by the index
++    // layer rd.idx_layer) with the same kk; the later layers of the run attend the gathered rows already in
++    // rd.fc/rd.fs/rd.fidx. The served checkpoint's 38 compressed layers form eight such runs. The key is reset by
++    // shardRound each round, and both ranks run the same layers, so both skip the same exchanges (the ring order holds).
++    fetch_reuse: bool = false,
++    fetch_key: ?FetchKey = null,
++    idx_layer: usize = 0,
++    cur_src: usize = 0,
+     // owner decode's own-head pass (and its early query stage) on a stream of their own (KvShard.overlap): the pass's
+     // split partials, the fork and the two joins (the query stage's, before its collect; the pass's, before the outputs'
+     // collect, as the pass writes every xhwo row)
+@@ -409,6 +418,10 @@ pub const Round = struct {
+         rd.fit_fetch = 0;
+         rd.fit_owner = 0;
+         rd.rcur = .{};
++        rd.fetch_reuse = fetchReuseOn();
++        rd.fetch_key = null;
++        rd.idx_layer = 0;
++        rd.cur_src = 0;
+         rd.ss = null;
+         rd.ss_fork = null;
+         rd.ss_jq = null;
+@@ -978,6 +991,7 @@ fn shardRound(e: *const Engine, rd: *Round, rows: Rows, kv: *shard_ops.KvShard)
+     if (e.ring) |r| if (r.rowsOpen()) return error.ShardRingOrder;
+     if (!rd.rcur.done() or rd.ss_q_out) return error.ShardRingOrder;
+     rd.rcur.reset();
++    rd.fetch_key = null; // (TF_DS_KV_FETCH_REUSE: a round's first fetch layer always fetches)
+     var owners: [max_rows]u32 = undefined;
+     for (0..R) |i| owners[i] = try rows.ownerOf(i, kv.sh);
+     const view: shard_ring.View = .{ .owners = owners[0..R] };
+@@ -1244,6 +1258,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+             }
+         }
+         const src = sh.kv_layer orelse return error.NoKvSource;
++        rd.cur_src = src;
+         const vis = rd.g(if (ratio == 1) .vis1 else .vis2);
+         if (idx_all) {
+             // topk_indices of every scanned key is 0 .. nb - 1 whatever the scores, then the visible mask (on the
+@@ -1251,7 +1266,9 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+             if (nb > 512) return notPorted(@src());
+             try e.ops.iotaVis(e.s, vis, rd.cidx, nb, R);
+             rd.kk = nb;
++            if (lay.idx_wq_b != null) rd.idx_layer = li; // (the same iota every layer; an index layer still re-keys)
+         } else if (lay.idx_wq_b != null) {
++            rd.idx_layer = li; // TF_DS_KV_FETCH_REUSE: this layer's selection replaces rd.cidx
+             const ih = c.index_heads;
+             const id = c.index_head_dim;
+             const k: tri_index.IndexK = .{ .fp4 = .{ .codes = cs.idx_codes[src], .scales = cs.idx_scales[src] } };
+@@ -1400,6 +1417,25 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+ /// place at their fixed size (one NCCL group). The same schedule on both ranks whoever holds the rows, every buffer
+ /// the round's own (graph-safe); each row reads the replicated bytes in the replicated order (shard.zig's and
+ /// shard_ring.zig's tests).
++/// TF_DS_KV_FETCH_REUSE's key: the KV source layer, the index layer whose selection rd.cidx holds, the picks a row.
++pub const FetchKey = struct {
++    src: usize,
++    idx: usize,
++    kk: usize,
++
++    pub fn eql(a: FetchKey, b: FetchKey) bool {
++        return a.src == b.src and a.idx == b.idx and a.kk == b.kk;
++    }
++};
++
++var reuse_noted = std.atomic.Value(bool).init(false);
++
++/// TF_DS_KV_FETCH_REUSE=1 turns the reuse on (unset, empty or anything else: off, the reference schedule).
++pub fn fetchReuseOn() bool {
++    const v = std.c.getenv("TF_DS_KV_FETCH_REUSE") orelse return false;
++    return std.mem.eql(u8, std.mem.span(v), "1");
++}
++
+ fn fetchDecode(e: *const Engine, rd: *Round, a: tri_attn.Attn, ratio: usize) !void {
+     const c = e.c;
+     const R = rd.r;
+@@ -1410,6 +1446,19 @@ fn fetchDecode(e: *const Engine, rd: *Round, a: tri_attn.Attn, ratio: usize) !vo
+     const sb = c.head_dim / 16;
+     const final = R > tri.decode_rows;
+     const kos = if (final) (kk + 15) / 16 * 16 else kk;
++    const key: FetchKey = .{ .src = rd.cur_src, .idx = rd.idx_layer, .kk = kk };
++    if (rd.fetch_reuse) if (rd.fetch_key) |k| if (k.eql(key)) {
++        // TF_DS_KV_FETCH_REUSE: this run's rows are already gathered (same KV source, same picks, same kk)
++        if (!reuse_noted.swap(true, .monotonic)) std.log.info("dsv41: TF_DS_KV_FETCH_REUSE: decode reuses a run's gathered KV rows (first at kv source {d}, index layer {d})", .{ key.src, key.idx });
++        try rd.mark(e, .sh_fetch);
++        try rd.mark(e, .sh_rows);
++        var b = a;
++        b.comp = .{ .fp4 = .{ .codes = rd.fc, .scales = rd.fs } };
++        b.idx = rd.fidx;
++        b.cbase = rd.sgl(.fbase);
++        try tri_attn.sparseAttn(e.t, b);
++        return;
++    };
+     const sl = shard.decodeSlots(e.kv.?.sh.rank, R, K, cb, sb);
+     try shard_ops.fetch(&e.kv.?.k, e.s, .{
+         .codes = a.comp.fp4.codes,
+@@ -1441,6 +1490,7 @@ fn fetchDecode(e: *const Engine, rd: *Round, a: tri_attn.Attn, ratio: usize) !vo
+         try shard_ops.ringRecv(&kv.k, e.ring.?, e.s, x, rd.rlist + shard_ring.Lists.offset(.fetch, .recv), R, kv.sh.peer(), true);
+     } else try e.comm.allGatherInPlace2(rd.fc, sl.slot_c, rd.fs, sl.slot_s, e.s);
+     try rd.mark(e, .sh_rows);
++    rd.fetch_key = if (rd.fetch_reuse) key else null;
+     var b = a;
+     b.comp = .{ .fp4 = .{ .codes = rd.fc, .scales = rd.fs } };
+     b.idx = rd.fidx;
