@@ -42,6 +42,29 @@ These need **Engram's tables on local disk on both Sparks** (read over NFS, pref
 GPU-clock run, the `tools/bench.py` numbers on random-word prompts, the comparison with BertholomusAI's figures, the 479,012-token
 needle test and what was and was not checked are in [docs/measurements.md](docs/measurements.md).
 
+**Current production (2026-11-22).** The measured pair runs image `tensorfold-dsv41:bench-fused-next-27baa93`
+(`TF_REF + zig/patches 0001–0264`, recipe-0264) with `TF_DS_KV_FETCH_REUSE=1 TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1
+TF_DS_PLACE_BOUND_ALL=1 TF_DS_DRAFT_BLOCK=6 TF_DS_DRAFT_BLOCK_KEPT=2`, on top of the earlier `TF_DS_IDX_FUSED=1`,
+`TF_DS_FUSED_COMPRESS2_NORM=1`, `TF_DS_FUSED_ROPE_STORE=1`, `TF_DS_FUSED_ROUTE=1`, `TF_DS_ENGRAM_LEAD=1` and
+`TENSORFOLD_TOKEN_CACHE_MB=32`, and with `ABLIT=1`. These are that deployment's settings, not `./start.sh`'s defaults
+([handoff](continue.md)). `TF_DS_DRAFT_BLOCK_KEPT=2` was adopted on 2026-11-22: exact 39/39 and +0.32% mean decode tok/s
+([kept](runs/overnight-20261122/kept/RESULTS.md)). Clients sample at temperature 1.0 (top_p 0.95, top_k 20), so the
+sampled rows below are the production-relevant decode rates. They come from `suite_probe.py --narrow --sampled` (thinking
+off, short prompts) on 2026-11-22, on image `5ec7aba` with every new switch off, which is bit-identical to production. They
+are not comparable with the sparkDash tables above. ([k265](runs/overnight-20261122/k265/RESULTS.md), control `ctl1`,
+`runs/overnight-20261122/k265/ctl1.probe.json`)
+
+| Sampled decode, tok/s | tetris | code | json | prose | go | ts | sql | yaml |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 stream, seed 700 | 128.0 | 122.9 | 105.9 | 60.5 | 128.0 | 129.3 | 110.3 | 126.7 |
+| 1 stream, seed 701 | 121.2 | 120.9 | 105.2 | 58.6 | 134.7 | 133.3 | 114.3 | 128.0 |
+
+Sampled Tetris bursts of 768 tokens a stream, total by wall clock: 168.4 tok/s at 2 streams, 219.8 at 4.
+
+In progress, not results yet: the combined test of the exact engine patches 0265, 0266 and 0268 (each alone was
+bit-identical; [k265](runs/overnight-20261122/k265/RESULTS.md)), the kernel round 0269–0271, and the scheduling round
+with the 0272 ring trace ([plan](runs/sched-20261122/README.md)).
+
 ## Requirements
 
 - **Two DGX Sparks** (or two GB10 systems with 128 GB unified memory) with nothing else large on them: the weights take ~98 GiB a
