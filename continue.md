@@ -23,6 +23,17 @@
   - **Noise floor (key finding):** the r271 arms run code identical to control, so they're an A/A test. They show **±2–3% per round-time cell** (+3.02% at 32K×1). The "both test arms below both controls" rule passes by chance in ~1 of 6 cells; that likely explains k265's unreproduced −1.8%.
   - **Better round-time signal:** use the rank-0 lifetime `forward_ms` (±0.25% across 8 arms) or a replicate suite.
   - **New probe metrics:** chunk-gap p95 has a ~±0.5% arm-to-arm spread. Streamed x1 runs 129.6–129.9 tok/s at p95 45.5 ms; streamed x4 runs ≈215 tok/s at p95 71 ms.
+- **PRODUCTION CHANGED 21:25 UTC: image `tensorfold-dsv41:bench-fused-next-10c9866`** (`kernel-stack-0272` = `27baa93` + 0272 + 0273 + 0274 + 0275). This adopts the 0273 failed-capture join fix and the 0274 tool-call first-token fix. 0272 (`RING_TRACE`) and 0275 (`COPY_MIN`) are in the image but unset.
+  - Deploy checks: exact 39/39 and sampled IDENTICAL vs `sched2/ctl1`, `tool_choice: required` + thinking returns a tool call, validate rc=0.
+  - Backup: `~/dsv41-env-backups/.env.bak-20261122-pre-10c9866`.
+  - **New exact reference** for later suites: `runs/deploy-10c9866-20261122/exact.json` (identical to `sched2/ctl1`).
+- **k272 / Round B (`runs/overnight-20261122/k272/RESULTS.md`).**
+  - 0275 `COPY_MIN=3` is neutral (probe +0.14%), so it's held.
+  - 0272 trace overhead at N=16: forward +0.2%, x4 chunk-gap p95 −2.4%.
+  - **Trace finding:** the proxy is not the cost (0.7 µs doorbell→post, 32 ns completion→flag).
+  - **Rank 0 is the late producer on every hidden gather:** about 6–8 µs (3%) more GPU time between gathers. Rank 1 waits 18–21 µs p50 against rank 0's 7–8 µs, which is ≈1 ms a round of rank-1 idle (upper bound ~2.5%). KV exchanges run the other way.
+  - Ruled out: clocks (both 2,380 MHz, no throttle), config (rank 1's flags match), other GPU processes.
+  - **Next, B2:** nsys per-kernel diff of rank 0 vs rank 1 over the same decode rounds.
 - **k272 suite (staged 20:30 UTC):** image `10c9866` is `kernel-stack-0272` (`~/Workspace/tfref-kstack3`) = `27baa93` + 0272 + 0273 + 0274 + 0275. The picks were clean and `zig build test` passes; the syntax error set equals the base's.
   - **Arms:** ctl1, cm3a, tr16a, ctl2, tr16b, cm3b. `cm3` is `TF_DS_COPY_MIN=3`; `tr16` is `TF_DS_RING_TRACE=16`.
   - **Bug fixes in the controls:** 0273 and 0274 are unconditional, so the ctl arms carry them; exact vs production proves they keep bits.

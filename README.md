@@ -42,8 +42,8 @@ These need **Engram's tables on local disk on both Sparks** (read over NFS, pref
 GPU-clock run, the `tools/bench.py` numbers on random-word prompts, the comparison with BertholomusAI's figures, the 479,012-token
 needle test and what was and was not checked are in [docs/measurements.md](docs/measurements.md).
 
-**Current production (2026-11-22).** The measured pair runs image `tensorfold-dsv41:bench-fused-next-27baa93`
-(`TF_REF + zig/patches 0001–0264`, recipe-0264) with `TF_DS_KV_FETCH_REUSE=1 TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1
+**Current production (2026-11-22).** The measured pair runs image `tensorfold-dsv41:bench-fused-next-10c9866`
+(recipe-0264 plus the bug fixes 0273/0274 since 21:25 UTC; [k272](runs/overnight-20261122/k272/RESULTS.md); the rows below were measured on recipe-0264, which the new image reproduces bit for bit) with `TF_DS_KV_FETCH_REUSE=1 TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1
 TF_DS_PLACE_BOUND_ALL=1 TF_DS_DRAFT_BLOCK=6 TF_DS_DRAFT_BLOCK_KEPT=2`, on top of the earlier `TF_DS_IDX_FUSED=1`,
 `TF_DS_FUSED_COMPRESS2_NORM=1`, `TF_DS_FUSED_ROPE_STORE=1`, `TF_DS_FUSED_ROUTE=1`, `TF_DS_ENGRAM_LEAD=1` and
 `TENSORFOLD_TOKEN_CACHE_MB=32`, and with `ABLIT=1`. These are that deployment's settings, not `./start.sh`'s defaults
