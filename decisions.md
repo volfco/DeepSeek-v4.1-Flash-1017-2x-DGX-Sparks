@@ -834,3 +834,11 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
   ./start.sh restart`.
 - Not adopted from the round: 0262 (pool scoring; its scope is ≈0.02% of prefill, and its brief's stop condition hit)
   and 0263 (drafter KV ring batch; ≈0.02%, kit spec now pinned but parked).
+
+## 2026-11-22: 0264 `TF_DS_PLACE_BOUND_ALL` adopted (`bench-fused-next-27baa93`, recipe-0264)
+
+- With no applied cap, the decode experts' grids stop at `top_k × rows + 1` places, the proven most distinct experts
+  (`exl3_experts`: the shared expert is the last id, in every row's last slot). Outputs are unchanged by construction.
+- `runs/overnight-20261122/placebound`: exact 39/39 in all arms; rounds −0.41% mean, four-stream cells −0.25/−0.91/
+  −2.15%. Deployed 10:42–10:44 UTC (IMAGE swap + `TF_DS_PLACE_BOUND_ALL=1`), validated 8/8. Undo:
+  `cp ~/dsv41-env-backups/.env.bak-20261122-pre-0264 .env && ./start.sh restart`. Exported to `zig/patches/0264`.

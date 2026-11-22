@@ -1,0 +1,60 @@
+# export-fnext-series.sh: recipe-0264 @ 27baa937cd68 over c3b3859 @ c3b3859952fd (commit 27baa937cd68)
+# 0264 dsv41: TF_DS_PLACE_BOUND_ALL (off by default): uncapped decode windows stop the experts' grids at top_k rows + 1
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 003f9a703a933751e33fb9b1c55f1be6c0d92bbc..16096a68bd0357a2d670fa30a70e20db24caf30f 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -274,6 +274,9 @@ pub const Round = struct {
+     prune: ?expert_prune.Mode, // TF_DS_T13_EXPERT_PRUNE (TP2 only); fixed for the process, so a captured graph never differs from an eager round
+     pstat: u64, // expert_prune.Stats on the device, 0 when disabled
+     place_bound: bool, // TF_DS_T15_PLACE_BOUND under an applied cap: the experts' grids stop at placeBound
++    // TF_DS_PLACE_BOUND_ALL (off by default): with no applied cap the experts' grids still stop at the window's proven
++    // most places, top_k routed slots a row plus the shared expert (the last id, every row's last slot): placeAll
++    place_all: bool,
+     moe_bytes: ?ExpertBytes = null, // TF_DS_EXPERT_BYTES (a profile): the windows' places and trellis bytes; null: off
+     dead: u64 = 0, // 0177 (TF_DS_DRAFT_TRIAGE): the dead rows' mask u8 [max_rows] on the device (0: off)
+     hot: ?*Hot = null, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the hot set's histogram and prefetch plan (null: off)
+@@ -501,6 +504,7 @@ pub const Round = struct {
+         rd.prune = null;
+         rd.pstat = 0;
+         rd.place_bound = false;
++        rd.place_all = placeAllOn();
+         if (e.ops.prune) |m| {
+             // the 2D split's experts have not been checked to take pick -1
+             if (e.two != null) {
+@@ -1436,6 +1440,25 @@ pub const FetchKey = struct {
+ };
+ 
+ var reuse_noted = std.atomic.Value(bool).init(false);
++
++/// TF_DS_PLACE_BOUND_ALL=1 turns the uncapped place bound on (unset, empty or anything else: off).
++pub fn placeAllOn() bool {
++    const v = std.c.getenv("TF_DS_PLACE_BOUND_ALL") orelse return false;
++    return std.mem.eql(u8, std.mem.span(v), "1");
++}
++
++/// A decode window's most distinct expert places: each row's top_k routed slots, all distinct across rows at worst,
++/// and the shared expert, one id in every row's last slot (exl3_experts: "the shared expert, the last, in every row's
++/// last slot"). exl3_experts.decodeLaunches takes min(rows * slots, experts, this).
++pub fn placeAll(top_k: usize, rows: usize) usize {
++    return top_k * rows + 1;
++}
++
++test "TF_DS_PLACE_BOUND_ALL: top_k slots a row plus the shared expert" {
++    try std.testing.expectEqual(@as(usize, 43), placeAll(6, 7)); // 49 places -> 43 at seven rows
++    try std.testing.expectEqual(@as(usize, 7), placeAll(6, 1));
++    try std.testing.expectEqual(@as(usize, 97), placeAll(6, 16));
++}
+ var topk_merge_noted = std.atomic.Value(bool).init(false);
+ 
+ /// TF_DS_KV_FETCH_REUSE=1 turns the reuse on (unset, empty or anything else: off, the reference schedule).
+@@ -1721,7 +1744,7 @@ fn moe(e: *const Engine, rd: *Round, ch: *const Chunk, li: usize) !void {
+         try tw.catRank(e, ch.xsd.xd, tw.xd_full, R * ch.xsd.slots, tw.gu, 2);
+         try rd.mark(e, .m_x);
+         try exl3_experts2d.decodeDown(e.ex, e.s, lay.experts, ch.xsd, tw.xd_full, rd.pick, rd.mw, rd.pm, R);
+-    } else try exl3_experts.decode(e.ex, e.s, lay.experts, ch.xsd, rd.x, c.hidden, rd.pick, rd.mw, rd.pm, R, c.swiglu_limit, if (rd.place_bound) expert_prune.placeBound(rd.prune.?, R) else null);
++    } else try exl3_experts.decode(e.ex, e.s, lay.experts, ch.xsd, rd.x, c.hidden, rd.pick, rd.mw, rd.pm, R, c.swiglu_limit, if (rd.place_bound) expert_prune.placeBound(rd.prune.?, R) else if (rd.place_all) placeAll(c.top_k, R) else null);
+     // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picks counted for the prefetch's hot set (1D only; counts only)
+     if (rd.hot) |h| if (e.two == null) try e.ops.hotTrack(e.s, ch.xsd.ids, ch.xsd.count, h.hist, li, h.stride);
+     // TF_DS_EXPERT_BYTES: the window the experts just read, counted (a profile; null unless the switch is on)
