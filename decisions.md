@@ -761,3 +761,28 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
   and a "neutral" verdict is only meaningful when the control arm's spread is printed beside it.
 - Open: the deep-decode `fixed_replay` prompt, the 0215 timing window, and the Engram lead-reader soak owed from
   2026-11-19. [Results](runs/suite-fused-next2-20261121/RESULTS.md)
+
+## 2026-11-22 0254–0258 adopted; the round rebased onto `zig/patches/` as 19 patches
+
+- Scope: major (engine series), following the gate in `runs/suite-fused-next2-20261121/RESULTS.md`.
+- Considered: (a) adopt `84806bb` and rebase (operator's pick); (b) stay on `d5ecba0`; (c) adopt only `0254`/`0255`;
+  (d) re-measure with a decode-bearing `fixed_replay` first. Chose (a).
+- Decision: **adopt**. The pair gate passed 5/5 blocks bit-identically and speed is inside the window's control
+  spread (`-1.35%`/`+1.71%` next-vs-base against a `-2.23%` base-vs-base control), so the series costs nothing in
+  serving; `0254`/`0255` keep their `-39…-60%` / `-15…-23%` standalone wins, and `0256`/`0258` make the trace
+  thread-safe. (d) was the honest alternative and is still in `todo.md`: the deep decode buckets were never
+  measured because `fixed_replay`'s prompt answers in one token.
+- Rebase: 19 patches (`0213–0217`, `0230–0231`, `0240–0242`, `0250–0258`) exported from
+  `~/Workspace/tfref-fnext-rebase` (`c3b3859` + cherry-picked `fused-next`) by `scripts/export-fnext-series.sh`
+  (`just export-fnext`), numbered from the commits so the round's gaps survive. Two hand resolutions: `0217` keeps
+  `0182`'s `topk_fast` const and takes the `const o: Ops` dynamic-shared opt-in; `0256` takes the
+  `topkIndicesArm` dispatch, keeps `.topk_indices_fast`, and keeps `0182`'s precedence
+  (`if (o.topk_fast) o.topk_indices_fast else o.topk_indices`) alongside the trace note. `0254`/`0255` replace the
+  hand-ported pair after an added/removed-line comparison showed them content-equal to their commits.
+- Why not `scripts/port-patches.sh`: it applies every hand-written patch before every exported one, and this tree
+  interleaves them (exported 0129–0171, hand-written 0182–0211, then this round), so it cannot reach the base.
+- Verified: the chain applies onto a clean `TF_REF` in filename order and reproduces the rebased tip; `zig build
+  test` passes on the rebased tree (one run printed the known rank-1 spill-scan flake); a `TF_REF + patches`
+  checkout type-checks with `zig build install native -Dfatbins=<dummy dir>`. **Not done:** an image build from the
+  recipe and its deploy gate (39-case exact, `validate.py --compare`, hardware smoke) — production stays on
+  `bench-prune-six-20261120` until that passes.
