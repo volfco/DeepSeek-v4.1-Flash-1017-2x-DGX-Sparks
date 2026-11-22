@@ -104,6 +104,23 @@ def diff(a, b):
 label, out = sys.argv[1], sys.argv[2]
 res = {"label": label, "depths": DEPTHS, "streams": STREAMS, "max_tokens": MAX_TOKENS, "cells": []}
 chat(prompt(512, 999))  # warm
+# PREFILL_CELL=1: cold prefill of fresh 32K and 96K prompts (salted with the label and the clock, so no cache or spill
+# entry serves them), 1 output token each: prefill tok/s for config sweeps
+if os.environ.get("PREFILL_CELL") == "1":
+    res["prefill"] = []
+    for depth in (32768, 98304):
+        p = f"[cold {label} {time.time():.6f}]\n" + prompt(depth, 31 * depth + 5)
+        body = {"model": "DeepSeek-V4.1-Flash-1017", "messages": [{"role": "user", "content": p}], "max_tokens": 1,
+                "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}
+        t = time.time()
+        with urllib.request.urlopen(urllib.request.Request(URL + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=1800) as r:
+            o = json.load(r)
+        dt = time.time() - t
+        u = o.get("usage") or {}
+        cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        res["prefill"].append({"depth": depth, "s": round(dt, 3), "prompt_tokens": u.get("prompt_tokens"), "cached": cached,
+                               "tok_s": round((u.get("prompt_tokens", 0) - cached) / dt, 1)})
+        print(json.dumps({"prefill": res["prefill"][-1]}), flush=True)
 for depth in DEPTHS:
     for n in STREAMS:
         ps = [prompt(depth, 100 * depth + i) for i in range(n)]

@@ -30,6 +30,13 @@ for i, c in enumerate(cells):
     print(f"| {c['depth'] // 1024}K × {c['streams']} | " + " | ".join(f"{v[n]:.2f}" for n in ctl + tst)
           + f" | {cm:.2f} | {tm:.2f} | **{d:+.2f}%** | {drift:+.2f}% | {below}/{len(tst)} |")
 print(f"\nmean test vs control: {sum(deltas) / len(deltas):+.2f}%")
+if all("prefill" in arms[n] for n in arms):
+    print("\n| Cold prefill tok/s | " + " | ".join(ctl + tst) + " | control mean | test mean | test vs control |")
+    print("|---|" + "---:|" * (len(ctl) + len(tst) + 3))
+    for i, p0 in enumerate(arms[ctl[0]]["prefill"]):
+        v = {n: arms[n]["prefill"][i]["tok_s"] for n in arms}
+        cm = sum(v[n] for n in ctl) / len(ctl); tm = sum(v[n] for n in tst) / len(tst)
+        print(f"| {p0['depth'] // 1024}K | " + " | ".join(f"{v[n]:.0f}" for n in ctl + tst) + f" | {cm:.0f} | {tm:.0f} | **{100 * (tm - cm) / cm:+.2f}%** |")
 for n in ctl + tst:
     p = os.path.join(a.out, f"{n}.cmp.txt")
     if os.path.exists(p):
