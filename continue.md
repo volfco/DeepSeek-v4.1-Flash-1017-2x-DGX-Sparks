@@ -1,6 +1,17 @@
 # Continue
 
-**Current state (2026-11-22 04:40 UTC, after the 0254–0258 pair gate):**
+**Current state (2026-11-22 06:10 UTC): `84806bb` adopted as the baseline; its production deploy is scripted but not yet run.**
+
+- **Decision (operator, 2026-11-22): adopt `84806bb` into the production baseline.** Small standalone wins add up across rounds even when a single round can't resolve them. From now on, every A/B uses `bench-fused-next-84806bb` as its control arm, not `bench-prune-six-20261120`.
+- **Deploy is ready and blocked on a launch permission.** `runs/deploy-fnext-20261122/deploy.sh` changes only `IMAGE=` in the head's `.env`, from `bench-prune-six-20261120` to `bench-fused-next-84806bb`. That is the binary the two gates measured: same switches, `PREPARE=0`, nothing built. The script:
+  - waits for 30 external-idle minutes (a client at 203.0.113.142 was active at 05:39 UTC);
+  - backs up `.env` to `~/dsv41-env-backups/.env.bak-20261122-pre-fnext`;
+  - dry-runs, restarts, smoke-tests, proves the image and switches on both ranks, and runs `validate.py --compare`.
+
+  The evidence chain is production → `d5ecba0` (39/39, neutral) → `84806bb` (5/5, neutral). The image (`sha256:2408857…`) is present on both ranks. The image change starts a fresh spill namespace, so kept sessions go cold once. Launch it from the recipe root on the head: `setsid nohup bash runs/deploy-fnext-20261122/deploy.sh > runs/deploy-fnext-20261122/run.log 2>&1 < /dev/null &`. **Undo:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-fnext .env && ./start.sh restart`. After it passes, update `best-runtime.md`, `decisions.md` and the production lines below.
+- **Production runs the `fused-next` binary; `zig/patches/` holds the rebased equivalent, which has never run on hardware.** Building and gating an image from the recipe (a full source build on the head) is still open. It does not block the image swap. Do not `just sync-head` or restart with changed `zig/patches` until that build has been run.
+
+**State at 04:40 UTC, after the 0254–0258 pair gate:**
 
 - **Production is back on exactly the configuration it ran before the window**: both ranks on `tensorfold-dsv41:bench-prune-six-20261120` with the same `.env` switches (`TF_DS_IDX_FUSED=1`, `TF_DS_FUSED_COMPRESS2_NORM=1`, `TF_DS_FUSED_ROPE_STORE=1`, `TF_DS_FUSED_ROUTE=1`, `TF_DS_DRAFT_BLOCK=6`, `TF_DS_ENGRAM_LEAD=1`, `TENSORFOLD_TOKEN_CACHE_MB=32`, `IMAGE=`/`PREPARE=0`). `/health` 200, chat answers, spill tier cold-namespaced by the suite blocks only. Nothing from `fused-next` is deployed.
 - **The 0254–0258 gate passed 5/5 blocks and is speed-neutral.** Exact 39/39 on every block, probe 11/11 hashes with identical rounds/accepted, `fixed_replay` inputs and token hash equal, `dec8_staggered` 3/3 waves equal; next-vs-base `-1.35%`/`+1.71%` pure decode against a `-2.23%` base-base control. So `84806bb` is adoptable on correctness and buys nothing in serving (its standalone wins stay −39…−60% `0254` and −15…−23% `0255`). [Results](runs/suite-fused-next2-20261121/RESULTS.md) · [Suite](runs/suite-fused-next2-20261121/README.md)
@@ -14,6 +25,85 @@
 - Choose fusion by shape and buffer reuse. On the candidate image at 128 query rows, the split rotation/FP4 chain saved a paired median 2.56–3.30 µs on a single invocation across two runs. Fusion won with eight distinct buffers in one graph. Measure the workload's actual reuse before changing dispatch. For the deep indexer, distributing wide reads across more GPU blocks can repay a second launch. Keep the 6,144-block threshold until a valid crossover sweep. For prefill, profile the full-row scoring ahead of the pool mask. [128-row query experiment](runs/suite-fused-next2-20261121/query128/RESULTS.md) · [Shape comparisons and follow-ups](runs/suite-fused-next2-20261121/RESULTS.md#where-the-time-goes)
 - A long prompt can finish in one token. Verify multiple active decode rounds in each intended bucket, then weight kernel savings by measured launch counts and GPU time on each rank. The deduplicated shape trace establishes dispatch coverage only. [Replay coverage](runs/suite-fused-next2-20261121/RESULTS.md#trace-s05-128-lines-per-rank-both-ranks-equal-in-shape-coverage)
 
+### Kernel, instruction and hardware findings register (fused rounds 0193–0258, as of 2026-11-22)
+
+This register collects the findings for future patch decisions. GB10 is `sm_121`. Every timing is standalone through CUDA graphs unless it says otherwise. Builds use `nvcc -O3 -arch=sm_121 --fmad=false --ftz=false`, never fast math.
+
+**Where decode time goes: the ceiling for repo-owned kernels.** The data is the solo decode stage windows on the pre-fused image (Nov 18, stage-instrumented, so shares are approximate). [Stage windows](runs/overnight-opt/followthrough02/stage-windows.csv)
+
+| Stage | Head share | Worker share | Owner | Note |
+| --- | ---: | ---: | --- | --- |
+| `moe` | 45.2% | 40.0% | kit expert cubins | 202/228 GB/s, 80%/90% of the contiguous-read reference. Do not touch (rebuilt kit = new binary). |
+| `a_q` | 6.0% | 4.7% | mixed | 88/129 GB/s |
+| `attn` | 4.4% | 3.9% | kit attention core | 158/182 GB/s |
+| `gather_a` + `gather_m` | 6.6% | 13.4% | NCCL all-gathers | Worker figure is mostly waiting on the head |
+| `sh_rows` + `sh_fetch` | 3.7% | 9.8% | **repo (sharded KV fetch)** | Largest repo-owned decode stage. See candidate 1 below. |
+| `a_in`, `a_woa`, `a_core`, `m_rt` | 3.2–3.7% each | 1.9–2.4% each | mixed | |
+| `head`, `engram` | 2.5%, 2.4% | 2.6%, 2.5% | kit / repo | `head` at 185 GB/s, 73% of reference |
+| `a_idx` (all indexer work, where 0195/0213–0217/0254/0255 live) | 2.3% | 1.9% | **repo** | Bound on what any indexer kernel can still win in decode |
+| `mix_attn` + `mix_ffn` | 2.9% | 2.2% | repo | |
+
+The fused rounds so far worked inside roughly 8% of the decode round (a_idx, parts of a_in/a_q, the compressor and the route). That is why every pair gate since November 19 has been neutral within the roughly ±0.6% control floor. A 2 µs kernel saving at seven rows across 40 layers projects to about 0.08 ms of a 42–87 ms round. Graph-on decode reads 146–162 GB/s per rank. [Bandwidth](runs/overnight-opt/RESULTS.md)
+
+**Per-kernel timings at served shapes (standalone GB10)**
+
+| Kernel / path | Before → after | Shape | Source |
+| --- | --- | --- | --- |
+| 0197 decode compressor + RMSNorm | 3.48 → 1.75 µs; 3.99 → 2.00; 6.74 → 2.01 | 1/7/32 × 512 | [audit](runs/fused-kernel-audit-20261120/RESULTS.md#final-0197-decode-compressor) |
+| 0195 fused indexer selection | 44.77 → 9.80 µs | 4,096 blocks, random scores | same |
+| 0199 six-slot prune (counters on) | 9.782 → 2.547 µs; counters off 1.819 vs 2.133 prototype | 7 rows | [0199](runs/prune-six-20261120/RESULTS.md) |
+| 0199 stats on minus off | 0.728 µs/layer (0.069% of a 42 ms round) | 7 rows | keep counters on |
+| 0254 score top-k | 237 → 101 µs random; tied 139 µs | 128 × 32,768, k=512 | [kernel review](runs/suite-fused-next-20261121/kernel-review/RESULTS.md) |
+| 0255 candidate mask | 1.257 → 1.051 µs | 7 rows, width 1,024 (128 eight-score blocks) | [timing](runs/suite-fused-next-20261121/kernel-review/index-timing.json) |
+| 0215 small-row deep indexer | 12.14 → 10.53 µs (1 row), 12.44 → 11.80 (7 rows) at 8,192 cands; **loses** 8.46 → 8.67 at 7 rows/4,096 | | [wp1](runs/fused-next-20261121/wp1/RESULTS.md) |
+| 0198 query rotation + FP4, 128 rows | fused 5.80 vs split 5.02 µs. Split wins one invocation by 2.56–3.30 µs (paired median, two runs). Fused wins with 8 distinct buffers in one graph. Fused also wins at 48 and 1,024 rows. | | [query128](runs/suite-fused-next2-20261121/query128/RESULTS.md) |
+| 0198 query baseline | 1.681 µs | 7 rows × 32 heads × 128 | [gb10-repeat](runs/fused-kernel-audit-20261120/gb10-repeat.log) |
+| 0200–0212 follow-up | prompt compressor 28–67% faster, rope-store 14–45% faster; decode compressor 13–17% **slower** (0207 `isfinite`, ~0.03% of a round); 0206 key fold 316.6 vs 38.5 µs (R=128, width 32,768) | | [followup](runs/fused-followup-20261121/RESULTS.md) |
+| Original fused route 0193/0194 | 18–19% slower single-stream, 11% slower at 4 streams. One block per row recomputes the whole 384×5,120 gate. | | [Nov 19](runs/fused-bench-20261119/RESULTS.md) |
+
+**Instruction-level (SASS) findings.** Per-kernel counts for the `84806bb` sources are in [opcounts.txt](runs/fnext-sass-20261122/opcounts.txt).
+
+- **Duplicate `expf` in the compressor: closed, no patch needed (checked 2026-11-22).** The source calls `expf` four times on two operands. NVCC already merges them: the decode compressors `compress2x_norm128/512` each emit 2 `MUFU.EX2` per code path (two paths: PDL and non-PDL), and `compress2x` emits 2. This retires `todo.md`'s "cache the two compressor exponentials" item.
+- **RoPE partner shuffles:** 0242 already skips the exchange on wholly unrotated warps in the latent/key chains. `tf_ds_fused_rope_qd_kernel` (one element a thread, used below decode's largest window) still shuffles unconditionally. At HD=128/RD=64 that is 2 of 4 warps per head, one `SHFL` per element. Worth folding into any future edit of that kernel, but not a patch on its own.
+- Barrier counts: 0202 cut `fused_prompt_idx_key` from 6 to 4 and `fused_idx_key` from 5 to 3. 0209 cut LDS from 26 to 4. `tf_ds_idx_fused_kernel` carries 15 `BAR.SYNC`, 40 `SHFL` and 1 `ATOMS` (the radix histogram).
+- Shared atomics: `sm_121` already coalesces intra-warp uniform shared `atomicAdd`. On ties, 0254's extra cost is about 82–86% from 2 extra row-scan passes (+32.1 MiB, 6 barriers) and 14–18% from cross-warp single-bank contention. Warp aggregation with `__match_any_sync` would address only the second part. Cutoff-straddling −∞ rows are under 0.03% of served wall time. [0254 ties](runs/pre-bench-20261121/topk-and-patches/RESULTS.md)
+- Generated FP4 conversion uses seven dependent comparisons per element. It is a plausible contributor to the 128-row fused-query gap, with an unmeasured share. [wp3](runs/fused-next-20261121/wp3/RESULTS.md)
+- Bit-exactness rules that held: the kit's `rsqrt`/`rcp` instructions (not `sqrtf`/division) were required for the 0197 RMSNorm. Nine bf16 bytes differed until that change. Triton contracts `re = fma(xe, cs, -(xo*sn))`, and the odd element differs between torch and the kit (0252 fixed the pair query's odd element). 0206's key XORs the top bit and the kit's `_score_keys` does not. The kit `_score_keys` faults when `width % 4 != 0`. All kernels keep `LOCAL=0 STACK=0`.
+
+**Hardware and measurement findings**
+
+- Pair-gate resolution: the base-to-base control spread is about 0.6% (dec8 matched-step up to 2.2%). The dec8 dip traced to random HTTP admission order under `TF_DS_ROUND_ROWS=16` plus the `min(t_first)` prefill exclusion, not a kernel. Run conditions: clocks 2,392/2,385 MHz, 84–87 °C max, lowest head free memory 4.9 GiB. [dec8 audit](runs/pre-bench-20261121/dec8-audit/RESULTS.md)
+- Harness: legacy stream-0 `cuMemcpy*_v2` is asynchronous for pageable buffers of 64 KiB or less and races `CU_STREAM_NON_BLOCKING` kernels (B2, 2 of 220 false mismatches). `bench.py` now uses stream-ordered copies and emits `timing_valid` only while `live.connections == 0`. [B2](runs/pre-bench-20261121/b2-investigation/RESULTS.md)
+- PDL (`TF_DS_PDL=1`) is bit-identical on the fused bundle and speed-neutral on the pair (s05). It is not enabled.
+- Dense prefill projections reach 35% / 67% of the same-shape FP16 reference on head / worker. The prompt gate/up stage is 17.9% of the head's chat-prime window. Standalone EXL3 unpack is 1.0%, prompt routing 0.90%.
+- 0217 needs the opt-in dynamic shared memory limit to cover 131,072 pool columns, requested at module load.
+
+### The next set of patches, ranked by serving price (2026-11-22)
+
+No engine work past `0258` exists in any `tfref-*` checkout, so this is the next round. It follows the gate's lesson: price at the serving shape before building, and use `84806bb` as the control. Each item needs a standalone byte-parity check, then the 39-case exact suite, long-reply hashes and a graphs-on pair A/B.
+
+1. **Reuse fetched KV and renumbered picks between decode layers (sharded fetch mode).**
+   - The served checkpoint has eight stretches of layers that share a KV source and pick set. 30 of 38 fetches are repeats, 29.53 MiB of logical payload per round at 7 rows / 512 picks.
+   - It targets the largest repo-owned decode stage (`sh_rows` + `sh_fetch`: 3.7% head, 9.8% worker).
+   - First step, no restart: confirm on a stage trace that pick sets really repeat inside a stretch, then size the fetch's share with graphs on.
+   - Invalidate on a new round, a KV update or a pick update, and keep both ranks' ring schedules identical. (`round.zig:1329–1374`, `config.zig:287–290`)
+2. **Sampled verification: exchange rank-local top-k instead of full logits.** Clients run at T=1.0, so this is on every real decode round. Each rank's collective input drops from 258,560 to 448 bytes per row (`top_k` ≤ 56). The host check matched 96 cases. Benchmark selection + exchange + draw with graphs on. (`lanes.zig:1449–1523`, `round.zig:2009–2027`)
+3. **Prefill: score only retained blocks in later prompt indexers (layers 24/28/32/36).**
+   - At 128 × 65,536 the current path materializes 33.5 MB of scores, of which at most a quarter of the columns per row survive. That makes 0254's top-k a prefill cost.
+   - At 2,048 candidate blocks a row needs 16,384 or fewer scored columns.
+   - Profile full-row scoring before building. (`prompt.zig:1435–1450`)
+4. **Drafter: project vocabulary logits only for scored steps.** At 4 streams / 5 block rows / 3 steps that is 12 rows instead of 20, saving 1.97 MiB of FP32 output per rank per pass. First measure how often the policy asks for fewer steps than the block width.
+5. **Prompt expert activation in the gate/up GEMM epilogue.** This stage is 17.9% of chat-prime prefill, with 126 MiB of FP32 intermediates per rank per layer. It touches the expert path, so time a standalone epilogue first.
+6. **Small decode items, only if bundled with a larger edit:**
+   - 0197 at 128 threads × 4 channels (D=512): removes the `row[512]` exchange and a barrier. The kernel is 2.0 µs.
+   - `rope_qd`'s unrotated-warp shuffle skip.
+   - Repeated ratio-2 pair computed once per window (4 distinct pairs in 7 rows).
+   - Tighter 0199 expert grid (49 → 43 places). The capped test moved decode only 0.0–0.5%.
+
+**Owed measurements on the adopted series (idle head, no restart):**
+- The guarded `0215` crossover capture (`small_nbk` stays 6,144 until `timing_valid: true` medians move it).
+- A `fixed_replay` prompt that decodes about 200 tokens, so the 8,192/16,384-block decode buckets are actually traced with multiple rounds.
+
 **Previous state (2026-11-21, stopped before Spark engine restart):**
 - **Live production (untouched, actively serving):** Both ranks run `tensorfold-dsv41:bench-prune-six-20261120` (`~/Workspace/tfref-fusedbench` @ `d66e663`) with `TF_DS_IDX_FUSED=1`, `TF_DS_FUSED_COMPRESS2_NORM=1`, `TF_DS_FUSED_ROPE_STORE=1`, `TF_DS_FUSED_ROUTE=1`, `TF_DS_DRAFT_BLOCK=6`, `TF_DS_ENGRAM_LEAD=1`, `TENSORFOLD_TOKEN_CACHE_MB=32`, and `IMAGE=` / `PREPARE=0`. **Undo:** `cp ~/dsv41-env-backups/.env.bak-20261121-pre-fused .env && ./start.sh restart` on the head (and remove the seven lines from `.env`). [Suite results](runs/suite-fused-20261121/RESULTS.md) · [Deploy record](runs/deploy-fused-20261121/)
 - **`fused-next` engine branch (`~/Workspace/tfref-fused-next` @ `84806bb`, `0213–0258`):**
@@ -23,7 +113,8 @@
   - Closed without restart: Review Blocker B2 (`bench.py` stream-0 vs `CU_STREAM_NON_BLOCKING` DMA race fixed; kernels `0`-error under `compute-sanitizer`), `dec8` `-0.59%/-0.69%` dip (random HTTP admission order under `TF_DS_ROUND_ROWS=16` + `min(t_first)` prefill exclusion; active decode neutral/faster), `0254` tied-score cost (`<0.03%` served share, no kernel change), and `bench.py` 4-caller `floor`/`newnf` label + `timing_valid` guards (`9/9` unit tests, `100` historical rows audited). [B2](runs/pre-bench-20261121/b2-investigation/RESULTS.md) · [dec8](runs/pre-bench-20261121/dec8-audit/RESULTS.md) · [Harness audit](runs/pre-bench-20261121/harness-audit/RESULTS.md) · [0254 & patch lineage](runs/pre-bench-20261121/topk-and-patches/RESULTS.md)
 
 **Next actions (in order):**
-1. **Adoption DONE (keep `84806bb`); the deploy gate is next.** Build an image from the recipe (`./start.sh restart` prepares when `zig/patches` changed; expect a full source build on the head) and run the series' gates: 39-case exact panel, `tools/validate.py --compare`, the hardware smoke, then a serving A/B against production. Until that passes, production stays on `bench-prune-six-20261120`. The measurement window ran 2026-11-22 02:34–04:31 UTC this way: `bash runs/suite-fused-next2-20261121/preflight.sh` from the workstation (its two path bugs are now fixed). It builds/ships `bench-fused-next-84806bb` (no restart during build), syncs only the suite folder (never `just sync-head`), and on the head: waits for 30 external-idle minutes, snapshots `production.rank{0,1}.env`, captures the guarded `0215` crossover timings into `runs/pre-bench-20261121/crossover-0215/` (keep `idx_fused.small_nbk = 6,144` unless `timing_valid: true` medians move it), then runs ABBA `s01–s04` (`d5ecba0` vs `84806bb`) + `s05` (`TF_DS_FUSED_TRACE=1` both ranks) with the `fixed_replay` (unsalted 49,967/99,904/200,000-token hashes + prefill tok/s + decode ms/round) and `dec8_staggered` cells. Gates: `python3 -I runs/suite-fused-next2-20261121/gate.py` and `table2.py`. [Suite README](runs/suite-fused-next2-20261121/README.md)
+0. **(2026-11-22) Run `runs/deploy-fnext-20261122/deploy.sh` on the head to put `84806bb` in production** (see the current state above), then start the ranked next set with candidate 1's no-restart stage trace.
+1. **Adoption DONE (keep `84806bb`); the recipe-image gate is still owed (the image swap above does not need it).** Build an image from the recipe (`./start.sh restart` prepares when `zig/patches` changed; expect a full source build on the head) and run the series' gates: 39-case exact panel, `tools/validate.py --compare`, the hardware smoke, then a serving A/B against production. Until that passes, production stays on `bench-prune-six-20261120`. The measurement window ran 2026-11-22 02:34–04:31 UTC this way: `bash runs/suite-fused-next2-20261121/preflight.sh` from the workstation (its two path bugs are now fixed). It builds/ships `bench-fused-next-84806bb` (no restart during build), syncs only the suite folder (never `just sync-head`), and on the head: waits for 30 external-idle minutes, snapshots `production.rank{0,1}.env`, captures the guarded `0215` crossover timings into `runs/pre-bench-20261121/crossover-0215/` (keep `idx_fused.small_nbk = 6,144` unless `timing_valid: true` medians move it), then runs ABBA `s01–s04` (`d5ecba0` vs `84806bb`) + `s05` (`TF_DS_FUSED_TRACE=1` both ranks) with the `fixed_replay` (unsalted 49,967/99,904/200,000-token hashes + prefill tok/s + decode ms/round) and `dec8_staggered` cells. Gates: `python3 -I runs/suite-fused-next2-20261121/gate.py` and `table2.py`. [Suite README](runs/suite-fused-next2-20261121/README.md)
 2. **DONE: the rebase/export is in `zig/patches/` (`just export-fnext` regenerates it).** Keep `~/Workspace/tfref-fnext-rebase` as the export source; the engine's own `fused-next` branch (84806bb) remains the reference the pair gate measured. [Lineage map](runs/pre-bench-20261121/topk-and-patches/RESULTS.md)
 3. **After the pair gate:** the owed full soak/300K round for `TF_DS_ENGRAM_LEAD=1` ([evaluation order](to-benchmark.md#current-evaluation-order)); update `runs/overnight-opt` / `runs/review-round` baseline checks to accept `TENSORFOLD_TOKEN_CACHE_MB=32` before any full campaign.
 
