@@ -71,17 +71,23 @@ All five blocks: status ok, 14/14 cells, validation passed, arm proof clean, clo
 
 ## Caveats
 
-- Engagement is inferred, not traced: the image and switches are proven on both ranks, but `TF_DS_FUSED_TRACE` was off
-  (and 0216's bypass has no trace arm at all). Depth matters for two items: 0215's small-row form needs >= 6144 blocks
-  (~98K tokens on a ratio-2 layer) and 0217's range needs > 8192 blocks. The only compared cell that deep is the
-  greedy `len_100000` exact case (~50K compressed keys = ~6.2K blocks on ratio-2 layers, ~12.5K on ratio-1 layers if
-  the engine's test config `config.zig:287` matches the model), so both are probably exercised there, once each, at the
-  margin. The 300K and long-context cells reach further but are salted per block and not compared.
-- Review item B2 (WP2's unreproduced new-only differences, one at `idx-small R=1 nb=8192`) still has no mechanism.
-  The clean panel narrows it but does not close it for 0215/0217 at depth; an unsalted greedy 150K-300K prompt on both
-  images (a traced run) would.
+- Trace was off on both ranks. A later read of the served checkpoint's `text_config` confirmed candidate-source layer 20,
+  compression ratio 1 there and eight scores per block. Decode rounds round the deepest position up to a power of two
+  before computing the block count. The 49,967- and 63,954-token exact cases therefore map to 8,192 candidate blocks
+  during decode, and the 99,904-token case maps to 16,384. With at most seven rows these shapes qualify for 0215's
+  small-row kernel. Actual launch choices remain unrecorded. Prefill computes its width separately.
+  [Exact case lengths](blocks/s01.exact.json) · [Checkpoint path and serving context](restore.restart.log)
+- Review item B2 covers two intermittent differences, in the 8,192-block small-row indexer and the 32-row, width-512
+  decode compressor. Both passed later standalone repeats. A paired greedy replay with identical input tokens near
+  50K and 100K would check the two fused decode buckets. A 150K–300K replay would check the larger decode fallback and
+  deep prefill. Capture the actual kernels on both ranks to establish which paths ran. The original 300K and long-context
+  cells used different passages across blocks. [Original mismatch and follow-up](../fused-next-20261121/review/REVIEW.md)
 - Supervisor review scope: the host dispatch diffs (`round.zig`, `prompt.zig`, `ops.zig`, `idx_fused.zig`) and a sweep of
   every added fma; the kernel bodies in `dsv41_ops.cu`/`dsv41_torch.cu` and `exact.zig` were reviewed by pi's six
   reviewers and by harness parity, not read line by line by the supervisor.
 
 Tabulation: [table.py](table.py) (per block), [compare_next.py](compare_next.py) (pooled, reply equality).
+
+## Subsequent kernel review
+
+A standalone GB10 comparison found avoidable radix scans in score-to-column top-k and scalar loads in the short-context candidate mask. Patches 0254 and 0255 use the existing `TF_DS_IDX_FUSED` switch. The serving figures above cover the earlier `d5ecba0` image. [Changes, kernel timings and parity](kernel-review/RESULTS.md)

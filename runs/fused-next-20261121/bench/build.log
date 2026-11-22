@@ -1,0 +1,66 @@
+== build tensorfold-dsv41:bench-fused-next-d5ecba0 (fused-next = d5ecba070413fc4d0b2952dc511f7133a8a465fb) 14:29:19
+#0 building with "default" instance using docker driver
+
+#1 [internal] load remote build context
+#1 DONE 0.6s
+
+#1 [internal] load remote build context
+#1 DONE 0.6s
+
+#2 copy /context /
+#2 DONE 0.1s
+
+#3 [internal] load metadata for docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626
+#3 DONE 0.0s
+
+#4 [build 1/4] FROM docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626@sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee
+#4 resolve docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626@sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee 0.0s done
+#4 DONE 0.0s
+
+#4 [build 1/4] FROM docker.io/library/tensorfold-dsv41:exl3-tp2-ea522d353626@sha256:38bf190d24ad1d66630b3d7d17cfa5d8ebdbba6aaacc20f36f31c2863a3832ee
+#4 CACHED
+
+#5 [build 2/4] COPY . /tensorfold
+#5 DONE 0.1s
+
+#6 [build 3/4] WORKDIR /tensorfold
+#6 DONE 0.0s
+
+#7 [build 4/4] RUN /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 -Doptimize=ReleaseFast --prefix /stage -j4 install native
+#7 58.47 install
+#7 58.47 +- install tf-dsv41-check
+#7 58.47    +- compile exe tf-dsv41-check fast native
+#7 58.47       +- run /usr/local/cuda/bin/nvcc (prefill_attention.fatbin) w
+#7 58.47 ./zig/kernels/cuda/prefill_attention.cu(18): warning #177-D: variable "tf_prefill_attention::SMEM_MAX" was declared but never referenced
+#7 58.47   constexpr int SMEM_MAX = 96 * 1024;
+#7 58.47                 ^
+#7 58.47 
+#7 58.47 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+#7 58.47 
+#7 58.47 
+#7 DONE 259.4s
+
+#8 [stage-1 2/3] COPY --from=build /stage/native/bin/tensorfold-native /opt/tensorfold/native/bin/tensorfold-native
+#8 DONE 0.0s
+
+#9 [stage-1 3/3] COPY --from=build /stage/bin/tf-dsv41-lanes /opt/tensorfold/bin/tf-dsv41-lanes
+#9 DONE 0.0s
+
+#10 exporting to image
+#10 exporting layers
+#10 exporting layers 0.7s done
+#10 exporting manifest sha256:fc65cb8e6a9576572f1a09eccb188ac636f9b0b2486361efe983a91ade1292e7 done
+#10 exporting config sha256:4abd9de18f0fb81838f8ea23f0e0b714e05c15f9f58f8658b1fa7abbcd9a8c49 done
+#10 exporting attestation manifest sha256:49bac6b7b546ffba8aa22f21312666b8b3d5eb166203745362c2e42352c756bf done
+#10 exporting manifest list sha256:341cf3f3071548afd623fd1440a05787da94f064f14e210a93703b60de518be9 done
+#10 naming to docker.io/library/tensorfold-dsv41:bench-fused-next-d5ecba0 done
+#10 unpacking to docker.io/library/tensorfold-dsv41:bench-fused-next-d5ecba0
+#10 unpacking to docker.io/library/tensorfold-dsv41:bench-fused-next-d5ecba0 0.3s done
+#10 DONE 1.1s
+== ship tensorfold-dsv41:bench-fused-next-d5ecba0 14:33:41
+Loaded image: tensorfold-dsv41:bench-fused-next-d5ecba0
+2ada4f2f6110698d9c074f37d46f709aea2fcae4c10c26333fc9d70221c394aa  /opt/tensorfold/native/bin/tensorfold-native
+188917d2dabd2f8b3bd7cfcf1f9c4f1d76f71de0696f294d52de50ee97bd33b0  /opt/tensorfold/bin/tf-dsv41-lanes
+2ada4f2f6110698d9c074f37d46f709aea2fcae4c10c26333fc9d70221c394aa  /opt/tensorfold/native/bin/tensorfold-native
+188917d2dabd2f8b3bd7cfcf1f9c4f1d76f71de0696f294d52de50ee97bd33b0  /opt/tensorfold/bin/tf-dsv41-lanes
+== done tensorfold-dsv41:bench-fused-next-d5ecba0 14:36:18

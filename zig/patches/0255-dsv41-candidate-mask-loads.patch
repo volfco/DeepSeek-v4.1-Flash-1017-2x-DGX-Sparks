@@ -1,0 +1,83 @@
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -885,6 +885,28 @@
+     }
+ }
+ 
++// TF_DS_IDX_FUSED, eight scores per candidate and 16-byte-aligned rows (idx_fused.candMask8Ok).
++extern "C" __global__ void tf_ds_cand_fast8_kernel(const float* score, long long ss, int nb, int /*bsize*/,
++                                                   const long long* vis, uint8_t* out, long long os, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.y;
++    const float4* row = reinterpret_cast<const float4*>(score + (long long)r * ss);
++    const long long visible = vis[r];
++    const long long last = visible > 0 ? (visible - 1) / 8 : -1;
++    const float ninf = -__int_as_float(0x7f800000);
++    for (int b = blockIdx.x * blockDim.x + threadIdx.x; b < nb; b += gridDim.x * blockDim.x) {
++        const float4 lo = row[2LL * b], hi = row[2LL * b + 1];
++        const float values[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
++        bool nan = false, above = false;
++        #pragma unroll
++        for (int j = 0; j < 8; ++j) {
++            nan |= isnan(values[j]);
++            above |= values[j] > ninf;
++        }
++        out[(long long)r * os + b] = (uint8_t)((!nan && above) || b == last);
++    }
++}
++
+ // model.py _candidates / rounds.py _candidate_blocks, their first step: a row's block maxima of the scores (amax over
+ // blocks of bsize, the last block padded with -inf, a NaN wins), its newest block, (vis - 1) // bsize (floor
+ // division), pinned to +inf. score [rows, width] fp32 (row stride ss), vis [rows] int64, out [rows, nb] fp32 (row
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -111,6 +111,7 @@
+     topk_indices_fast: cuda.Function, // TF_DS_TOPK_FAST (launched only under it)
+     scatter: cuda.Function,
+     cand_fast: cuda.Function,
++    cand_fast8: ?cuda.Function = null,
+     iota_vis: cuda.Function,
+     l2_prefetch: cuda.Function,
+     block_max: cuda.Function,
+@@ -177,6 +178,7 @@
+             .topk_indices_fast = try fm.function("tf_ds_topk_indices_fast_kernel"),
+             .scatter = try fm.function("tf_ds_scatter_rows_kernel"),
+             .cand_fast = try fm.function("tf_ds_cand_fast_kernel"),
++            .cand_fast8 = if (idx_fused_on) try fm.function("tf_ds_cand_fast8_kernel") else null,
+             .iota_vis = try fm.function("tf_ds_iota_vis_kernel"),
+             .l2_prefetch = try fm.function("tf_ds_l2_prefetch_kernel"),
+             .block_max = try fm.function("tf_ds_block_max_kernel"),
+@@ -361,7 +363,8 @@
+         a.add(out);
+         a.add(@as(c_longlong, @intCast(os)));
+         a.add(@as(c_int, @intFromBool(o.pdl)));
+-        try cuda.launch.launch(o.cand_fast, .{ .grid = .{ .x = blocks(nb, 256), .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
++        const f = if (idx_fused.candMask8Ok(score, ss, bsize)) o.cand_fast8 orelse o.cand_fast else o.cand_fast;
++        try cuda.launch.launch(f, .{ .grid = .{ .x = blocks(nb, 256), .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+     /// Every 128-byte line of `pf`'s ranges touched into L2 (one block of 128 threads); writes nothing.
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -22,6 +22,18 @@
+ 
+ pub fn fromText(text: ?[]const u8) error{BadIdxFused}!bool {
+     return parse(text) orelse error.BadIdxFused;
++}
++
++/// Each of the two float4 loads must be aligned for every row, including a score view.
++pub fn candMask8Ok(score: u64, stride: usize, bsize: usize) bool {
++    return bsize == 8 and score % 16 == 0 and stride % 4 == 0;
++}
++
++test "eight-score candidate mask requires aligned rows" {
++    try std.testing.expect(candMask8Ok(0x1000, 2048, 8));
++    try std.testing.expect(!candMask8Ok(0x1004, 2048, 8));
++    try std.testing.expect(!candMask8Ok(0x1000, 2049, 8));
++    try std.testing.expect(!candMask8Ok(0x1000, 2048, 4));
+ }
+ 
+ /// The selection's k bound (the pool's top blocks: candidate_blocks at both call sites, 2048 on this checkpoint).

@@ -1,0 +1,124 @@
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -141,35 +141,70 @@
+ // kernels.topk_indices(score, k), then torch.where(top < vis, top, -1) (model.py attention_k, the candidate pool's
+ // layers), a row a block (1024 threads): each score's int64 key (its bits, -0 as +0 (score + 0.0), ordered as signed
+ // integers, above the inverted column: a total order, ties to the lower column), the k largest keys by a radix select
+-// (eight 8-bit digits from the top), their columns ascending (a bitonic sort), a column at or past vis[r] as -1.
++// (score bytes then varying column bytes), their columns ascending (a bitonic sort), a column at or past vis[r] as -1.
+ // score [rows, n] fp32 (row stride ss), vis [rows] int64, out [rows, k] int64; k <= 2048 and k <= n (the candidate
+ // pool's top blocks: k = 2048).
+-extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(const float* score, long long ss, int n,
+-                                                                              int k, const long long* vis,
+-                                                                              long long* out, int pdl) {
+-    pdl_enter(pdl);
++template <bool EarlyCut>
++__device__ __forceinline__ void tf_ds_topk_indices(const float* score, long long ss, int n, int k,
++                                                   const long long* vis, long long* out, int pdl) {
++    pdl_enter(pdl);
++    if (EarlyCut && k == 0) return;
++    if (EarlyCut && k == n) {
++        const long long v = vis[blockIdx.x];
++        long long* o = out + (long long)blockIdx.x * k;
++        for (int i = threadIdx.x; i < k; i += blockDim.x) o[i] = i < v ? i : -1;
++        return;
++    }
+     __shared__ unsigned int hist[256];
+     __shared__ unsigned long long prefix_s, mask_s;
+     __shared__ int want_s, count_s;
+     __shared__ long long cols[2048];
+     const float* row = score + (long long)blockIdx.x * ss;
++    // Every inverted column in this row shares these leading 0xff bytes.
++    const int column_bytes = EarlyCut ? (32 - __clz((unsigned)(n - 1)) + 7) / 8 : 4;
++    const unsigned long long fixed = (0xffffffffull << (8 * column_bytes)) & 0xffffffffull;
+     if (threadIdx.x == 0) {
+-        prefix_s = 0;
+-        mask_s = 0;
++        prefix_s = fixed;
++        mask_s = fixed;
+         want_s = k;
+         count_s = 0;
+     }
+     __syncthreads();
+-    for (int d = 7; d >= 0; --d) {
++    for (int d = 7; d >= 0; d = (d == 4 ? column_bytes : d) - 1) {
+         for (int b = threadIdx.x; b < 256; b += blockDim.x) hist[b] = 0;
+         __syncthreads();
+         const unsigned long long prefix = prefix_s, mask = mask_s;
++        const int target = want_s;
+         for (int i = threadIdx.x; i < n; i += blockDim.x) {
+             const unsigned long long u = tf_ds_score_key(row[i], i);
+             if ((u & mask) == prefix) atomicAdd(&hist[(u >> (8 * d)) & 0xff], 1u);
+         }
+         __syncthreads();
+-        if (threadIdx.x == 0) {
++        if (EarlyCut && threadIdx.x < 32) {
++            // One warp finds the winning bin. Each lane owns eight descending bins.
++            const int hi = 255 - 8 * threadIdx.x;
++            int count = 0;
++            #pragma unroll
++            for (int j = 0; j < 8; ++j) count += hist[hi - j];
++            int end = count;
++            #pragma unroll
++            for (int step = 1; step < 32; step <<= 1) {
++                const int prev = __shfl_up_sync(0xffffffffu, end, step);
++                if (threadIdx.x >= step) end += prev;
++            }
++            int rank = target - (end - count);
++            if (rank > 0 && rank <= count) {
++                int b = hi;
++                while (rank > (int)hist[b]) {
++                    rank -= (int)hist[b];
++                    --b;
++                }
++                prefix_s = prefix | ((unsigned long long)b << (8 * d));
++                mask_s = mask | (0xffull << (8 * d));
++                // If the entire bin fits, every key at or above this partial prefix wins.
++                want_s = rank == (int)hist[b] ? 0 : rank;
++            }
++        } else if (!EarlyCut && threadIdx.x == 0) {
+             int want = want_s;
+             int b = 255;
+             for (; b > 0; --b) {
+@@ -181,8 +216,9 @@
+             mask_s = mask | (0xffull << (8 * d));
+         }
+         __syncthreads();
+-    }
+-    const unsigned long long kth = prefix_s;   // the keys are unique: exactly k at or above it
++        if (EarlyCut && want_s == 0) break;
++    }
++    const unsigned long long kth = prefix_s;
+     for (int i = threadIdx.x; i < n; i += blockDim.x) {
+         if (tf_ds_score_key(row[i], i) >= kth) {
+             const int at = atomicAdd(&count_s, 1);
+@@ -212,6 +248,16 @@
+     const long long v = vis[blockIdx.x];
+     long long* o = out + (long long)blockIdx.x * k;
+     for (int i = threadIdx.x; i < k; i += blockDim.x) o[i] = cols[i] < v ? cols[i] : -1;
++}
++
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(const float* score, long long ss,
++        int n, int k, const long long* vis, long long* out, int pdl) {
++    tf_ds_topk_indices<false>(score, ss, n, k, vis, out, pdl);
++}
++
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_cut_kernel(const float* score, long long ss,
++        int n, int k, const long long* vis, long long* out, int pdl) {
++    tf_ds_topk_indices<true>(score, ss, n, k, vis, out, pdl);
+ }
+ 
+ // TF_DS_TOPK_FAST (tf_ds_topk_indices_fast_kernel): the same selection in three reads of the row instead of ten. A
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -173,7 +173,7 @@
+             .f16_to_f32 = try fm.function("tf_ds_f16_to_f32_kernel"),
+             .add2_bf16 = try fm.function("tf_ds_add2_bf16_kernel"),
+             .topk_i64 = try fm.function("tf_ds_topk_i64_kernel"),
+-            .topk_indices = try fm.function("tf_ds_topk_indices_kernel"),
++            .topk_indices = try fm.function(if (idx_fused_on) "tf_ds_topk_indices_cut_kernel" else "tf_ds_topk_indices_kernel"),
+             .topk_indices_fast = try fm.function("tf_ds_topk_indices_fast_kernel"),
+             .scatter = try fm.function("tf_ds_scatter_rows_kernel"),
+             .cand_fast = try fm.function("tf_ds_cand_fast_kernel"),
