@@ -56,7 +56,7 @@ def scrape():
             o = json.loads(line[i:])
         except ValueError:
             continue
-        for k in ("profile", "round_clock_us", "round_launches"):
+        for k in ("profile", "round_clock_us", "round_launches", "phases_ms"):
             if k in o:
                 got[k] = o[k]
     return got
@@ -70,7 +70,10 @@ def totals(s):
         if isinstance(v, list):
             out[k] = (v[0] * n, v[1] * n)   # us total, marks total
     p = s.get("profile") or {}
-    out["_prof_rounds"] = p.get("rounds", 0)
+    pr = p.get("rounds", 0)
+    for k, v in (s.get("phases_ms") or {}).items():   # per-round means over the timer's rounds (= profile rounds)
+        out["ph_" + k] = (v * pr, 0)
+    out["_prof_rounds"] = pr
     out["_forward_ms_total"] = p.get("forward_ms", 0) * p.get("rounds", 0)
     return out
 
@@ -78,12 +81,14 @@ def totals(s):
 def diff(a, b):
     n = b["rounds"] - a["rounds"]
     d = {"rounds": n}
+    pr = b["_prof_rounds"] - a["_prof_rounds"]
     for k, v in b.items():
-        if isinstance(v, tuple):
+        if k.startswith("ph_") and pr > 0:
+            d[k] = round((v[0] - a.get(k, (0, 0))[0]) / pr, 3)
+        elif isinstance(v, tuple):
             u0, c0 = a.get(k, (0, 0))
             if n > 0:
                 d[k] = [round((v[0] - u0) / n, 2), round((v[1] - c0) / n, 2)]
-    pr = b["_prof_rounds"] - a["_prof_rounds"]
     d["forward_ms_per_round"] = round((b["_forward_ms_total"] - a["_forward_ms_total"]) / pr, 3) if pr > 0 else None
     d["profile_rounds"] = pr
     return d
@@ -109,6 +114,6 @@ for depth in DEPTHS:
         b = totals(scrape())
         cell = {"depth": depth, "streams": n, "wall_s": round(wall, 2), "requests": reqs, "per_round": diff(a, b)}
         res["cells"].append(cell)
-        print(json.dumps({k: cell[k] for k in ("depth", "streams", "wall_s")}), json.dumps(cell["per_round"])[:600], flush=True)
+        print(json.dumps({k: cell[k] for k in ("depth", "streams", "wall_s")}), json.dumps({k: v for k, v in cell["per_round"].items() if k in ("profile_rounds", "forward_ms_per_round", "ph_sh_fetch", "ph_sh_rows", "ph_moe", "ph_a_idx", "ph_attn")}), flush=True)
         json.dump(res, open(out, "w"), indent=1)
 print("done", out)
