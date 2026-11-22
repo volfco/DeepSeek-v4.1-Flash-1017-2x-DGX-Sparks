@@ -8,9 +8,10 @@ Greedy probe (the fused arm engages on all-greedy passes only) + sampled rows + 
 - Exact panel IDENTICAL ×2, sampled IDENTICAL ×2, banner on both ranks in both test arms (the arm ran).
 - Every greedy probe row is slower: tetris −6.9%, code −6.3%, json −7.1%, prose −10.2%, go/ts/sql/yaml −5.9..−7.6%.
   Sampled rows are unchanged (the arm doesn't engage there). Workload rounds are +0.95% slower (greedy workload).
-- The fused kernel is slower than the separate bias-miss + scoring launches it replaces: one block computes the bias
-  tile on a miss and scores in the same launch, so with ~52% misses the scoring waits on the bias computation
-  instead of overlapping with it. Production traffic is sampled (T=1.0), so the item's upside was small anyway.
+- The fused kernel is slower than the separate bias-miss + scoring launches it replaces. Why is unmeasured: one
+  hypothesis is that with ~52% misses, folding the bias computation into the scoring launch serializes work that the
+  separate launches overlapped (an nsys trace of one greedy pass would settle it). Production traffic is sampled
+  (T=1.0), so the item's upside was small anyway.
 
 ## Bias-cache counter (the todo item's open question)
 
