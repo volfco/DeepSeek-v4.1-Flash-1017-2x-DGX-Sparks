@@ -61,6 +61,11 @@ while IFS= read -r line <&3; do
   for r in 0 1; do
     echo "  rank$r banners: $(insp $r "docker logs $C 2>&1 | grep -cE '$BANNERS'") errors: $(insp $r "docker logs $C 2>&1 | grep -ciE 'panic|error\\.|CudaFailed|segfault'")"
   done | tee "$OUT/$name.banner.txt"
+  # 0272 TF_DS_RING_TRACE: each rank's trace file lives in its container's /tmp and dies at the next restart: copy it out
+  if [[ "$envs" == *TF_DS_RING_TRACE=* ]]; then
+    for r in 0 1; do insp $r "docker exec $C sh -c 'cat /tmp/ring_trace.$r.jsonl 2>/dev/null'" > "$OUT/$name.trace.r$r.jsonl"; done
+    echo "  trace lines: r0 $(grep -c . "$OUT/$name.trace.r0.jsonl") r1 $(grep -c . "$OUT/$name.trace.r1.jsonl")"
+  fi
 done 3< "$ARMS_FILE"
 
 echo "$(date -u +%FT%TZ) restore production (.env alone)"

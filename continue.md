@@ -23,6 +23,11 @@
   - **Noise floor (key finding):** the r271 arms run code identical to control, so they're an A/A test. They show **±2–3% per round-time cell** (+3.02% at 32K×1). The "both test arms below both controls" rule passes by chance in ~1 of 6 cells; that likely explains k265's unreproduced −1.8%.
   - **Better round-time signal:** use the rank-0 lifetime `forward_ms` (±0.25% across 8 arms) or a replicate suite.
   - **New probe metrics:** chunk-gap p95 has a ~±0.5% arm-to-arm spread. Streamed x1 runs 129.6–129.9 tok/s at p95 45.5 ms; streamed x4 runs ≈215 tok/s at p95 71 ms.
+- **k272 suite (staged 20:30 UTC):** image `10c9866` is `kernel-stack-0272` (`~/Workspace/tfref-kstack3`) = `27baa93` + 0272 + 0273 + 0274 + 0275. The picks were clean and `zig build test` passes; the syntax error set equals the base's.
+  - **Arms:** ctl1, cm3a, tr16a, ctl2, tr16b, cm3b. `cm3` is `TF_DS_COPY_MIN=3`; `tr16` is `TF_DS_RING_TRACE=16`.
+  - **Bug fixes in the controls:** 0273 and 0274 are unconditional, so the ctl arms carry them; exact vs production proves they keep bits.
+  - **Trace files:** `arms.sh` now copies each rank's `/tmp/ring_trace.<r>.jsonl` out of the container when an arm sets `TF_DS_RING_TRACE`. The chain runs `h0272/summarize.py` on both arms (Round B's data).
+  - **Still running:** 0276 (cache replace-stale).
 - **Outside-repo reviews (19:00 UTC).** Nine forks reviewed: zachxu Coder-1x, Senti100, HelloTianxu, joseyarashio, Blackwellboy/BLACKFOLD, bertholomus, Yushell 2.7 bpw, ursuciprian, Elevatormusic. Clones are in the session scratchpad; the source patches were copied to `runs/kernel-round-20261122d/src/`.
   - **No faster decode:** none beats our sampled 1-stream or 4-stream decode.
   - **Production checks:** the Engram token map's sha matches the kit's (`de40bcdd…`).

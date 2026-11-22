@@ -1,0 +1,10 @@
+# stack 0272-0275 on recipe-0264 27baa93 (kernel-stack-0272). 0273 (failed-capture join) and 0274 (call-gate first token)
+# are unconditional bug fixes: the ctl arms carry them, and exact vs production's sched2 ctl1 proves they keep bits.
+# cm3: TF_DS_COPY_MIN=3 (2-token copies stop taking the round). tr16: TF_DS_RING_TRACE=16 (every 16th ring sequence,
+# both ranks; arms.sh copies each rank's trace out) - exactness, overhead, and scheduling round B's data.
+ctl1|tensorfold-dsv41:bench-fused-next-10c9866|
+cm3a|tensorfold-dsv41:bench-fused-next-10c9866|TF_DS_COPY_MIN=3
+tr16a|tensorfold-dsv41:bench-fused-next-10c9866|TF_DS_RING_TRACE=16
+ctl2|tensorfold-dsv41:bench-fused-next-10c9866|
+tr16b|tensorfold-dsv41:bench-fused-next-10c9866|TF_DS_RING_TRACE=16
+cm3b|tensorfold-dsv41:bench-fused-next-10c9866|TF_DS_COPY_MIN=3
