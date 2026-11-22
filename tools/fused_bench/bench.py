@@ -813,6 +813,37 @@ def case_idx_fold(rows, width, dist="mixed", special=False, timing=True):
     return row
 
 
+def case_index_score_rows(rows, width):
+    """The kit's prompt indexer scoring (_index_score_rows, KEYS=0: fp32 scores, every column) at a prompt block of
+    `rows` and `width` compressed keys: the launch candidate 3 would shrink from the full width to the pool's
+    16,384 columns at the layers after the candidate source (prompt.zig's pooled indexer). Timing only (the kit is its
+    own reference); variant 739ce7 (n, rows, nt all multiples of 16)."""
+    label = f"kit _index_score_rows R={rows} width={width}"
+    if not shape_ok(label):
+        return None
+    ih, idd = 32, 128
+    nt = (width + 63) // 64
+    q = Buffer(bf((rows, ih, idd)))
+    kc = Buffer(rng.integers(0, 256, size=(width, idd // 2), dtype="u1"))
+    ks = Buffer(np.full((width, idd // 32), 127, "u1"))
+    wt = Buffer(bf((rows, ih)))
+    vis = Buffer(np.full(rows, width, "i8"))
+    sc = out((rows, width), "f4")
+    (path,) = opts.kit.glob("739ce7*.cubin")
+
+    def chain():
+        launch(path, "_index_score_rows", (rows, nt), 32, 8704, q, kc, ks, wt, vis, sc, width, rows, sc, nt, P(), P())
+
+    chain()
+    cu("cuStreamSynchronize", stream)
+    row = {"kernel": "kit-index-score-rows", "shape": label, "rows": rows, "width": width, "parity": {"new_vs_ref": 0}}
+    row["bytes"] = width * (idd // 2 + idd // 32) + rows * width * 4
+    if DO_TIMING:
+        attach_timing(row, label, [chain], ["kit"], None, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
 def case_score_keys_only(rows, width):
     """The kit _score_keys launch alone at a fold width: the launch the fold removes."""
     label = f"kit _score_keys R={rows} width={width}"
@@ -1440,7 +1471,7 @@ SCORE_KEYS_SHAPES = [(r, w) for r in (1, 7, 32, 128) for w in (16384, 32768, 655
 
 KERNELS = ("idx", "idx-hist", "block-max", "idx-small", "topk-indices", "cand-mask", "fold",
            "compress-decode", "compress-prompt", "prompt-source",
-           "key", "latent", "query", "prompt-key", "prompt-latent", "prune", "score-keys", "fallback")
+           "key", "latent", "query", "prompt-key", "prompt-latent", "prune", "score-keys", "fallback", "index-score")
 
 FOLD_SHAPES = [(r, w) for r in (1, 7, 32, 48) for w in (16388, 32768, 65536)]
 
@@ -1583,6 +1614,11 @@ def main():
             run(case_idx_fold, 7, 65532, "mixed", False, False)  # a partial last tile (60 keys)
             for rows, w in FOLD_SHAPES:
                 case_score_keys_only(rows, w)
+            free_all()
+        if selected("index-score") and opts.kernel != "all":
+            for rows in (128,):
+                for w in (16384, 32768, 65536, 131072):
+                    case_index_score_rows(rows, w)
             free_all()
         if selected("compress-decode"):
             for rows, d in DECODE_SHAPES:
