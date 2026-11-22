@@ -1,0 +1,65 @@
+== fixed_replay (identical input bytes and token IDs across blocks)
+s01 base  len_100000  pt=99839 blk=16384  prefill=1987.4 tok/s ttft=50.23s rounds=1 ms/r=0.0 sha=4b13688173 cached=0
+s01 base  len_200000  pt=200297 blk=32768  prefill=1877.5 tok/s ttft=106.68s rounds=1 ms/r=0.0 sha=4b13688173 cached=0
+s01 base  len_50000   pt=50405 blk=8192   prefill=2043.1 tok/s ttft=24.67s rounds=1 ms/r=0.0 sha=4b13688173 cached=0
+s02 next  len_100000  pt=99839 blk=16384  prefill=1970.9 -0.83% tok/s ttft=50.66s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s02 next  len_200000  pt=200297 blk=32768  prefill=1877.6 +0.01% tok/s ttft=106.68s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s02 next  len_50000   pt=50405 blk=8192   prefill=2018.8 -1.19% tok/s ttft=24.97s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s03 next  len_100000  pt=99839 blk=16384  prefill=2010.5 +1.16% tok/s ttft=49.66s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s03 next  len_200000  pt=200297 blk=32768  prefill=1887.9 +0.56% tok/s ttft=106.09s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s03 next  len_50000   pt=50405 blk=8192   prefill=2051.2 +0.40% tok/s ttft=24.57s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s04 base  len_100000  pt=99839 blk=16384  prefill=1985.0 -0.12% tok/s ttft=50.3s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s04 base  len_200000  pt=200297 blk=32768  prefill=1892.4 +0.79% tok/s ttft=105.84s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s04 base  len_50000   pt=50405 blk=8192   prefill=2034.5 -0.42% tok/s ttft=24.77s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s05 trace len_100000  pt=99839 blk=16384  prefill=2049.9 +3.14% tok/s ttft=48.7s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s05 trace len_200000  pt=200297 blk=32768  prefill=2012.8 +7.21% tok/s ttft=99.51s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+s05 trace len_50000   pt=50405 blk=8192   prefill=2092.3 +2.40% tok/s ttft=24.09s rounds=1 ms/r=0.0 sha=4b13688173 cached=0 same
+
+== dec8_staggered (admission order locked; the dec8-dip fix validation)
+-- s01 -> s02
+Comparison s01 -> s02 (all_shas_equal=True):
+  legacy_tok_s_median     : -1.21%
+  pure_decode_tok_s_median: -1.35%
+  full_batch_tok_s_median : -1.21%
+  log_ms_per_round        : +1.20%
+  true_active_ms_per_round: +1.26%
+  Wave 0: d_win=+310.88ms | P1=+24.38ms (8pref=-12.59ms, ord0_excl=+36.83ms) | P2=+286.49ms (d_phys_r=-1, rnd_mix= +99.11ms, step_speed=+187.38ms) | ord_same=False
+  Wave 1: d_win=+474.85ms | P1=+30.26ms (8pref=+32.16ms, ord0_excl= -1.82ms) | P2=+444.59ms (d_phys_r=+1, rnd_mix= +23.48ms, step_speed=+421.11ms) | ord_same=False
+  Wave 2: d_win=+348.40ms | P1=+29.40ms (8pref=+36.27ms, ord0_excl= -6.87ms) | P2=+319.00ms (d_phys_r=+0, rnd_mix= -17.45ms, step_speed=+336.45ms) | ord_same=True
+-- s04 -> s03
+Comparison s04 -> s03 (all_shas_equal=True):
+  legacy_tok_s_median     : +1.51%
+  pure_decode_tok_s_median: +1.71%
+  full_batch_tok_s_median : +1.49%
+  log_ms_per_round        : -1.63%
+  true_active_ms_per_round: -1.72%
+  Wave 0: d_win=-446.66ms | P1= -0.15ms (8pref= -2.29ms, ord0_excl= +2.17ms) | P2=-446.51ms (d_phys_r=+1, rnd_mix= -97.36ms, step_speed=-349.15ms) | ord_same=False
+  Wave 1: d_win=-492.15ms | P1=+14.27ms (8pref=+19.61ms, ord0_excl= -5.23ms) | P2=-506.42ms (d_phys_r=-1, rnd_mix= -43.69ms, step_speed=-462.73ms) | ord_same=False
+  Wave 2: d_win=-413.81ms | P1=+20.69ms (8pref=+15.96ms, ord0_excl= +4.78ms) | P2=-434.50ms (d_phys_r=+0, rnd_mix= +38.18ms, step_speed=-472.68ms) | ord_same=True
+-- s01 -> s04
+Comparison s01 -> s04 (all_shas_equal=True):
+  legacy_tok_s_median     : -1.93%
+  pure_decode_tok_s_median: -2.23%
+  full_batch_tok_s_median : -1.92%
+  log_ms_per_round        : +2.26%
+  true_active_ms_per_round: +2.36%
+  Wave 0: d_win=+531.68ms | P1= +8.00ms (8pref=-28.67ms, ord0_excl=+36.60ms) | P2=+523.68ms (d_phys_r=-1, rnd_mix= +98.57ms, step_speed=+425.10ms) | ord_same=False
+  Wave 1: d_win=+736.87ms | P1=+13.97ms (8pref=+14.76ms, ord0_excl= -0.80ms) | P2=+722.90ms (d_phys_r=+0, rnd_mix= -11.81ms, step_speed=+734.72ms) | ord_same=True
+  Wave 2: d_win=+531.75ms | P1=-10.86ms (8pref= -8.55ms, ord0_excl= -2.26ms) | P2=+542.61ms (d_phys_r=+0, rnd_mix=-104.98ms, step_speed=+647.59ms) | ord_same=True
+-- s01 -> s05
+Comparison s01 -> s05 (all_shas_equal=True):
+  legacy_tok_s_median     : +0.09%
+  pure_decode_tok_s_median: -0.24%
+  full_batch_tok_s_median : +0.08%
+  log_ms_per_round        : +0.36%
+  true_active_ms_per_round: +0.38%
+  Wave 0: d_win= -76.56ms | P1= +9.28ms (8pref=-30.25ms, ord0_excl=+39.41ms) | P2= -85.85ms (d_phys_r=-2, rnd_mix=  +8.72ms, step_speed=-94.57ms) | ord_same=False
+  Wave 1: d_win=+153.28ms | P1=+16.17ms (8pref=+24.51ms, ord0_excl= -8.30ms) | P2=+137.11ms (d_phys_r=-1, rnd_mix= -76.58ms, step_speed=+213.68ms) | ord_same=True
+  Wave 2: d_win=+229.85ms | P1= -0.43ms (8pref= +1.42ms, ord0_excl= -1.90ms) | P2=+230.28ms (d_phys_r=+1, rnd_mix= +18.92ms, step_speed=+211.36ms) | ord_same=False
+
+== standard cells (orientation; exact hashes are gate.py's job)
+s01 base  prefill {'2000': 1524.0, '8000': 1970.5, '32000': 2073.4, '100000': 2032.4}  tok/s {'dec1': 81.39, 'dec4': 115.95, 'dec8': 138.17, 't1': None, 't4': None}  ms/r dec1=33.45 dec4=60.97 dec8=86.98
+s02 next  prefill {'2000': 1511.5, '8000': 1955.2, '32000': 2083.1, '100000': 2040.7}  tok/s {'dec1': 81.24, 'dec4': 116.24, 'dec8': 138.51, 't1': None, 't4': None}  ms/r dec1=33.45 dec4=60.81 dec8=86.86
+s03 next  prefill {'2000': 1554.9, '8000': 1970.7, '32000': 2083.7, '100000': 2038.1}  tok/s {'dec1': 81.49, 'dec4': 116.29, 'dec8': 138.46, 't1': None, 't4': None}  ms/r dec1=33.45 dec4=60.87 dec8=86.74
+s04 base  prefill {'2000': 1502.4, '8000': 1955.3, '32000': 2089.1, '100000': 2043.9}  tok/s {'dec1': 81.58, 'dec4': 116.31, 'dec8': 138.49, 't1': None, 't4': None}  ms/r dec1=33.45 dec4=60.87 dec8=86.46
+s05 trace prefill {}  tok/s {'dec1': None, 'dec4': None, 'dec8': None, 't1': None, 't4': None}  ms/r dec1=None dec4=None dec8=None

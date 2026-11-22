@@ -739,3 +739,25 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
 - Decision: the lead-reader banner is checked against each block's `TF_DS_ENGRAM_LEAD` flag (production `.env` default `1`), not its arm name; the "drafting must differ" rule applies only to arms whose flags change drafting/pruning switches (`TF_DS_DRAFT*`, `TF_DS_T26*`, `TF_DS_SPEC*`, `TF_DS_T13_EXPERT_CAP/PRUNE`, `TF_DS_FIX_K`, `TF_DS_T25*`); non-drafting arms REQUIRE rounds/accepted-drafts equality with the reference. The suite path derives from the gate file (`$GATE_SUITE` override), and bailed/exception cell shapes report a named problem instead of raising.
 - Why: the old gate hardcoded `S = "runs/suite-fused-20261121"`, expected the lead banner only on `lead` arms while every arm runs production's `.env` (`TF_DS_ENGRAM_LEAD=1`), and treated any arm outside `{base, lead}` as a drafting-change arm — so a bit-exact fused arm reproducing base's rounds would fail with `switch NOT APPLIED`, which is exactly the evidence the pair gate exists to collect. `9/9` CPU tests (`test_gate.py`) pin each branch; an independent reviewer marked the suite `OK with notes` (both P2s fixed). [Suite README](runs/suite-fused-next2-20261121/README.md)
 
+
+## 2026-11-22 0254–0258: measured, bit-identical, speed-neutral; adoption is the operator's call
+
+- Scope: major (engine series `0213–0258`, the whole fused-next round) but the measurement changes no code.
+- Considered: (a) adopt `84806bb` on the gate's pass criteria; (b) stay on `d5ecba0` and drop `0254–0258`;
+  (c) adopt only `0254`/`0255`. Ran the ABBA pair gate (`runs/suite-fused-next2-20261121/`, 02:34–04:31 UTC).
+- Decision: **recorded as "measured, not yet decided"** — the gate passed 5/5 blocks (exact 39/39, probe 11/11
+  hashes with identical rounds and accepted drafts, `fixed_replay` inputs and token hash equal, `dec8_staggered`
+  3/3 waves equal, validation rc 0), and speed is inside the window's own resolution floor: next-vs-base pure
+  decode was `-1.35%` (pass 1) and `+1.71%` (pass 2) against a `-2.23%` base-vs-base control. So (a) is defensible
+  for `0254`/`0255`'s standalone wins (−39…−60%, −15…−23%) with no serving cost, and (b) is defensible because
+  nothing is gained in serving. This entry exists so the *result* is not lost; the pick needs an operator.
+- Also decided here: fix rather than work around the two `preflight.sh` path bugs (`cd` one level too high, rsync
+  target resolving to `~/runs/...`) and re-record s01's `dec8_staggered` cell (its script was never on the head)
+  instead of gating around it. Not done: the guarded `0215` capture, which needs a *live idle* `/health` — a
+  stopped production is reported by that harness as "no server", so the suite window cannot capture it even
+  though the GPU is free. `idx_fused.small_nbk` stays 6,144. Not done either: `fixed_replay`'s prompt still
+  answers in one token, so the deep decode buckets stayed unmeasured (todo.md).
+- Why: a pair gate whose own harness is bypassed (gating around a missing cell) would not prove what it claims;
+  and a "neutral" verdict is only meaningful when the control arm's spread is printed beside it.
+- Open: the deep-decode `fixed_replay` prompt, the 0215 timing window, and the Engram lead-reader soak owed from
+  2026-11-19. [Results](runs/suite-fused-next2-20261121/RESULTS.md)
