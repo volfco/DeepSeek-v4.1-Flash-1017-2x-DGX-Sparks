@@ -18,11 +18,11 @@ mkdir -p "$OUT"
 C=dsv41-1017-exl3-tf
 worker=$(grep -m1 '^WORKER=' .env | cut -d= -f2-)
 export PATH="$HOME/.local/bin:$PATH" HF_HUB_OFFLINE=1
-insp() { if [[ $1 == 0 ]]; then bash -c "$2"; else ssh -o BatchMode=yes "$worker" "$2"; fi; }
+insp() { if [[ $1 == 0 ]]; then bash -c "$2" < /dev/null; else ssh -n -o BatchMode=yes "$worker" "$2"; fi; }
 prod_img=$(grep -m1 '^IMAGE=' .env | cut -d= -f2-)
 echo "$(date -u +%FT%TZ) production image $prod_img; ref=${REF:-<first arm>}"
 
-while IFS= read -r line; do
+while IFS= read -r line <&3; do
   [[ -z "$line" || "$line" == \#* ]] && continue
   name=${line%%|*}; rest=${line#*|}; img=${rest%%|*}; envs=${rest#*|}
   [[ -z "$img" ]] && img=$prod_img
@@ -47,7 +47,7 @@ while IFS= read -r line; do
   for r in 0 1; do
     echo "  rank$r banners: $(insp $r "docker logs $C 2>&1 | grep -cE '$BANNERS'") errors: $(insp $r "docker logs $C 2>&1 | grep -ciE 'panic|error\\.|CudaFailed|segfault'")"
   done | tee "$OUT/$name.banner.txt"
-done < "$ARMS_FILE"
+done 3< "$ARMS_FILE"
 
 echo "$(date -u +%FT%TZ) restore production (.env alone)"
 ./start.sh restart > "$OUT/restore.restart.log" 2>&1 || grep -q 'the smoke test request failed' "$OUT/restore.restart.log" || echo "restore restart failed"
