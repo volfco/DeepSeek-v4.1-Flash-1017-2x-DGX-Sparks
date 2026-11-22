@@ -27,6 +27,19 @@ Across the four pooled layers, a 128K-deep prompt row spends about 120 µs scori
 
 The bit-distance histogram is dominated by 1 ULP (about 84K), then 2 (35K), 4 (11K) and 8 (5K), with a tail past 12. The two kernels sum the heads/dimensions in different orders (`_index_score_rows` uses `TREE=1`). Empty slots come out as key `0x8000000000000000`. [idxcand2.json](idxcand2.json) (the earlier [idxcand.json](idxcand.json) used the flipped key format and is superseded).
 
+## Compacted keys through the same kernel: bit-exact (option 1 confirmed)
+
+`_index_score_rows` (`739ce7`) over a compacted key list (2,048 random blocks gathered in ascending order, one list for all rows) matched the same kernel at full width at every mapped column: **0 differing score bits** at 16 × 16,384 of 32,768, 128 × 16,384 of 65,536 and 16 × 16,384 of 131,072. A column's score does not depend on its tile position. [idxcompact.json](idxcompact.json)
+
+**So an exact pool-only prompt scorer can use the kit's own kernel.** Per row block:
+1. Take the union of the rows' pool blocks, ascending.
+2. Gather those blocks' keys into a compact buffer (`U × 8 × 68 B`).
+3. Run `_index_score_rows` over the union.
+4. Apply each row's own pool as −inf in compact space.
+5. Run `topkIndices` over the compact width and map indices back through the list.
+
+The saving is `1 − U·8 / width` per pooled layer, where U is the union's block count for a 128-row block. **The next measurement is U on real prompts.** Rows in a block are adjacent positions, so their pools should overlap heavily, but how much is unmeasured. It needs a counter at the candidate source (OR the block's mask rows, popcount) on a served prefill.
+
 ## Options for a bit-exact pool-only prompt scorer
 
 1. **Compact the keys, keep the kernel.** Each column's score in `_index_score_rows` depends only on that column's key, the row's query and the weights, so scoring a compacted key list should reproduce the bits. The pool differs per row while K is shared per launch, so this means one 1-row launch per row (grid 1 × 256 at 16,384 columns), plus gathering 16,384 × 68 B of keys per row. That is about 1.1 MB per row and roughly 0.7 ms of copies per 128-row block at 200 GB/s. Gathering per pool block shared by many rows would cut that. **Check first:** that a compacted call reproduces the bits (a standalone probe, as above).

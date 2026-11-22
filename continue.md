@@ -9,10 +9,11 @@
   - About half the projection was realized. The likely reason is cross-rank wait that moves to the next collective. The next lever there is rank balance, not the exchange.
   - Source: branch `kv-fetch-reuse` `69335b8` in `~/Workspace/tfref-kvreuse`. **Not yet exported to `zig/patches/`.**
 - **Earlier today:** `84806bb` was deployed 05:58–06:01 UTC (image swap; [record](runs/deploy-fnext-20261122/)).
-- **Candidate 3 (prefill: score only pooled blocks at layers 24/28/32/36) is being priced.**
-  - The kit already ships `_index_score` with `HAS_CAND=1 SKIP_DEAD=1`, but only in the keyed decode form (`KEYS=1 HAS_BASE=1`), plus `_index_score_cand` over a block list.
-  - Prompt blocks of more than 16 rows run `_index_score_rows` (`KEYS=0`, variant `739ce7`), which has no candidate input.
-  - `tools/fused_bench/bench.py --kernel index-score` times it at 128 rows × 16,384–131,072 columns, to size what scoring only the pool's 16,384 columns would save. It needs an idle head.
+- **Candidate 3 (prefill: score only pooled blocks at layers 24/28/32/36) is priced and has an exact route.** [Results](runs/prefill-pool-score-20261122/RESULTS.md)
+  - The kit's `_index_score_rows` is linear in width: 468 / 937 / 1,910 / 3,826 µs per 128-row block at 16K / 32K / 64K / 128K columns. At a 128K-deep row about 105 of 120 µs across the four layers is discarded by the pool mask, roughly 10% of long-context prefill (an estimate).
+  - The kit's pool-only scorer `_index_score_cand` takes 68 µs at any width but is **not bit-equal**: 60% of scores are 1–12 ULP off (a different reduction order). Columns and visibility are exact.
+  - **Compacted keys through `_index_score_rows` itself are bit-exact** (0 differences at three shapes). So: union of the row block's pools → gather keys → kit scorer → per-row mask → top-k mapped back.
+  - **Next:** measure the union size U on real prompts (a counter at the candidate source). The saving is `1 − 8U / width`.
 - The operator has authorized restarts and config changes for this testing (2026-11-22).
 - **Production runs the `fused-next` binary, while `zig/patches/` holds the rebased equivalent, which has never run on hardware.** Building and gating an image from the recipe (a full source build on the head) is still open. It does not block the image swap. Do not `just sync-head` or restart with changed `zig/patches` until that build has been run.
 

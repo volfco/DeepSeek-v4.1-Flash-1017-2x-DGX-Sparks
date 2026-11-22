@@ -943,6 +943,46 @@ def case_index_score_cand_parity(rows, width, nblk=2048, cb=8, timing=True):
     return row
 
 
+def case_index_score_compact(rows, width, nblk=2048, cb=8):
+    """Candidate 3 option 1: _index_score_rows (739ce7) over a compacted key list (the pool's blocks gathered in
+    ascending order, one list shared by the rows) against the same kernel at full width, mapped back. Equal bits mean
+    a column's score does not depend on its tile position, so gather + the kit's own scorer is bit-exact.
+    Visibility is the full width here (the compact call gets vis = nout), so the comparison is arithmetic only."""
+    label = f"kit _index_score_rows compact vs full R={rows} width={width} nblk={nblk}"
+    if not shape_ok(label):
+        return None
+    ih, idd = 32, 128
+    g = np.random.default_rng(13)
+    q = Buffer(bf((rows, ih, idd)))
+    kcn = g.integers(0, 256, size=(width, idd // 2), dtype="u1")
+    ksn = g.integers(118, 136, size=(width, idd // 32), dtype="u1")
+    wt = Buffer(bf((rows, ih)))
+    blocks = np.sort(g.choice(width // cb, size=nblk, replace=False))
+    cols = (blocks[:, None] * cb + np.arange(cb)[None, :]).ravel()
+    nout = nblk * cb
+    (path,) = opts.kit.glob("739ce7*.cubin")
+    kc, ks = Buffer(kcn), Buffer(ksn)
+    vis = Buffer(np.full(rows, width, "i8"))
+    sc = out((rows, width), "f4")
+    nt = (width + 63) // 64
+    launch(path, "_index_score_rows", (rows, nt), 32, 8704, q, kc, ks, wt, vis, sc, width, rows, sc, nt, P(), P())
+    kcc, ksc = Buffer(np.ascontiguousarray(kcn[cols])), Buffer(np.ascontiguousarray(ksn[cols]))
+    visc = Buffer(np.full(rows, nout, "i8"))
+    scc = out((rows, nout), "f4")
+    ntc = (nout + 63) // 64
+    launch(path, "_index_score_rows", (rows, ntc), 32, 8704, q, kcc, ksc, wt, visc, scc, nout, rows, scc, ntc, P(), P())
+    cu("cuStreamSynchronize", stream)
+    full = sc.readarr()[:, cols].view("u4")
+    comp = scc.readarr().view("u4")
+    diffs = int((full != comp).sum())
+    row = {"kernel": "kit-index-score-compact", "shape": label, "rows": rows, "width": width,
+           "parity": {"new_vs_ref": diffs}, "compared": int(full.size)}
+    if diffs:
+        failures.append(label)
+    results.append(row)
+    return row
+
+
 def case_score_keys_only(rows, width):
     """The kit _score_keys launch alone at a fold width: the launch the fold removes."""
     label = f"kit _score_keys R={rows} width={width}"
@@ -1721,6 +1761,8 @@ def main():
                         case_index_score_rows(rows, w)
             for rows, w in ((16, 32768), (16, 65536), (16, 131072)):
                 case_index_score_cand_parity(rows, w)
+            for rows, w in ((16, 32768), (128, 65536), (16, 131072)):
+                case_index_score_compact(rows, w)
             free_all()
         if selected("compress-decode"):
             for rows, d in DECODE_SHAPES:
