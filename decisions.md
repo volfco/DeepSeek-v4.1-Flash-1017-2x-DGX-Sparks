@@ -699,3 +699,43 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
   is the one that costs X" property the gate depends on.
 - Open: the series now needs a fresh `git apply --check` on a clean 0194 tree (done: all 137 green) and the same
   pre-collapse gate re-run on the collapsed image, which is a follow-up, not part of this change.
+
+## Fused PDL entry: split only where a fixed weight can be read first (2026-11-21)
+
+- Scope: minor, `fused-next` commits `f013282` (0250) and `59e71a8` (0251); evidence in
+  `runs/fused-next-20261121/wp4/RESULTS.md`.
+- Considered: (a) leave `pdl_enter` as wait-then-launch in every kernel; (b) move `launch_dependents` before the wait
+  in every kernel; (c) (b) plus an L2 `prefetch` of the fixed norm weights before the wait; (d) (b) plus holding the
+  norm weight in a register across the body, in the decode compressor and the indexer key only, with the compressor's
+  non-PDL path keeping its old body; (e) split the entry in every kernel, including the ones with nothing independent
+  to read.
+- Decision: (d) for the two kernels that read a fixed model weight (the compressor's `comp_norm`, the indexer key's
+  `idx_k_norm`); (a) for everything else. Every other kernel keeps wait-then-launch.
+- Why: (b) alone measured slower on the decode chain at every shape above nb=8 (+0.6 µs at R=48 nb=8192: a successor
+  scheduled with nothing to do before its wait only takes SM slots from the running kernel); (c) recovered part of
+  that but not the load latency the body pays at its end; (d) is 0.17-0.35 µs faster per layer at every served decode
+  shape with the non-PDL path unchanged, and the delayed-producer canaries show every dependent read still after the
+  wait; (e) is the (b) penalty again for the rope/idx/prune kernels.
+- Also decided: `TF_DS_FUSED_TRACE` (opt-in, off) rather than always-on counters, and the unfused fallbacks stay the
+  engine's own launches (the harness now checks them rather than adding a fused variant for them).
+- Open: the prompt half's `compress2_norm` has the same fixed weight and could take the split, but the prompt path is
+  at the bandwidth roofline, so it was left alone.
+
+## Pre-benchmark follow-ups closed without engine restart: B2, dec8, 0254 ties, harness guards and 0256–0258 (2026-11-21)
+
+- Scope: minor-to-major verification and harness/host-trace hardening (`tools/fused_bench/`, `runs/pre-bench-20261121/`,
+  and `tfref-fused-next` commits `e5110a0`/0256, `9ece091`/0257, `84806bb`/0258).
+- Considered and decided:
+  1. **Review Blocker B2 (`idx-small R=1 nb=8192`, `compress-decode R=32 D=512`) — fix `bench.py` stream synchronization, leave kernels unchanged.** Both kernels passed 12 `compute-sanitizer` (`initcheck`/`racecheck`/`memcheck`) suites with 0 errors and 14,400 stream-ordered parity runs with 0 byte diffs. The WP2 mismatch came from `bench.py` pairing `cuStreamCreate(..., CU_STREAM_NON_BLOCKING)` with legacy stream-0 `cuMemcpyHtoD_v2` (`<=64 KiB` pageable staging returns before DMA completes), reproduced on GB10 (`2/220` failures) and eliminated (`0/220`) by stream-ordered `cuMemcpyHtoDAsync_v2` + `cuStreamSynchronize`. [Evidence](runs/pre-bench-20261121/b2-investigation/RESULTS.md)
+  2. **`dec8` `-0.59%`/`-0.69%` batch tok/s dip — no kernel rollback; use staggered admission in future 8-stream replays.** Exact decomposition of `s01..s05` showed true active post-prefill decode is `+0.003%` (Pair A), `-0.51%` (Pair B) and `-0.30%` (PDL); the median-wave batch dip came from random HTTP admission order under `TF_DS_ROUND_ROWS=16` (`+4`/`+5` rounds on straggler `s=7` = `83.6%`/`67.8%` of delta) plus `min(t_first)` excluding longer `ord=0` prefills in `base` while `next` prefilled all 8 prompts faster. [Evidence](runs/pre-bench-20261121/dec8-audit/RESULTS.md)
+  3. **`0254` tied-score cost (`138.8 µs` vs `100.7 µs` at `128 × 32,768`) — close with no kernel edit.** `sm_121` already warp-coalesces uniform shared `atomicAdd`; `~82–86%` of the delta is `+2.01` extra row scans (`+32.1 MiB`), and cutoff-straddling `-∞` rows account for `<0.03%` of served wall time (`applyPool` L24–36 retains `16,384 >> 512` finite columns and finishes in `2.89` passes). [Evidence](runs/pre-bench-20261121/topk-and-patches/RESULTS.md)
+  4. **Harness timing validity & `0215` threshold — keep `small_nbk = 6,144` until an idle `/health` window.** Fixed all four 3-chain/4-name `time_graphs` callers (`100` historical rows audited) and enforced strict `connections == 0` + valid unchanged token-counter guards (`9/9` unit tests). `0215` passed `36/36` GB10 byte-parity cases across `nbk = 2,049..16,384`; live serving prevented clean timings (`timing_valid: false` recorded rather than dirty medians). [Evidence](runs/pre-bench-20261121/crossover-0215/RESULTS.md)
+  5. **Host dispatch & trace (`0256–0258`) — land on `fused-next`, defer recipe rebase to image-build window.** Made `fused_trace` thread-safe and single-sourced with `0254`/`0255` coverage (`TF_DS_TOPK_FAST` precedence preserved), extracted `planKvSource2` in `prompt.zig` with 4-chunk GB10 byte-parity (`0` diffs), and mapped the 17-commit `0213–0258` vs `0182–0190zc` rebase onto `zig/patches/` (`c3b3859`). [Evidence](runs/pre-bench-20261121/p0231-dispatch/RESULTS.md)
+
+## Suite gate semantics for fused arms: flags, not arm names (2026-11-21)
+
+- Scope: minor, `runs/suite-fused-next2-20261121/gate.py` (new suite; the old folder's gate stays a historical record).
+- Considered: (a) reuse `suite-fused-next-20261121/gate.py` unchanged; (b) patch it in place; (c) fresh suite folder with a rewritten gate + CPU tests. Chose (c).
+- Decision: the lead-reader banner is checked against each block's `TF_DS_ENGRAM_LEAD` flag (production `.env` default `1`), not its arm name; the "drafting must differ" rule applies only to arms whose flags change drafting/pruning switches (`TF_DS_DRAFT*`, `TF_DS_T26*`, `TF_DS_SPEC*`, `TF_DS_T13_EXPERT_CAP/PRUNE`, `TF_DS_FIX_K`, `TF_DS_T25*`); non-drafting arms REQUIRE rounds/accepted-drafts equality with the reference. The suite path derives from the gate file (`$GATE_SUITE` override), and bailed/exception cell shapes report a named problem instead of raising.
+- Why: the old gate hardcoded `S = "runs/suite-fused-20261121"`, expected the lead banner only on `lead` arms while every arm runs production's `.env` (`TF_DS_ENGRAM_LEAD=1`), and treated any arm outside `{base, lead}` as a drafting-change arm — so a bit-exact fused arm reproducing base's rounds would fail with `switch NOT APPLIED`, which is exactly the evidence the pair gate exists to collect. `9/9` CPU tests (`test_gate.py`) pin each branch; an independent reviewer marked the suite `OK with notes` (both P2s fixed). [Suite README](runs/suite-fused-next2-20261121/README.md)
+

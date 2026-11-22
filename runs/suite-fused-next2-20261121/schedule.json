@@ -1,0 +1,77 @@
+[
+ {
+  "id": "s01",
+  "arm": "base",
+  "kind": "pass1",
+  "cells": [
+   "validate", "warm", "prefill_div", "prefill_code", "prefill_p125", "dec1", "dec4", "dec8", "longctx", "think",
+   "probe", "sampled_ident", "exact:runs/combo3/blocks/a01.exact.json", "deep300", "fixed_replay", "dec8_staggered"
+  ],
+  "flags": {
+   "IMAGE": "tensorfold-dsv41:bench-fused-next-d5ecba0",
+   "PREPARE": "0",
+   "SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s01",
+   "WORKER_SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s01"
+  }
+ },
+ {
+  "id": "s02",
+  "arm": "next",
+  "kind": "pass1",
+  "cells": [
+   "validate", "warm", "prefill_div", "prefill_code", "prefill_p125", "dec1", "dec4", "dec8", "longctx", "think",
+   "probe", "sampled_ident", "exact:runs/combo3/blocks/a01.exact.json", "deep300", "fixed_replay", "dec8_staggered"
+  ],
+  "flags": {
+   "IMAGE": "tensorfold-dsv41:bench-fused-next-84806bb",
+   "PREPARE": "0",
+   "SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s02",
+   "WORKER_SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s02"
+  }
+ },
+ {
+  "id": "s03",
+  "arm": "next",
+  "kind": "pass2",
+  "cells": [
+   "validate", "warm", "prefill_div", "prefill_code", "prefill_p125", "dec1", "dec4", "dec8", "longctx", "think",
+   "probe", "sampled_ident", "exact:runs/combo3/blocks/a01.exact.json", "deep300", "fixed_replay", "dec8_staggered"
+  ],
+  "flags": {
+   "IMAGE": "tensorfold-dsv41:bench-fused-next-84806bb",
+   "PREPARE": "0",
+   "SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s03",
+   "WORKER_SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s03"
+  }
+ },
+ {
+  "id": "s04",
+  "arm": "base",
+  "kind": "pass2",
+  "cells": [
+   "validate", "warm", "prefill_div", "prefill_code", "prefill_p125", "dec1", "dec4", "dec8", "longctx", "think",
+   "probe", "sampled_ident", "exact:runs/combo3/blocks/a01.exact.json", "deep300", "fixed_replay", "dec8_staggered"
+  ],
+  "flags": {
+   "IMAGE": "tensorfold-dsv41:bench-fused-next-d5ecba0",
+   "PREPARE": "0",
+   "SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s04",
+   "WORKER_SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s04"
+  }
+ },
+ {
+  "id": "s05",
+  "arm": "trace",
+  "kind": "trace",
+  "cells": [
+   "validate", "warm", "fixed_replay", "dec8_staggered", "deep300", "probe"
+  ],
+  "flags": {
+   "IMAGE": "tensorfold-dsv41:bench-fused-next-84806bb",
+   "TF_DS_FUSED_TRACE": "1",
+   "PREPARE": "0",
+   "SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s05",
+   "WORKER_SPILL_DIR": "/home/colum/.cache/dsv41-suite-fnext2-s05"
+  }
+ }
+]

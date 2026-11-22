@@ -1,44 +1,17 @@
 # Continue
 
-**Production since November 21, 07:36 UTC: the fused kernels 0193-0199.** Both ranks run
-`tensorfold-dsv41:bench-prune-six-20261120` (production source + reworked 0193/0194, 0195/0197/0198 and 0199) with
-production's `.env` plus `TF_DS_IDX_FUSED=1`, `TF_DS_FUSED_COMPRESS2_NORM=1`, `TF_DS_FUSED_ROPE_STORE=1`,
-`TF_DS_FUSED_ROUTE=1`, and `IMAGE=` / `PREPARE=0` so a plain `./start.sh restart` starts it without building. A
-four-block ABBA run of the full suite against production found the exact panel identical 39/39 on both fused blocks,
-every probe and decode reply equal, the probe +0.76%/+0.91% and decode rounds 0.1-1.1% shorter, prefill within
-+-0.6%. After the restart both ranks showed the image and switches and all eight saved replies matched. The image
-change started a fresh spill namespace (kept states went cold). No committed patch series reproduces this image: it
-is `~/Workspace/tfref-fusedbench` branch `prune-six` (`d66e663`); binary hashes are in the deploy record. **Undo:**
-`cp ~/dsv41-env-backups/.env.bak-20261121-pre-fused .env && ./start.sh restart` on the head, and remove the same seven
-lines from this checkout's `.env`. [Suite results](runs/suite-fused-20261121/RESULTS.md) ·
-[Deploy record](runs/deploy-fused-20261121/)
+**Current state (2026-11-21, stopped before Spark engine restart):**
+- **Live production (untouched, actively serving):** Both ranks run `tensorfold-dsv41:bench-prune-six-20261120` (`~/Workspace/tfref-fusedbench` @ `d66e663`) with `TF_DS_IDX_FUSED=1`, `TF_DS_FUSED_COMPRESS2_NORM=1`, `TF_DS_FUSED_ROPE_STORE=1`, `TF_DS_FUSED_ROUTE=1`, `TF_DS_DRAFT_BLOCK=6`, `TF_DS_ENGRAM_LEAD=1`, `TENSORFOLD_TOKEN_CACHE_MB=32`, and `IMAGE=` / `PREPARE=0`. **Undo:** `cp ~/dsv41-env-backups/.env.bak-20261121-pre-fused .env && ./start.sh restart` on the head (and remove the seven lines from `.env`). [Suite results](runs/suite-fused-20261121/RESULTS.md) · [Deploy record](runs/deploy-fused-20261121/)
+- **`fused-next` engine branch (`~/Workspace/tfref-fused-next` @ `84806bb`, `0213–0258`):**
+  - `0213–0253` (`d5ecba0`) passed the 5-block paired Spark suite (`39/39` exact in all blocks, all comparable replies identical, speed & `TF_DS_PDL=1` within +-1% resolution; production restored). [Suite results](runs/suite-fused-next-20261121/RESULTS.md)
+  - `0254` (`topk_indices_cut`, `-39%` to `-60%` standalone) and `0255` (`cand_fast8`, `-15%` to `-23%` standalone) passed `194/194` standalone parity cases. [Kernel review](runs/suite-fused-next-20261121/kernel-review/RESULTS.md)
+  - `0256–0258` (`84806bb`) made `fused_trace.zig` thread-safe, unified call-site arm dispatch with `0254`/`0255` trace coverage (`TF_DS_TOPK_FAST` precedence preserved), extracted `planKvSource2` (`0231` host dispatch, `630/632` Zig tests + 4-chunk GB10 byte parity `0` diffs), and fixed S9/S12. [0231 dispatch](runs/pre-bench-20261121/p0231-dispatch/RESULTS.md)
+  - Closed without restart: Review Blocker B2 (`bench.py` stream-0 vs `CU_STREAM_NON_BLOCKING` DMA race fixed; kernels `0`-error under `compute-sanitizer`), `dec8` `-0.59%/-0.69%` dip (random HTTP admission order under `TF_DS_ROUND_ROWS=16` + `min(t_first)` prefill exclusion; active decode neutral/faster), `0254` tied-score cost (`<0.03%` served share, no kernel change), and `bench.py` 4-caller `floor`/`newnf` label + `timing_valid` guards (`9/9` unit tests, `100` historical rows audited). [B2](runs/pre-bench-20261121/b2-investigation/RESULTS.md) · [dec8](runs/pre-bench-20261121/dec8-audit/RESULTS.md) · [Harness audit](runs/pre-bench-20261121/harness-audit/RESULTS.md) · [0254 & patch lineage](runs/pre-bench-20261121/topk-and-patches/RESULTS.md)
 
-**Next: fix 0206's key encoding, then re-run the `TF_DS_IDX_FUSED` arm (2026-11-21).** The follow-up series was
-collapsed: `0195` now carries the six faster follow-ups (0200, 0201, 0202, 0209, 0210, 0212) folded in, and the four
-diagnostic/gate follow-ups stay separate (0203, 0204, 0205, 0211). **0206, 0207 and 0208 are parked in
-`zig/patches-parked/`** (not built; none has its own switch, and 0206 is the `TF_DS_IDX_FUSED` mismatch below) - 134
-patches in the series. The first flattening wrote unresolved merge markers and 0207's test into 0195, so no subset of
-it compiled; it was regenerated from the engine commits. The series alone gives the engine tip with 0206-0208 reverted
-(tree `e449cb6`), series plus the parked three gives `ffdce65` byte for byte. That 134-patch tree has not been built
-into an image or gated on the pair. The thirteen patch follow-up (0200-0212) has now
-run on a GB10, in two halves. **The standalone half passes:** every live output is byte-identical to
-the path it replaces (norms, both compressors, all five rope-store chains, the key fold's keys and tile maxima against
-`scoreKey`, and 8,516 pair-softmax and 4,111 six-slot cases against the previous forms), the buffers 0200 stopped
-writing stay unwritten, and no kernel spills. Timings: the prompt compressor is 28-67% faster (0210/0202), the rope-store
-chains 14-45% faster (0200/0209/0212), the decode compressor 13-17% slower (0207's `isfinite` branch, ~0.03% of a round),
-and 0206's fold costs the key writes it adds (38.5 vs 41.0 µs at R=128 width 32,768 without the fold). 0207 measured
-13-17% slower on the served decode shape, so it stays a separate patch rather than a folded one. **The paired half
-is split:** `base`, `TF_DS_FUSED_COMPRESS2_NORM`, `TF_DS_FUSED_ROPE_STORE`, `TF_DS_FUSED_ROUTE` and the previous fused
-bundle are 39/39 identical to production, but **`TF_DS_IDX_FUSED=1` differs on 4 of 39 cases** - `len_20000`, `len_30000`,
-`len_50000` and `len_64000` change completion length and token hash (`len_100000` and every shorter case match). The
-previous bundle never produced keys at those widths - its call site always ran the kit's `_score_keys` - so one of the
-thirteen changed what the pruned selector sees. **First suspect: the fold's key encoding.** It writes
-`idx_fused.zig:scoreKey`'s key, which XORs the top bit the kit's `_score_keys` leaves alone (`0x80000000ffffffff` vs
-`0x00000000ffffffff` on the same cell); if the kit's `topk_select_pruned` compares signed, that flip reverses
-negative-vs-positive scores. It does not explain why `len_100000` still matches, so confirm the width window before
-changing either side. `TF_DS_PDL=1` on the fused bundle is bit-identical to the same bundle without it (exact panel;
-its speed is unmeasured). Nothing is deployed; production was restored and validated. [Results, parity, timings and
-SASS](runs/fused-followup-20261121/RESULTS.md) · [Rows](zig/patches/README.md) · [Decision](decisions.md)
+**Next actions (in order):**
+1. **When ready to test on the Sparks (operator-triggered, restarts the pair):** `bash runs/suite-fused-next2-20261121/preflight.sh` from the workstation. It builds/ships `bench-fused-next-84806bb` (no restart during build), syncs only the suite folder (never `just sync-head`), and on the head: waits for 30 external-idle minutes, snapshots `production.rank{0,1}.env`, captures the guarded `0215` crossover timings into `runs/pre-bench-20261121/crossover-0215/` (keep `idx_fused.small_nbk = 6,144` unless `timing_valid: true` medians move it), then runs ABBA `s01–s04` (`d5ecba0` vs `84806bb`) + `s05` (`TF_DS_FUSED_TRACE=1` both ranks) with the `fixed_replay` (unsalted 49,967/99,904/200,000-token hashes + prefill tok/s + decode ms/round) and `dec8_staggered` cells. Gates: `python3 -I runs/suite-fused-next2-20261121/gate.py` and `table2.py`. [Suite README](runs/suite-fused-next2-20261121/README.md)
+2. **Before building from `zig/patches/` (defer until the Spark gate decides adoption):** Rebase/export the 17 commits `0213–0258` from `~/Workspace/tfref-fused-next` onto `c3b3859` (`zig/patches/` `0001–0211`), resolving `ops.zig` hunks against `0182–0190zc` and regenerating `0254–0258` in order. [Lineage map](runs/pre-bench-20261121/topk-and-patches/RESULTS.md)
+3. **After the pair gate:** the owed full soak/300K round for `TF_DS_ENGRAM_LEAD=1` ([evaluation order](to-benchmark.md#current-evaluation-order)); update `runs/overnight-opt` / `runs/review-round` baseline checks to accept `TENSORFOLD_TOKEN_CACHE_MB=32` before any full campaign.
 
 **0199 six-slot decode prune, November 20.** The opt-in `TF_DS_FUSED_ROUTE=1` path now uses one thread per row for the applied, uncapped 0.85/3/kept rule with six routed picks and one shared slot. It works with triage off. On GB10 at seven mixed synthetic rows, median kernel time with counters enabled fell from 9.782 to 2.547 µs. With counters disabled, 0199 took 1.819 µs versus 2.133 µs for the earlier six-slot prototype. The kernel skips sorting when the shares are already ordered, tests only the three ranks eligible to drop, and updates one distinct-expert bitmap per pick. GPU comparisons matched pick IDs, FP32 weight bits and all six counters at six window sizes from 1 to 64 rows. Both service binaries built. Serving throughput and long-reply parity for 0199 are still open. The earlier two-rank test of disabling counters on the generic kernel was within control variation, so keep counters enabled. [0199 results and build](runs/prune-six-20261120/RESULTS.md) · [Generic-kernel stats A/B](runs/prune-stats-20261120/RESULTS.md)
 
