@@ -2,6 +2,8 @@
 
 ## Runtime choices by workload
 
+**Production image since 2026-11-22 05:59 UTC: `tensorfold-dsv41:bench-fused-next-84806bb`.** This is production source plus fused-next `0213–0258`, with the same `.env` switches as before (`TF_DS_IDX_FUSED=1`, `TF_DS_FUSED_COMPRESS2_NORM=1`, `TF_DS_FUSED_ROPE_STORE=1`, `TF_DS_FUSED_ROUTE=1`, `TF_DS_DRAFT_BLOCK=6`, `TF_DS_ENGRAM_LEAD=1`, `TENSORFOLD_TOKEN_CACHE_MB=32`, `PREPARE=0`). [Deploy record](runs/deploy-fnext-20261122/) · [decision](decisions.md)
+
 **Final pinned-image result.** For mixed short decode and persistent chat, use the deployed recipe with keyed drafts and the 32 MiB tokenizer cache. At 3K × 4 the cache alone stayed within 0.2% of deployed throughput. For cold-prefill-heavy traffic, the screened eight-switch bundle with unkeyed drafts delivered 2,070–2,072 input tok/s at 32K (+5.1–5.5%) and 2,021 at 100K (+3.9–4.3%). Four-stream warm output fell 5.9–7.6% at 32K and 5.5–11.6% at 100K. All 24 full-panel outputs matched both deployed controls. [Full crossover](runs/overnight-opt/RESULTS.md#full-32k-and-100k-confirmation)
 
 

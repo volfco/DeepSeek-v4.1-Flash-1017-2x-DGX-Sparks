@@ -786,3 +786,18 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
   checkout type-checks with `zig build install native -Dfatbins=<dummy dir>`. **Not done:** an image build from the
   recipe and its deploy gate (39-case exact, `validate.py --compare`, hardware smoke) — production stays on
   `bench-prune-six-20261120` until that passes.
+
+## 2026-11-22: production onto the `fused-next` image (`bench-fused-next-84806bb`)
+
+- Decision (operator): adopt `84806bb` into the production baseline now, by image, without waiting for the recipe
+  build. "Wins are a win and they will keep adding up": exact plus serving-neutral plus faster standalone is enough.
+- Done 05:58–06:01 UTC with `runs/deploy-fnext-20261122/deploy.sh`. Only `IMAGE=` changed in the head's `.env`
+  (`bench-prune-six-20261120` → `bench-fused-next-84806bb`, `sha256:2408857…`). The switches are unchanged and
+  `PREPARE=0`. Both ranks were proven on the image with production's switches. Native binary sha256 `4fd57ef1…`,
+  lanes `0d60da68…`. Smoke ok. `validate.py --compare`: all passed, 8/8 saved replies, concurrent == solo 8/8.
+  Undo: `cp ~/dsv41-env-backups/.env.bak-20261122-pre-fnext .env && ./start.sh restart`.
+- Evidence chain: production → `d5ecba0` (`runs/suite-fused-next-20261121`, 39/39, neutral) → `84806bb`
+  (`runs/suite-fused-next2-20261121`, 5/5, neutral).
+- The recipe image (the rebased `zig/patches/`) is still unbuilt and has never run on hardware. Building it and gating
+  it against this image is open. Do not `just sync-head` until that is done.
+- From now on, `bench-fused-next-84806bb` is the control arm for every A/B.

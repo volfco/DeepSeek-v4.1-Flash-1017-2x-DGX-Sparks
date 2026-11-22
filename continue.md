@@ -1,15 +1,11 @@
 # Continue
 
-**Current state (2026-11-22 06:10 UTC): `84806bb` adopted as the baseline; its production deploy is scripted but not yet run.**
+**Current state (2026-11-22 06:05 UTC): production runs `84806bb`; testing the next set has started.**
 
-- **Decision (operator, 2026-11-22): adopt `84806bb` into the production baseline.** Small standalone wins add up across rounds even when a single round can't resolve them. From now on, every A/B uses `bench-fused-next-84806bb` as its control arm, not `bench-prune-six-20261120`.
-- **Deploy is ready and blocked on a launch permission.** `runs/deploy-fnext-20261122/deploy.sh` changes only `IMAGE=` in the head's `.env`, from `bench-prune-six-20261120` to `bench-fused-next-84806bb`. That is the binary the two gates measured: same switches, `PREPARE=0`, nothing built. The script:
-  - waits for 30 external-idle minutes (a client at 203.0.113.142 was active at 05:39 UTC);
-  - backs up `.env` to `~/dsv41-env-backups/.env.bak-20261122-pre-fnext`;
-  - dry-runs, restarts, smoke-tests, proves the image and switches on both ranks, and runs `validate.py --compare`.
-
-  The evidence chain is production → `d5ecba0` (39/39, neutral) → `84806bb` (5/5, neutral). The image (`sha256:2408857…`) is present on both ranks. The image change starts a fresh spill namespace, so kept sessions go cold once. Launch it from the recipe root on the head: `setsid nohup bash runs/deploy-fnext-20261122/deploy.sh > runs/deploy-fnext-20261122/run.log 2>&1 < /dev/null &`. **Undo:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-fnext .env && ./start.sh restart`. After it passes, update `best-runtime.md`, `decisions.md` and the production lines below.
-- **Once `deploy.sh` passes, production runs the `fused-next` binary, while `zig/patches/` holds the rebased equivalent, which has never run on hardware.** Building and gating an image from the recipe (a full source build on the head) is still open. It does not block the image swap. Do not `just sync-head` or restart with changed `zig/patches` until that build has been run.
+- **Deployed 05:58–06:01 UTC.** Both ranks run `tensorfold-dsv41:bench-fused-next-84806bb` with production's unchanged switches. Smoke ok. `validate.py --compare` passed all checks, 8/8 saved replies, concurrent == solo 8/8. The operator made the call: exact plus neutral plus faster standalone gets adopted. **Undo:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-fnext .env && ./start.sh restart`. The image change started a fresh spill namespace. [Deploy record](runs/deploy-fnext-20261122/) · [decision](decisions.md)
+- **Running: candidate 1 sizing** (`runs/kvreuse-size-20261122/`). Three restarts on the production image, graphs on: `TF_DS_ROUND_PROFILE=1` with `TF_DS_CLOCK_MARKS=4` (sharded-attention parts), then `=1` (every phase), then plain production as the restore and the marks' perturbation control, followed by `validate.py`. Workload: decoding summaries at 4K/32K/128K × 1/4 streams. Per-round stage µs comes from differenced cumulative `round_clock_us`.
+- The operator has authorized restarts and config changes for this testing (2026-11-22).
+- **Production runs the `fused-next` binary, while `zig/patches/` holds the rebased equivalent, which has never run on hardware.** Building and gating an image from the recipe (a full source build on the head) is still open. It does not block the image swap. Do not `just sync-head` or restart with changed `zig/patches` until that build has been run.
 
 **State at 04:40 UTC, after the 0254–0258 pair gate:**
 
