@@ -95,6 +95,24 @@ shape, not the deep decode bucket the README promised.
 7. The runner's production restore logs `env_match=False` while listing only the base image's own env
    (`CUDA_*`, `NCCL_*`, `PATH`, …) as missing; the TF_*/TENSORFOLD_* switches matched. Pre-existing, unexamined.
 
+## Where the time goes
+
+Both arms already ran the fused indexer, compressor, route and RoPE/store paths. The GPU changes in this comparison were 0254 and 0255, each replacing one launch with one launch. Patches 0256–0258 changed host-side dispatch and tracing. The standalone percentages above measure reductions in elapsed time. [Previous gate and base configuration](../suite-fused-next-20261121/RESULTS.md) · [Standalone kernel measurements](../suite-fused-next-20261121/kernel-review/RESULTS.md)
+
+In the slower dec8 pair (s01 → s02), matched decode steps added 187–421 ms over each wave. In the reverse pair (s04 → s03), they saved 349–473 ms. The two base runs alone differed by 425–735 ms on the same term. The wave breakdown places most of the swing in decode after admission. It measures elapsed time across the serving stack, so attribution to a particular kernel would require GPU timings. Re-recording s01 after the other blocks also weakened the ABBA time-order control. [Per-wave breakdown](table2.txt)
+
+| Path | Cost at the relevant shape | Serving implication |
+|---|---|---|
+| 0255 candidate mask | Trace width 1,024 means 128 eight-score blocks. At seven rows the two aligned vector loads cut the median from 1.257 to 1.051 µs while reading the same scores. | The candidate-source layer saves 0.206 µs per invocation at this shape. A standard dec8 round took about 87,000 µs. [Timing record](../suite-fused-next-20261121/kernel-review/index-timing.json#L665) · [Dispatch and width units](../../zig/patches/0256-dsv41-make-fused-trace-thread-safe-unify-call-si.patch) |
+| 0254 score top-k | Early exit, fewer radix passes and a warp-wide cutoff search cut 128 × 32,768 random-score time from 237 to 101 µs. With all scores tied, the new path took 139 µs because column order resolves ties. | The observed 128 × 21,875 dispatch was in prompt processing. Later pooled prompt layers still compute all scores before applying the mask. At 128 × 65,536 that materializes 33.5 MB of scores for at most one quarter of the columns retained per row. This upstream work is a prefill profiling target. [Top-k timings](../suite-fused-next-20261121/kernel-review/RESULTS.md) · [Prompt scoring path](../fused-next-20261121/wp1/RESULTS.md#L268) |
+
+Two earlier GB10 measurements identify shapes where splitting the work wins. Both paths were common to the two images in this gate.
+
+- **Deep indexer at low row counts.** One fused block per row leaves few blocks to read a wide pool. At 8,192 candidates, a separate block-max launch spreads reads across 32 blocks per row and cuts 12.14 → 10.53 µs at one row and 12.44 → 11.80 µs at seven. At seven rows and 4,096 candidates the extra launch costs more than it saves (8.46 → 8.67 µs). Keep the current 6,144-block threshold pending valid crossover timings. [Shape sweep](../fused-next-20261121/wp1/RESULTS.md#L218) · [Crossover capture](../pre-bench-20261121/crossover-0215/RESULTS.md)
+- **Query rotation and FP4 conversion at 128 rows.** The fused path took 5.80 µs against 5.02 µs for the two-kernel reference. Fusion won at 48 and 1,024 rows. Six tested geometries left the middle-range gap open. The generated FP4 conversion uses seven dependent comparisons per element, a plausible contributor whose share of the gap is unmeasured. The serving trace includes `query_pair` at 128 rows. A subsequent same-image kernel A/B confirmed the split wins for a single invocation in both runs and found a reversal with eight distinct input/output buffers in one graph. [Geometry sweep and disassembly](../fused-next-20261121/wp3/RESULTS.md#L113) · [Rank 0 trace](s05.rank0.log) · [Same-image timing and parity](query128/RESULTS.md)
+
+For deep-decode attribution, use identical long prompts that generate multiple rounds in the 8,192- and 16,384-block buckets. Verify those decode dispatches, then measure invocation counts and GPU time per shape on each rank. The s05 trace deduplicates dispatch shapes, and the one-token long replays only yield meaningful prefill timings.
+
 ## Reproduce
 
 ```

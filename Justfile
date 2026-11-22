@@ -157,6 +157,10 @@ fused-bench:
     rsync -a {{head}}:tf-bench/fused-next/bench.log {{head}}:tf-bench/fused-next/sass.log \
       "{{head}}:tf-bench/fused-next/$j" {{head}}:tf-bench/fused-next/sass.json "$out/"
 
+# Time the two 128-row query paths from the shipped 84806bb image on the idle GB10 head. Prints JSON.
+fused-query128 reverse="0":
+    QUERY_BENCH_HEAD="{{head}}" bash runs/suite-fused-next2-20261121/query128/run-head.sh "{{reverse}}"
+
 # Export the fused-next round (0213-0258) from the rebased worktree into zig/patches/ and verify the chain: a clean
 # TF_REF with every zig/patches/*.patch applied in filename order must equal the branch. Numbers come from each
 # commit's own subject (the round has gaps), so this is not scripts/port-patches.sh: that tool applies hand-written
