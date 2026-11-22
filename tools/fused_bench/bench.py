@@ -23,6 +23,7 @@ import os
 import sys
 import time
 import urllib.request
+from functools import cache
 from pathlib import Path
 from statistics import median
 
@@ -31,7 +32,7 @@ import numpy as np
 I, L, P, F = ct.c_int, ct.c_int64, ct.c_void_p, ct.c_float
 U64 = ct.c_ulonglong
 ref = ct.byref
-cuda = ct.CDLL("libcuda.so.1")
+cuda = None
 stream = P()
 modules, kernels, allocations = {}, {}, []
 allocated = 0
@@ -60,13 +61,21 @@ kit = {
 # ---------------------------------------------------------------------------------------------------------------------
 # driver plumbing
 
+def libcuda():
+    global cuda
+    if cuda is None:
+        cuda = ct.CDLL("libcuda.so.1")
+    return cuda
+
+
 def cu(name, *args):
     if os.environ.get("FUSED_BENCH_TRACE"):
         print(f"    cu {name}", flush=True)
-    err = getattr(cuda, name)(*args)
+    lib = libcuda()
+    err = getattr(lib, name)(*args)
     if err:
         msg = ct.c_char_p()
-        cuda.cuGetErrorString(err, ref(msg))
+        lib.cuGetErrorString(err, ref(msg))
         raise RuntimeError(f"{name}: {err} {msg.value}")
 
 
@@ -87,17 +96,27 @@ class Buffer:
         self.shape, self.dtype = data.shape, data.dtype
         self.addr = P()
         cu("cuMemAlloc_v2", ref(self.addr), ct.c_size_t(data.nbytes))
-        cu("cuMemcpyHtoD_v2", self.addr, P(data.ctypes.data), ct.c_size_t(data.nbytes))
+        # stream uses CU_STREAM_NON_BLOCKING, which does not synchronize with legacy stream 0.
+        if stream.value:
+            cu("cuMemcpyHtoDAsync_v2", self.addr, P(data.ctypes.data), ct.c_size_t(data.nbytes), stream)
+            cu("cuStreamSynchronize", stream)
+        else:
+            cu("cuMemcpyHtoD_v2", self.addr, P(data.ctypes.data), ct.c_size_t(data.nbytes))
+            cu("cuCtxSynchronize")
         allocations.append(self.addr)
         allocated += data.nbytes
 
     def read(self):
         host = np.empty(self.shape, self.dtype)
+        if stream.value:
+            cu("cuStreamSynchronize", stream)
         cu("cuMemcpyDtoH_v2", P(host.ctypes.data), self.addr, ct.c_size_t(host.nbytes))
         return host.view("u1").ravel()
 
     def readarr(self):
         host = np.empty(self.shape, self.dtype)
+        if stream.value:
+            cu("cuStreamSynchronize", stream)
         cu("cuMemcpyDtoH_v2", P(host.ctypes.data), self.addr, ct.c_size_t(host.nbytes))
         return host
 
@@ -180,8 +199,9 @@ def param_count(path, name):
     """How many parameters the kernel declares: a tree that predates a signature change would otherwise read past the
     argv array in cuLaunchKernel (a driver-side fault, not a CUDA error)."""
     fn = function(path, name)
+    lib = libcuda()
     n, off, size = 0, I(), I()
-    while cuda.cuFuncGetParamInfo(fn, ct.c_uint(n), ref(off), ref(size)) == 0:
+    while lib.cuFuncGetParamInfo(fn, ct.c_uint(n), ref(off), ref(size)) == 0:
         n += 1
     return n
 
@@ -268,7 +288,7 @@ def case_latent_owner(rows, own, timing=True):
     row = {"kernel": "0198-latent", "shape": label, "rows": rows, "d": d, "parity": diffs}
     if timing and DO_TIMING:
         floor = lambda: launch(opts.floor, "empty_kernel", rows, min(d // 2, 256), 0)
-        row["timing"] = time_graphs(label, chains, names, floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, names, floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -276,8 +296,18 @@ def case_latent_owner(rows, own, timing=True):
 # ---------------------------------------------------------------------------------------------------------------------
 # timing
 
-def time_graphs(label, chains, names, floor, batch, reps):
-    """Interleaved CUDA-graph timings: one graph per arm of `batch` replays, plus the launch-floor graph."""
+def _time_graphs(label, chains, names, floor, batch, reps):
+    """Interleaved CUDA-graph timings returning (stats, timing_valid, timing_retries, timing_guarded)."""
+    global timing_retries
+    chains = list(chains)
+    names = list(names)
+    if len(chains) != len(names):
+        raise ValueError(f"{label}: chains/names length mismatch ({len(chains)} != {len(names)})")
+    if len(set(names)) != len(names):
+        raise ValueError(f"{label}: duplicate arm names in {names!r}")
+    if "floor" in names:
+        raise ValueError(f"{label}: 'floor' is reserved for the launch-floor graph")
+
     def build(chain):
         chain()
         cu("cuStreamSynchronize", stream)
@@ -293,50 +323,89 @@ def time_graphs(label, chains, names, floor, batch, reps):
     exes = [build(c) for c in chains]
     if floor is not None:
         exes.append(build(floor))
-        names = list(names) + ["floor"]
+        names = names + ["floor"]
     for e in exes:  # warm
         cu("cuGraphLaunch", e, stream)
         cu("cuStreamSynchronize", stream)
     start, stop = P(), P()
     for ev in (start, stop):
         cu("cuEventCreate", ref(ev), 0)
-    # A timing block is only reported from a window with no production request: wait for connections == 0 and verify
-    # the served-token counters did not move across the block, else rerun the block.
+    # A guarded timing block is valid only when before-health and after-health both report connections == 0 and valid
+    # unchanged served-token counters.
+    guarded = not bool(getattr(opts, "no_guard", False))
+    valid = False
+    case_retries = 0
     samples = None
-    for attempt in range(opts.tries):
-        c0 = None
-        if not opts.no_guard:
-            wait_health(opts.wait)
-            c0 = served_counters()
-        samples = [[] for _ in exes]
-        for rep in range(reps):
-            for off in range(len(exes)):
-                i = (rep + off) % len(exes)
-                cu("cuEventRecord", start, stream)
-                cu("cuGraphLaunch", exes[i], stream)
-                cu("cuEventRecord", stop, stream)
-                cu("cuEventSynchronize", stop)
-                ms = F()
-                cu("cuEventElapsedTime", ref(ms), start, stop)
-                samples[i].append(ms.value * 1000.0 / batch)
-        if opts.no_guard or served_counters() == c0:
-            break
-        global timing_retries
-        timing_retries += 1
-        print(f"{label}: production served during the timing block, retry {attempt + 1}/{opts.tries}", flush=True)
-    else:
-        print(f"{label}: WARNING no clean timing window after {opts.tries} tries", flush=True)
-    for e in exes:
-        cu("cuGraphExecDestroy", e)
-    for ev in (start, stop):
-        cu("cuEventDestroy_v2", ev)
+    try:
+        for attempt in range(opts.tries):
+            c0 = None
+            if guarded:
+                try:
+                    h0 = wait_health(opts.wait)
+                except TimeoutError as exc:
+                    print(f"{label}: {exc}", flush=True)
+                    break
+                c0 = health_counters(h0)
+                if not check_idle_health(h0):
+                    case_retries += 1
+                    timing_retries += 1
+                    print(f"{label}: invalid pre-block health, retry {attempt + 1}/{opts.tries}", flush=True)
+                    continue
+            samples = [[] for _ in exes]
+            for rep in range(reps):
+                for off in range(len(exes)):
+                    i = (rep + off) % len(exes)
+                    cu("cuEventRecord", start, stream)
+                    cu("cuGraphLaunch", exes[i], stream)
+                    cu("cuEventRecord", stop, stream)
+                    cu("cuEventSynchronize", stop)
+                    ms = F()
+                    cu("cuEventElapsedTime", ref(ms), start, stop)
+                    samples[i].append(ms.value * 1000.0 / batch)
+            if not guarded:
+                valid = True
+                break
+            h1 = health_now()
+            c1 = health_counters(h1)
+            if check_idle_health(h1) and counters_valid(c0) and counters_valid(c1) and c1 == c0:
+                valid = True
+                break
+            case_retries += 1
+            timing_retries += 1
+            print(f"{label}: production served or health invalid during the timing block, retry {attempt + 1}/{opts.tries}",
+                  flush=True)
+        else:
+            if guarded:
+                print(f"{label}: WARNING no clean timing window after {opts.tries} tries", flush=True)
+    finally:
+        for e in exes:
+            cu("cuGraphExecDestroy", e)
+        for ev in (start, stop):
+            cu("cuEventDestroy_v2", ev)
+    if not valid or samples is None:
+        return {}, False, case_retries, guarded
     stats = {}
-    for name, s in zip(names, samples):
+    for name, s in zip(names, samples, strict=True):
         a = np.asarray(s)
         stats[name] = {"median": round(float(median(s)), 3),
                        "iqr": round(float(np.percentile(a, 75) - np.percentile(a, 25)), 3),
                        "n": len(s)}
     print(f"{label}: " + " ".join(f"{k}={v['median']:.3f}[{v['iqr']:.3f}]" for k, v in stats.items()), flush=True)
+    return stats, True, case_retries, guarded
+
+
+def time_graphs(label, chains, names, floor, batch, reps):
+    """Interleaved CUDA-graph timings: one graph per arm of `batch` replays, plus the launch-floor graph."""
+    stats, _, _, _ = _time_graphs(label, chains, names, floor, batch, reps)
+    return stats
+
+
+def attach_timing(row, label, chains, names, floor, batch, reps):
+    stats, valid, case_retries, guarded = _time_graphs(label, chains, names, floor, batch, reps)
+    row["timing"] = stats
+    row["timing_valid"] = valid
+    row["timing_retries"] = case_retries
+    row["timing_guarded"] = guarded
     return stats
 
 
@@ -380,6 +449,114 @@ def score_key_host(x, j):
     ordered = np.where(sb < 0, sb ^ 0x7FFFFFFF, sb).astype(np.uint64)
     key = (ordered << np.uint64(32)) | (np.uint64(0xFFFFFFFF) - np.uint64(j))
     return key ^ np.uint64(0x8000000000000000)
+
+
+@cache
+def module_symbols(path):
+    """Enumerate once so testing an older cubin never produces a CUDA API error under memcheck."""
+    mod = module(path)
+    count = ct.c_uint()
+    cu("cuModuleGetFunctionCount", ref(count), mod)
+    handles = (P * count.value)()
+    cu("cuModuleEnumerateFunctions", handles, count, mod)
+    names = set()
+    for handle in handles:
+        name = ct.c_char_p()
+        cu("cuFuncGetName", ref(name), P(handle))
+        names.add(name.value.decode())
+    return names
+
+
+def index_symbol(mod, original, optimized):
+    return optimized if "tf_ds_" + optimized + "_kernel" in module_symbols(mod) else original
+
+
+def check_index_case(label, original, optimized, expected, launch_arm, floor, eligible=True, bytes_moved=0):
+    gold = Buffer(expected)
+    chains, parity, symbols = [], {}, {}
+    for arm, mod in (("old", opts.old_ops), ("new", opts.new_ops), ("new_off", opts.new_ops),
+                     ("new_pdl", opts.new_ops)):
+        symbol = index_symbol(mod, original, optimized) if eligible and arm != "new_off" else original
+        symbols[arm] = symbol
+        output = out(expected.shape, expected.dtype)
+
+        def chain(mod=mod, symbol=symbol, output=output, pdl=int(arm == "new_pdl")):
+            launch_arm(mod, symbol, output, pdl)
+
+        chain()
+        parity[arm] = compare(f"{label} {arm}", [output], [gold])
+        if arm in ("old", "new"):
+            chains.append(chain)
+    row = {"kernel": original, "shape": label, "symbols": symbols, "parity": parity, "bytes": bytes_moved}
+    if DO_TIMING:
+        attach_timing(row, label, chains, ["old", "new"], floor, opts.batch, opts.reps)
+    results.append(row)
+    free_all()
+
+
+def case_topk_indices(rows, width, k, dist):
+    label = f"topk R={rows} n={width} k={k} {dist}"
+    if not shape_ok(label):
+        return
+    rng = np.random.default_rng(254)
+    # An odd stride exposes reads from the next row. The output tail catches excess writes.
+    stride = width + 3
+    scores = rng.standard_normal((rows, stride), dtype=np.float32)
+    if dist == "ties":
+        scores[:] = rng.integers(-3, 4, scores.shape)
+    elif dist == "flat":
+        scores.fill(-np.inf)
+    elif dist == "special":
+        patterns = np.array([0, 0x80000000, 0x7f800000, 0xff800000, 1, 0x80000001,
+                             0x7fc00001, 0x7fc00002, 0xffc00001], dtype="u4")
+        scores.view("u4")[:] = rng.choice(patterns, scores.shape)
+    scores[:, width:] = np.inf
+    visible = np.resize(np.array([width + 1, width // 2, 0, -1, width - 1], dtype="i8"), rows)
+    x, vis = Buffer(scores), Buffer(visible)
+    expected = np.full(rows * k + 8, 0x55, "i8")
+    columns = np.arange(width, dtype="u4")
+    if k:
+        for r in range(rows):
+            keys = score_key_host(scores[r, :width], columns)
+            picks = np.sort(np.argpartition(keys, width - k)[-k:])
+            expected[r * k:(r + 1) * k] = np.where(picks < visible[r], picks, -1)
+
+    def launch_arm(mod, symbol, output, pdl):
+        native(mod, symbol, rows, 1024, x, L(stride), width, k, vis, output, pdl=pdl)
+
+    floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, 0)
+    bytes_moved = rows * width * 4 + rows * 8 + rows * k * 8
+    check_index_case(label, "topk_indices", "topk_indices_cut", expected, launch_arm, floor, bytes_moved=bytes_moved)
+
+
+def case_candidate_mask(rows, blocks, size=8, offset=0, pad=0):
+    label = f"cand-mask R={rows} nb={blocks} bs={size} offset={offset} pad={pad}"
+    if not shape_ok(label):
+        return
+    rng = np.random.default_rng(255)
+    width, ms = blocks * size, blocks + 3
+    storage = rng.standard_normal(offset + rows * (width + pad), dtype=np.float32)
+    scores = storage[offset:].reshape(rows, width + pad)[:, :width].reshape(rows, blocks, size)
+    scores[:, 0::4] = -np.inf
+    scores[:, 1::4] = -0.0
+    scores[:, 2::4, -1] = np.inf
+    for j in range(size):
+        scores[:, 3 + 4 * j::4 * size, j] = np.nan
+    visible = np.resize(np.array([width, 0, -1, size, size + 1, width + 1], dtype="i8"), rows)
+    expected = np.full((rows, ms), 0x55, "u1")
+    expected[:, :blocks] = (~np.isnan(scores).any(axis=2) & (scores > -np.inf).any(axis=2)
+                             | (np.arange(blocks) == (visible[:, None] - 1) // size))
+    x, vis = Buffer(storage), Buffer(visible)
+    ptr = P(x.addr.value + offset * storage.itemsize)
+    grid = ((blocks + 255) // 256, rows)
+
+    def launch_arm(mod, symbol, output, pdl):
+        native(mod, symbol, grid, 256, ptr, L(width + pad), blocks, size, vis, output, L(ms), pdl=pdl)
+
+    floor = lambda: launch(opts.floor, "empty_kernel", grid, 256, 0)
+    aligned8 = size == 8 and ptr.value % 16 == 0 and (width + pad) % 4 == 0
+    bytes_moved = rows * width * 4 + rows * 8 + rows * blocks
+    check_index_case(label, "cand_fast", "cand_fast8", expected, launch_arm, floor, aligned8, bytes_moved=bytes_moved)
 
 
 def case_idx(rows, nb, k, mask_on, dist="ties", special=False, timing=True, pad=0):
@@ -437,7 +614,7 @@ def case_idx(rows, nb, k, mask_on, dist="ties", special=False, timing=True, pad=
     if timing and DO_TIMING and not special and k < nb:
         shared = nb * 4
         floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, shared)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["ref", "old", "new"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -484,7 +661,7 @@ def case_idx_small(rows, nb, k, dist="random"):
     row["bytes"] = rows * width * 4 + rows * nb * 4 + rows * k * 4
     if DO_TIMING:
         floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, nb * 4)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "fused", "small"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["ref", "old", "fused", "small"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -510,7 +687,7 @@ def case_blockmax(rows, nb):
     row["bytes"] = rows * width * 4 + rows * nb * 4
     if DO_TIMING:
         floor = lambda: launch(opts.floor, "empty_kernel", ((nb + 255) // 256, rows), 256, 0)
-        row["timing"] = time_graphs(label, [chain], ["kit"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, [chain], ["kit"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -548,7 +725,7 @@ def case_idx_hist(rows, nb, k, dist, block):
     row["bytes"] = rows * width * 4 + rows * 16 + rows * k * 4
     if DO_TIMING:
         floor = lambda: launch(opts.floor, "empty_kernel", rows, block, nb * 4)
-        row["timing"] = time_graphs(label, [chain], ["new"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, [chain], ["new"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -631,7 +808,7 @@ def case_idx_fold(rows, width, dist="mixed", special=False, timing=True):
     row["bytes"] = rows * width * 4 + rows * width * 8 + rows * nt * 8 + rows * k * 4
     if timing and DO_TIMING and not special:
         floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, nbk * 4)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -654,7 +831,7 @@ def case_score_keys_only(rows, width):
     row = {"kernel": "kit-scorekeys", "shape": label, "rows": rows, "width": width, "parity": {"new_vs_ref": 0}}
     row["bytes"] = rows * width * 4 + rows * width * 8 + rows * nt * 8
     if DO_TIMING:
-        row["timing"] = time_graphs(label, [chain], ["kit"], None, opts.batch, opts.reps)
+        attach_timing(row, label, [chain], ["kit"], None, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -754,7 +931,7 @@ def case_compress_decode(rows, d, layout="mixed", timing=True, special=False):
     row["bytes"] = rows * d * 4 * 4 + rows * 2 * d * 4 + rows * (d + 16) * 2 + 2 * n * d * 4
     if timing and DO_TIMING and not special and layout == "mixed":
         floor = lambda: launch(opts.floor, "empty_kernel", rows, d, 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newdup"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["ref", "old", "new", "newdup"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -804,7 +981,7 @@ def case_compress_prompt(rows, d, timing=True, special=False):
     if timing and DO_TIMING and not special:
         groups = max(1, min(d, prompt_target(rows)) // lanes)
         floor = lambda: launch(opts.floor, "empty_kernel", rows, (lanes, groups), 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["ref", "old", "new"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -972,7 +1149,7 @@ def case_rope(path, rows, special=False, timing=True):
         else:
             grid = rows
         floor = lambda: launch(opts.floor, "empty_kernel", grid, block, 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["ref", "old", "new"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -1053,7 +1230,7 @@ def case_prune(rows, dead_mode=False, special=False, timing=True):
     row["bytes"] = rows * slots * 8
     if timing and DO_TIMING and not special:
         floor = lambda: launch(opts.floor, "empty_kernel", 1, 32 if rows <= 32 else 64, 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -1076,9 +1253,11 @@ def case_fallback_idx(rows, nb, k):
     for mod in (opts.old_ops, opts.new_ops):
         mx, ix, blocks = out((rows, nb), "u4"), out((rows, k), "i8"), out((rows, k), "i4")
 
-        def chain(mod=mod, mx=mx, ix=ix, blocks=blocks):
+        topk = index_symbol(mod, "topk_indices", "topk_indices_cut")
+
+        def chain(mod=mod, mx=mx, ix=ix, blocks=blocks, topk=topk):
             native(mod, "block_max", ((nb + 255) // 256, rows), 256, x, L(ss), width, 8, vis, mx, L(nb), nb)
-            native(mod, "topk_indices", rows, 1024, mx, L(nb), nb, k, every, ix)
+            native(mod, topk, rows, 1024, mx, L(nb), nb, k, every, ix)
             native(mod, "pool_pick", rows, 1024, mx, L(nb), nb, ix, k, P(), 0, blocks)
 
         chain()
@@ -1089,7 +1268,7 @@ def case_fallback_idx(rows, nb, k):
     row["bytes"] = rows * width * 4 + rows * nb * 4 + rows * k * 4
     if DO_TIMING:
         floor = lambda: launch(opts.floor, "empty_kernel", rows, 1024, 0)
-        row["timing"] = time_graphs(label, chains, ["old", "new"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["old", "new"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -1127,7 +1306,7 @@ def case_fallback_compress(rows, d):
     row["bytes"] = rows * d * 4 * 2 + 2 * n * d * 4 + rows * d * 2
     if DO_TIMING:
         floor = lambda: launch(opts.floor, "empty_kernel", rows, d, 0)
-        row["timing"] = time_graphs(label, chains, ["old", "new"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["old", "new"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -1208,7 +1387,7 @@ def case_prompt_source(rows, d, special=False, timing=True, odd=False):
     row["bytes"] = 2 * n * d * 4 + 2 * keep * d * 4 + rows * (d + 16) * 2
     if timing and DO_TIMING and not special:
         floor = lambda: launch(opts.floor, "empty_kernel", (n + 1) // 2, (lanes, groups), 0)
-        row["timing"] = time_graphs(label, chains, ["ref", "old", "new", "newnf"], floor, opts.batch, opts.reps)
+        attach_timing(row, label, chains, ["ref", "old", "new"], floor, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -1233,7 +1412,7 @@ def case_score_keys(rows, width):
            "parity": {"new_vs_ref": 0}}
     row["bytes"] = rows * width * 4 + rows * width * 8 + rows * nt * 8
     if DO_TIMING:
-        row["timing"] = time_graphs(label, [chain], ["kit"], None, opts.batch, opts.reps)
+        attach_timing(row, label, [chain], ["kit"], None, opts.batch, opts.reps)
     results.append(row)
     return row
 
@@ -1259,7 +1438,8 @@ ROPE_SHAPES = [("key", r) for r in (1, 7, 32, 48)] + \
 PRUNE_SHAPES = [1, 7, 32, 48]
 SCORE_KEYS_SHAPES = [(r, w) for r in (1, 7, 32, 128) for w in (16384, 32768, 65536)]
 
-KERNELS = ("idx", "idx-hist", "block-max", "idx-small", "fold", "compress-decode", "compress-prompt", "prompt-source",
+KERNELS = ("idx", "idx-hist", "block-max", "idx-small", "topk-indices", "cand-mask", "fold",
+           "compress-decode", "compress-prompt", "prompt-source",
            "key", "latent", "query", "prompt-key", "prompt-latent", "prune", "score-keys", "fallback")
 
 FOLD_SHAPES = [(r, w) for r in (1, 7, 32, 48) for w in (16388, 32768, 65536)]
@@ -1300,6 +1480,7 @@ def main():
             sys.exit(f"missing {p} (run build.sh)")
 
     lock = None
+    h0 = None
     if not opts.no_guard:
         avail = mem_available_gib()
         if avail < 3.0:
@@ -1307,7 +1488,12 @@ def main():
         print(f"MemAvailable {avail:.2f} GiB", flush=True)
         lock = open(os.path.expanduser("~/tf-bench/gpu.lock"), "w")
         fcntl.flock(lock, fcntl.LOCK_EX)
-        h0 = wait_health(opts.wait)
+        try:
+            h0 = wait_health(opts.wait)
+        except TimeoutError as exc:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            lock.close()
+            sys.exit(str(exc))
         counters0 = {k: h0.get(k) for k in ("prompt_tokens_total", "generation_tokens_total")}
         print(f"health before: {counters0}", flush=True)
 
@@ -1324,6 +1510,25 @@ def main():
     def run(fn, *a):
         fn(*a)
     try:
+        if selected("topk-indices"):
+            for rows, width, k, dist in (
+                (7, 1, 0, "random"), (7, 1, 1, "special"), (7, 255, 1, "special"),
+                (7, 256, 127, "ties"), (7, 257, 17, "flat"), (7, 512, 512, "random"),
+                (32, 2048, 2048, "ties"), (32, 2049, 2048, "flat"),
+                (7, 8192, 2048, "random"), (32, 16385, 2048, "ties"),
+                (128, 4096, 512, "random"), (128, 32768, 512, "random"),
+                (128, 32768, 512, "flat"), (7, 65535, 512, "special"),
+                (7, 65536, 512, "ties"), (7, 65537, 513, "special"),
+                (32, 131072, 512, "random"),
+            ):
+                case_topk_indices(rows, width, k, dist)
+        if selected("cand-mask"):
+            for rows in (1, 7, 32, 48):
+                for blocks in (128, 512, 2048):
+                    case_candidate_mask(rows, blocks)
+            case_candidate_mask(7, 257, offset=1)
+            case_candidate_mask(7, 255, pad=1)
+            case_candidate_mask(7, 257, size=3)
         if selected("idx"):
             for rows, nb, k, mask, dist in IDX_SHAPES:
                 run(case_idx, rows, nb, k, mask, dist)
@@ -1453,19 +1658,22 @@ def main():
     for row in results:
         t = row.get("timing")
         if not t:
+            if row.get("timing_valid") is False:
+                print(f"{row['kernel']:<24} {row['shape']:<52} INVALID (retries={row.get('timing_retries', 0)})")
             continue
         s = " ".join(f"{k}={v['median']:.3f}[{v['iqr']:.3f}]" for k, v in t.items())
         print(f"{row['kernel']:<24} {row['shape']:<52} {s}")
-    health = {}
-    if not opts.no_guard:
-        h1 = health_now()
-        counters1 = {k: h1.get(k) for k in ("prompt_tokens_total", "generation_tokens_total")}
-        health = {"before": counters0, "after": counters1, "timing_retries": timing_retries,
-                  "timing_clean": timing_retries == 0}
-        if timing_retries == 0:
+    guarded = not opts.no_guard
+    h1 = health_now() if guarded else None
+    health = summarize_health(results, guarded, h0, h1, timing_retries)
+    if guarded:
+        counters1 = health["after"]
+        if health["timing_clean"] and timing_retries == 0:
             print(f"health after: {counters1}  every timing block verified idle")
+        elif health["timing_clean"]:
+            print(f"health after: {counters1}  every timing block verified idle ({timing_retries} retry/retries)")
         else:
-            print(f"health after: {counters1}  {timing_retries} timing block(s) retried for a served request")
+            print(f"health after: {counters1}  timing NOT clean (retries={timing_retries})")
     if opts.json:
         opts.json.write_text(json.dumps({"results": results, "failures": failures, "health": health}, indent=1))
         print(f"\nwrote {opts.json}")
@@ -1484,9 +1692,48 @@ def mem_available_gib():
     return 0.0
 
 
-def served_counters():
-    h = health_now()
+def health_counters(h):
+    if not isinstance(h, dict):
+        return (None, None)
     return (h.get("prompt_tokens_total"), h.get("generation_tokens_total"))
+
+
+def counters_valid(c):
+    return (isinstance(c, tuple) and len(c) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in c))
+
+
+def check_idle_health(h):
+    if not isinstance(h, dict):
+        return False
+    live = h.get("live")
+    if not isinstance(live, dict):
+        return False
+    conns = live.get("connections")
+    return (isinstance(conns, int) and not isinstance(conns, bool) and conns == 0
+            and counters_valid(health_counters(h)))
+
+
+def served_counters():
+    return health_counters(health_now())
+
+
+def summarize_health(rows, guarded, before_health, after_health, total_retries):
+    timed_rows = [r for r in rows if isinstance(r, dict) and ("timing" in r or "timing_valid" in r)]
+    if not guarded:
+        return {"guarded": False, "timing_retries": total_retries, "timing_clean": False}
+    before_c = health_counters(before_health)
+    after_c = health_counters(after_health)
+    clean = (counters_valid(before_c)
+             and counters_valid(after_c)
+             and all(r.get("timing_valid") is True for r in timed_rows))
+    return {
+        "guarded": True,
+        "before": {"prompt_tokens_total": before_c[0], "generation_tokens_total": before_c[1]},
+        "after": {"prompt_tokens_total": after_c[0], "generation_tokens_total": after_c[1]},
+        "timing_retries": total_retries,
+        "timing_clean": clean,
+    }
 
 
 def health_now():
@@ -1501,13 +1748,14 @@ def wait_health(timeout=1800):
     deadline = time.time() + timeout if timeout else None
     while True:
         h = health_now()
-        conns = h.get("live", {}).get("connections")
-        if conns == 0:
-            print(f"health: connections={conns}", flush=True)
+        if check_idle_health(h):
+            print("health: connections=0", flush=True)
             return h
-        print(f"production serving ({conns} connections), waiting", flush=True)
-        if deadline is not None and time.time() > deadline:
-            sys.exit("production stayed busy, refusing")
+        live = h.get("live") if isinstance(h, dict) else None
+        conns = live.get("connections") if isinstance(live, dict) else None
+        print(f"production not idle/valid (connections={conns}, counters={health_counters(h)}), waiting", flush=True)
+        if deadline is not None and time.time() >= deadline:
+            raise TimeoutError("timed out waiting for idle production health with valid counters")
         time.sleep(20)
 
 
