@@ -14,6 +14,8 @@ REF=${REF:-}
 BANNERS=${BANNERS:-TF_DS_KV_FETCH_REUSE: decode reuses}
 WORKLOAD=${WORKLOAD:-1}
 EXACT=${EXACT:-1}
+SAMPLED=${SAMPLED:-0}   # 1: runs/overnight-20261122/sampled.py each arm, compared against the first arm's (SREF)
+SREF=${SREF:-}
 mkdir -p "$OUT"
 C=dsv41-1017-exl3-tf
 worker=$(grep -m1 '^WORKER=' .env | cut -d= -f2-)
@@ -42,6 +44,10 @@ while IFS= read -r line <&3; do
     echo "  exact record rc=$?"
     if [[ -z "$REF" ]]; then REF="$OUT/$name.exact.json"; echo "  (reference is now $REF)"
     else python3 -I tools/exact.py compare "$REF" "$OUT/$name.exact.json" > "$OUT/$name.cmp.txt" 2>&1; echo "  exact vs ref rc=$? $(tail -1 "$OUT/$name.cmp.txt")"; fi
+  fi
+  if (( SAMPLED )); then
+    if [[ -z "$SREF" ]]; then python3 runs/overnight-20261122/sampled.py "$name" "$OUT/$name.sampled.json" 2>&1 | tail -1 | sed 's/^/  /'; SREF="$OUT/$name.sampled.json"
+    else python3 runs/overnight-20261122/sampled.py "$name" "$OUT/$name.sampled.json" --compare "$SREF" 2>&1 | tail -1 | sed 's/^/  /'; fi
   fi
   if (( WORKLOAD )); then python3 runs/kvreuse-size-20261122/workload.py "$name" "$OUT/$name.json" 2>&1 | tee "$OUT/$name.log" | sed 's/^/  /'; fi
   for r in 0 1; do
