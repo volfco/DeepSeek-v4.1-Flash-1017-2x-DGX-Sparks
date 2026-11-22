@@ -4,7 +4,9 @@ Paired two-Spark ABBA gate of `tensorfold-dsv41:bench-fused-next-84806bb` (0254 
 `cand_fast8`, 0256/0258 thread-safe `fused_trace`, 0257 `planKvSource2`) against `bench-fused-next-d5ecba0`
 (0213–0253) on production's `.env` switches, plus `s05` = candidate with `TF_DS_FUSED_TRACE=1` on both ranks.
 Run 2026-11-22 02:34–04:31 UTC on `gx10-eb0e`/`gx10-235f`, production stopped for the window and restored after
-(`bench-prune-six-20261120`, health 200, chat answers).
+(`bench-prune-six-20261120`, health 200, chat answers). Restored production validated 04:47 UTC:
+`tools/validate.py --compare runs/suite-fused-20261121/restored.validate.json` → **all passed**, saved replies 8/8,
+concurrent == solo 8/8, long prompt 21,875 tokens `8638`, image `Yellow circle` (`restored.validate.log`).
 
 **Verdict, by the todo's own gate: pass.** Exact 39/39 on every block, every probe reply hash equal with identical
 rounds and accepted drafts, `fixed_replay` input bytes/prompt tokens/token hash equal across all five blocks,
