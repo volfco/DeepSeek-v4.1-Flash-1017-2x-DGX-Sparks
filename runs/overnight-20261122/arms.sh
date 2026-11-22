@@ -18,6 +18,7 @@ EXACT=${EXACT:-1}
 SAMPLED=${SAMPLED:-0}   # 1: runs/overnight-20261122/sampled.py each arm, compared against the first arm's (SREF)
 SREF=${SREF:-}
 PROBE=${PROBE:-0}       # 1: the suite's decode probe (suite_probe.py --narrow: code/JSON/prose/tetris rows, bursts)
+PROBE_ARGS=${PROBE_ARGS:---narrow}   # e.g. "--narrow --sampled": every class sampled, two seeds
 mkdir -p "$OUT"
 C=dsv41-1017-exl3-tf
 worker=$(grep -m1 '^WORKER=' .env | cut -d= -f2-)
@@ -53,7 +54,7 @@ while IFS= read -r line <&3; do
     if [[ -z "$SREF" ]]; then python3 runs/overnight-20261122/sampled.py "$name" "$OUT/$name.sampled.json" 2>&1 | tail -1 | sed 's/^/  /'; SREF="$OUT/$name.sampled.json"
     else python3 runs/overnight-20261122/sampled.py "$name" "$OUT/$name.sampled.json" --compare "$SREF" 2>&1 | tail -1 | sed 's/^/  /'; fi
   fi
-  if (( PROBE )); then python3 runs/suite-fused-next2-20261121/suite_probe.py "$name" "$OUT/$name.probe.json" --narrow > "$OUT/$name.probe.log" 2>&1; echo "  probe rc=$? $(grep -c . "$OUT/$name.probe.log") lines"; fi
+  if (( PROBE )); then python3 runs/suite-fused-next2-20261121/suite_probe.py "$name" "$OUT/$name.probe.json" $PROBE_ARGS > "$OUT/$name.probe.log" 2>&1; echo "  probe rc=$? $(grep -c . "$OUT/$name.probe.log") lines"; fi
   if (( WORKLOAD )); then python3 "$WORKLOAD_SCRIPT" "$name" "$OUT/$name.json" 2>&1 | tee "$OUT/$name.log" | sed 's/^/  /'; fi
   curl -s -m 30 http://127.0.0.1:8000/metrics > /dev/null; sleep 1
   docker logs --since 10s $C 2>&1 | grep -E '"rank": 0, "(profile|phases_ms|round_clock_us)"' | tail -3 > "$OUT/$name.profile.txt"

@@ -122,8 +122,13 @@ def main():
     label, out = sys.argv[1], sys.argv[2]
     quick = "--quick" in sys.argv
     narrow = "--narrow" in sys.argv   # the shortened suite: five solo rows, two bursts, the four extra code rows
+    sampled_all = "--sampled" in sys.argv   # every class at the clients' sampling (T=1.0, top_p 0.95, top_k 20), two seeds each
     jobs = [("tetris greedy", TETRIS, False, 1, 2048)]
-    if narrow:
+    if sampled_all:
+        jobs = [(f"{nm} sampled s{sd}", pr, True, sd, n) for sd in (700, 701)
+                for nm, pr, n in (("tetris", TETRIS, 2048), ("code", CODE, 1536), ("json", JSONP, 1536), ("prose", PROSE[0], 768))]
+        jobs += [(f"{nm.replace(' greedy', '')} sampled s{sd}", pr, True, sd, n) for sd in (700, 701) for nm, pr, n in EXTRA]
+    elif narrow:
         jobs += [("tetris sampled", TETRIS, True, 700, 2048), ("code greedy", CODE, False, 1, 1536),
                  ("json greedy", JSONP, False, 1, 1536), ("prose greedy", PROSE[0], False, 1, 768)]
     elif not quick:
@@ -154,7 +159,7 @@ def main():
             print(label, b["label"], {k: b[k] for k in ("agg_tok_s_wall", "tokens_per_stream_round", "drafted_per_stream_round", "accept_pct", "wall_s")}, flush=True)
     if not quick:
         # more code-like and structured prompts than the first 15 rows had (one a class), and one with thinking on
-        for name, prompt, n in EXTRA:
+        for name, prompt, n in ([] if sampled_all else EXTRA):
             r = run(name, prompt, False, 1, n)
             rows.append(r)
             print(label, name, {k: r.get(k) for k in ("rounds", "accepted", "exact_tokens_per_round", "drafted_per_round", "ms_per_round", "exact_tok_s", "sha")}, flush=True)

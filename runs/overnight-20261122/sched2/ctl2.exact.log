@@ -1,0 +1,54 @@
+record: label='ctl2' url=http://127.0.0.1:8000 salt=b96613f0544b like=runs/overnight-20261122/sched2/ctl1.exact.json
+  len_1: prompt=5 out=10 stop cached=0 sha=44046c9e0fad(server) 0.217s
+  len_100: prompt=100 out=27 stop cached=0 sha=e2da62313031(server) 0.741s
+  len_2048: prompt=2047 out=34 stop cached=0 sha=f78a8a5108c7(server) 1.672s
+  len_2049: prompt=2049 out=39 stop cached=0 sha=eeb9885a4c27(server) 1.765s
+  len_4096: prompt=4078 out=48 stop cached=2048 sha=80845bcdb09a(server) 1.987s
+  len_8000: prompt=7963 out=42 stop cached=6144 sha=1032acf9f95d(server) 1.689s
+  len_20000: prompt=19909 out=47 stop cached=18432 sha=8afc34b2baec(server) 1.71s
+  len_30000: prompt=29992 out=23 stop cached=28672 sha=f8d51194cfad(server) 1.407s
+  len_50000: prompt=49964 out=48 stop cached=49152 sha=bff8591e0dfd(server) 1.412s
+  len_64000: prompt=63950 out=39 stop cached=63488 sha=8bcf5117f36c(server) 1.198s
+  len_100000: prompt=99897 out=41 stop cached=98304 sha=93605b74aae4(server) 1.853s
+  repeat_2048: prompt=2047 out=34 stop cached=0 sha=f78a8a5108c7(server) 1.606s
+  resume_1: prompt=7962 out=36 stop cached=6144 sha=8638b3946824(server) 1.568s
+  resume_2: prompt=7964 out=134 stop cached=6144 sha=ab066f421014(server) 2.603s
+  resume_3: prompt=7965 out=12 stop cached=6144 sha=e8a732d56b29(server) 1.224s
+  resume_1_again: prompt=7962 out=36 stop cached=6144 sha=8638b3946824(server) 1.521s
+  conc_1 (8 at once): prompt=597 out=31 sha=556b3b158c8f 2.922s
+  conc_2 (8 at once): prompt=1197 out=31 sha=2935bfe2ba8d 2.921s
+  conc_3 (8 at once): prompt=1791 out=45 sha=0ad502443451 3.122s
+  conc_4 (8 at once): prompt=2387 out=40 sha=9db38b46d5b9 7.377s
+  conc_5 (8 at once): prompt=2988 out=33 sha=68938fa374e2 7.049s
+  conc_6 (8 at once): prompt=3582 out=42 sha=9fcb827df5b6 7.518s
+  conc_7 (8 at once): prompt=4199 out=39 sha=482501213824 7.477s
+  conc_8 (8 at once): prompt=4800 out=41 sha=a61f42bc8721 8.609s
+  solo_1: prompt=597 out=31 stop cached=0 sha=556b3b158c8f(server) 1.004s
+  solo_2: prompt=1197 out=31 stop cached=0 sha=2935bfe2ba8d(server) 1.237s
+  solo_3: prompt=1791 out=45 stop cached=0 sha=0ad502443451(server) 1.618s
+  solo_4: prompt=2387 out=40 stop cached=2048 sha=9db38b46d5b9(server) 0.979s
+  solo_5: prompt=2988 out=33 stop cached=2048 sha=68938fa374e2(server) 1.127s
+  solo_6: prompt=3582 out=42 stop cached=2048 sha=9fcb827df5b6(server) 1.482s
+  solo_7: prompt=4199 out=39 stop cached=2048 sha=482501213824(server) 1.869s
+  solo_8: prompt=4800 out=41 stop cached=4096 sha=a61f42bc8721(server) 1.094s
+  conv_A1: prompt=5974 out=11 cached=4096 sha=c7b0e613dc42 1.182s
+  conv_B1: prompt=5972 out=6 cached=4096 sha=c3b31d025830 1.19s
+  conv_C1: prompt=5969 out=10 cached=4096 sha=4c6a13495de7 1.242s
+  conv_A2: prompt=5997 out=20 cached=4096 sha=bce241017630 1.317s
+  conv_B2: prompt=5989 out=13 cached=4096 sha=0b9751a43fe7 1.256s
+  conv_C2: prompt=5989 out=24 cached=4096 sha=e53dc941da99 1.332s
+  conv_A3: prompt=6028 out=9 cached=4096 sha=21cac70c909b 1.234s
+  check repeat_2048 == len_2048: ok 
+  check resume_1_again == resume_1: ok 
+  check solo_1 == conc_1: ok 
+  check solo_2 == conc_2: ok 
+  check solo_3 == conc_3: ok 
+  check solo_4 == conc_4: ok 
+  check solo_5 == conc_5: ok 
+  check solo_6 == conc_6: ok 
+  check solo_7 == conc_7: ok 
+  check solo_8 == conc_8: ok 
+  info: repeat_2048 cached_tokens=0 (informational: a 2048-token prompt may keep no snapshot)
+  check resume_2 cache hit (cached_tokens>0): ok cached=6144
+  check resume_3 cache hit (cached_tokens>0): ok cached=6144
+wrote runs/overnight-20261122/sched2/ctl2.exact.json: 39 cases, 0 errors [], 0 failed checks []
