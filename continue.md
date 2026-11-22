@@ -3,7 +3,15 @@
 **Current state (2026-11-22 06:05 UTC): production runs `84806bb`; testing the next set has started.**
 
 - **Deployed 05:58–06:01 UTC.** Both ranks run `tensorfold-dsv41:bench-fused-next-84806bb` with production's unchanged switches. Smoke ok. `validate.py --compare` passed all checks, 8/8 saved replies, concurrent == solo 8/8. The operator made the call: exact plus neutral plus faster standalone gets adopted. **Undo:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-fnext .env && ./start.sh restart`. The image change started a fresh spill namespace. [Deploy record](runs/deploy-fnext-20261122/) · [decision](decisions.md)
-- **Running: candidate 1 sizing** (`runs/kvreuse-size-20261122/`). Three restarts on the production image, graphs on: `TF_DS_ROUND_PROFILE=1` with `TF_DS_CLOCK_MARKS=4` (sharded-attention parts), then `=1` (every phase), then plain production as the restore and the marks' perturbation control, followed by `validate.py`. Workload: decoding summaries at 4K/32K/128K × 1/4 streams. Per-round stage µs comes from differenced cumulative `round_clock_us`.
+- **Candidate 1 sized (06:05–06:31 UTC): the sharded-KV fetch and exchange cost 3.6–4.2% of a decode round, and about 3% is recoverable.**
+  - `sh_fetch` + `sh_rows` = 1.18–1.29 ms a round at one stream and 2.48–2.62 ms at four. The cost is flat from 4K to 128K and grows with rows, so it is exchange wait, not bytes.
+  - Skipping the 30 repeated exchanges of 38 projects to 0.93–2.06 ms, 3.0–3.5% of the graphs-on round. That exceeds everything the fused rounds won.
+  - Production was restored and validated (8/8). [Results](runs/kvreuse-size-20261122/RESULTS.md)
+- **Patch `0259` `TF_DS_KV_FETCH_REUSE` (off by default) is written and host-tested.** Branch `kv-fetch-reuse` `69335b8` in `~/Workspace/tfref-kvreuse` (worktree of `tfref-fused-next`, on `84806bb`).
+  - A layer whose `(sh.kv_layer, index layer of rd.cidx, kk)` equals the round's last fetch attends `rd.fc`/`rd.fs`/`rd.fidx` as already gathered. `shardRound` resets the key each round. Both ranks run the same layers, so the ring order holds.
+  - Graph capture records the skip. A skipping graph reads only buffers an earlier graph or eager layer in the same round wrote, so the worst case is an extra fetch.
+  - `zig build test`: the only failures are `0178` and `hotPick`, which fail identically on unpatched `84806bb`.
+  - **Next:** build `bench-fused-next-69335b8` (in progress), then run the ABBA gate `runs/kvreuse-ab-20261122/run.sh` (off/on/on/off on one image: 39-case exact panel `--like`, graphs-on `forward_ms` workload, reuse banner on both ranks, production restore + validate).
 - The operator has authorized restarts and config changes for this testing (2026-11-22).
 - **Production runs the `fused-next` binary, while `zig/patches/` holds the rebased equivalent, which has never run on hardware.** Building and gating an image from the recipe (a full source build on the head) is still open. It does not block the image swap. Do not `just sync-head` or restart with changed `zig/patches` until that build has been run.
 
@@ -71,6 +79,9 @@ By estimate, the fused rounds so far worked inside roughly 8% of the decode roun
 - Pair-gate resolution: the base-to-base control spread is about 0.6% (dec8 matched-step up to 2.2%). The dec8 dip traced to random HTTP admission order under `TF_DS_ROUND_ROWS=16` plus the `min(t_first)` prefill exclusion, not a kernel. Run conditions: clocks 2,392/2,385 MHz, 84–87 °C max, lowest head free memory 4.9 GiB. [dec8 audit](runs/pre-bench-20261121/dec8-audit/RESULTS.md)
 - Harness: legacy stream-0 `cuMemcpy*_v2` is asynchronous for pageable buffers of 64 KiB or less and races `CU_STREAM_NON_BLOCKING` kernels (B2, 2 of 220 false mismatches). `bench.py` now uses stream-ordered copies and emits `timing_valid` only while `live.connections == 0`. [B2](runs/pre-bench-20261121/b2-investigation/RESULTS.md)
 - PDL (`TF_DS_PDL=1`) is bit-identical on the fused bundle and speed-neutral on the pair (s05). It is not enabled.
+- **Graphs hide only 1–2.5% of a decode round** on this build (eager vs graphs-on `forward_ms`, 2026-11-22), so eager stage shares carry over to served rounds. [kvreuse-size](runs/kvreuse-size-20261122/RESULTS.md)
+- **The served clock-mark profiler is broken.** With `TF_DS_CLOCK_MARKS` and graphs on, `round_clock_us.rounds` reads `0xAAAA…` (undefined fill: the served `Model`'s `clk_*` field defaults never apply) and every phase reads 0 µs. Use `TF_DS_ROUND_PROFILE=2 GRAPHS=0` (eager phase timer, about 0–3% overhead) for stage attribution.
+- Production decode stages (84806bb, eager timer): `moe` 15.5–17.8 ms (1 stream) and 38–40 ms (4 streams) of 31.5–62 ms rounds, `attn` 1.8–2.4 ms, `a_idx` 0.8–2.8 ms (grows with depth), `sh_fetch` 0.34–0.49 ms, `sh_rows` 0.85–2.14 ms.
 - Dense prefill projections reach 35% / 67% of the same-shape FP16 reference on head / worker. The prompt gate/up stage is 17.9% of the head's chat-prime window. Standalone EXL3 unpack is 1.0%, prompt routing 0.90%.
 - 0217 needs the opt-in dynamic shared memory limit to cover 131,072 pool columns, requested at module load.
 
