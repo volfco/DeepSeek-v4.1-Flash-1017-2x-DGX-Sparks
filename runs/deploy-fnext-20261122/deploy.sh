@@ -25,7 +25,9 @@ idle_once() {
   local live
   live=$(curl -s -m 5 http://127.0.0.1:8000/health | python3 -c 'import json,sys; l=json.load(sys.stdin)["live"]; print(l["connections"], l["waiting"])' 2>/dev/null || echo down)
   [[ "$live" == "0 0" ]] || return 1
-  ! docker logs --since "${IDLE_MIN}m" $C 2>&1 | grep 'POST /v1/' | grep -v '\[tensorfold\] 127\.0\.0\.1 ' | grep -q .
+  local n
+  n=$(docker logs --since "${IDLE_MIN}m" $C 2>&1 | grep 'POST /v1/' | grep -vc '\[tensorfold\] 127\.0\.0\.1 ' || true)
+  [[ "$n" == 0 ]]
 }
 echo "$(date -u +%FT%TZ) waiting for $IDLE_MIN external-idle minutes"
 until idle_once; do sleep 60; done

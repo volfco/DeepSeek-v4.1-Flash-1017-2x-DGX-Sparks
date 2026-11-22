@@ -9,7 +9,7 @@
   - dry-runs, restarts, smoke-tests, proves the image and switches on both ranks, and runs `validate.py --compare`.
 
   The evidence chain is production → `d5ecba0` (39/39, neutral) → `84806bb` (5/5, neutral). The image (`sha256:2408857…`) is present on both ranks. The image change starts a fresh spill namespace, so kept sessions go cold once. Launch it from the recipe root on the head: `setsid nohup bash runs/deploy-fnext-20261122/deploy.sh > runs/deploy-fnext-20261122/run.log 2>&1 < /dev/null &`. **Undo:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-fnext .env && ./start.sh restart`. After it passes, update `best-runtime.md`, `decisions.md` and the production lines below.
-- **Production runs the `fused-next` binary; `zig/patches/` holds the rebased equivalent, which has never run on hardware.** Building and gating an image from the recipe (a full source build on the head) is still open. It does not block the image swap. Do not `just sync-head` or restart with changed `zig/patches` until that build has been run.
+- **Once `deploy.sh` passes, production runs the `fused-next` binary, while `zig/patches/` holds the rebased equivalent, which has never run on hardware.** Building and gating an image from the recipe (a full source build on the head) is still open. It does not block the image swap. Do not `just sync-head` or restart with changed `zig/patches` until that build has been run.
 
 **State at 04:40 UTC, after the 0254–0258 pair gate:**
 
@@ -43,7 +43,7 @@ This register collects the findings for future patch decisions. GB10 is `sm_121`
 | `a_idx` (all indexer work, where 0195/0213–0217/0254/0255 live) | 2.3% | 1.9% | **repo** | Bound on what any indexer kernel can still win in decode |
 | `mix_attn` + `mix_ffn` | 2.9% | 2.2% | repo | |
 
-The fused rounds so far worked inside roughly 8% of the decode round (a_idx, parts of a_in/a_q, the compressor and the route). That is why every pair gate since November 19 has been neutral within the roughly ±0.6% control floor. A 2 µs kernel saving at seven rows across 40 layers projects to about 0.08 ms of a 42–87 ms round. Graph-on decode reads 146–162 GB/s per rank. [Bandwidth](runs/overnight-opt/RESULTS.md)
+By estimate, the fused rounds so far worked inside roughly 8% of the decode round (a_idx, parts of a_in/a_q, the compressor and the route). This is the likely reason (an estimate, not a measurement) that the fused pair gates since November 20 have landed within about ±1% of control. The exception is `suite-fused-20261121` at probe +0.76%/+0.91%; the November 19 route was a real 18–19% regression. A 2 µs kernel saving at seven rows across 40 layers projects to about 0.08 ms of a 42–87 ms round. Graph-on decode reads 146–162 GB/s per rank. [Bandwidth](runs/overnight-opt/RESULTS.md)
 
 **Per-kernel timings at served shapes (standalone GB10)**
 
@@ -63,12 +63,12 @@ The fused rounds so far worked inside roughly 8% of the decode round (a_idx, par
 
 **Instruction-level (SASS) findings.** Per-kernel counts for the `84806bb` sources are in [opcounts.txt](runs/fnext-sass-20261122/opcounts.txt).
 
-- **Duplicate `expf` in the compressor: closed, no patch needed (checked 2026-11-22).** The source calls `expf` four times on two operands. NVCC already merges them: the decode compressors `compress2x_norm128/512` each emit 2 `MUFU.EX2` per code path (two paths: PDL and non-PDL), and `compress2x` emits 2. This retires `todo.md`'s "cache the two compressor exponentials" item.
+- **Duplicate `expf` in the compressor: closed, no patch needed (checked 2026-11-22).** The source calls `expf` four times on two operands. NVCC already merges them: every `MUFU.EX2` appears in adjacent pairs, followed by the two `MUFU.RCP` of the divides. That holds in `compress2x_norm128/512` (4 = 2 × 2 bodies split at the entry `BRA.U !UP0`), `compress2x` (2), and the generic `compress2_norm_kernel` (68, its inlined `ITEMS` specialisations, still paired). This retires `todo.md`'s "cache the two compressor exponentials" item.
 - **RoPE partner shuffles:** 0242 already skips the exchange on wholly unrotated warps in the latent/key chains. `tf_ds_fused_rope_qd_kernel` (one element a thread, used below decode's largest window) still shuffles unconditionally. At HD=128/RD=64 that is 2 of 4 warps per head, one `SHFL` per element. Worth folding into any future edit of that kernel, but not a patch on its own.
 - Barrier counts: 0202 cut `fused_prompt_idx_key` from 6 to 4 and `fused_idx_key` from 5 to 3. 0209 cut LDS from 26 to 4. `tf_ds_idx_fused_kernel` carries 15 `BAR.SYNC`, 40 `SHFL` and 1 `ATOMS` (the radix histogram).
 - Shared atomics: `sm_121` already coalesces intra-warp uniform shared `atomicAdd`. On ties, 0254's extra cost is about 82–86% from 2 extra row-scan passes (+32.1 MiB, 6 barriers) and 14–18% from cross-warp single-bank contention. Warp aggregation with `__match_any_sync` would address only the second part. Cutoff-straddling −∞ rows are under 0.03% of served wall time. [0254 ties](runs/pre-bench-20261121/topk-and-patches/RESULTS.md)
 - Generated FP4 conversion uses seven dependent comparisons per element. It is a plausible contributor to the 128-row fused-query gap, with an unmeasured share. [wp3](runs/fused-next-20261121/wp3/RESULTS.md)
-- Bit-exactness rules that held: the kit's `rsqrt`/`rcp` instructions (not `sqrtf`/division) were required for the 0197 RMSNorm. Nine bf16 bytes differed until that change. Triton contracts `re = fma(xe, cs, -(xo*sn))`, and the odd element differs between torch and the kit (0252 fixed the pair query's odd element). 0206's key XORs the top bit and the kit's `_score_keys` does not. The kit `_score_keys` faults when `width % 4 != 0`. All kernels keep `LOCAL=0 STACK=0`.
+- Bit-exactness rules that held: the 0197 decode RMSNorm had to spell out the kit's approximate PTX instructions (SASS `MUFU.SQRT` then `MUFU.RCP` with range handling) instead of `sqrtf` + `__fdiv_rn`. Nine bf16 bytes differed until that change. The prompt norm keeps torch's `rsqrt` (`MUFU.RSQ`). Triton contracts `re = fma(xe, cs, -(xo*sn))`, and the odd element differs between torch and the kit (0252 fixed the pair query's odd element). 0206's key XORs the top bit and the kit's `_score_keys` does not. The kit `_score_keys` faults when `width % 4 != 0`. All kernels keep `LOCAL=0 STACK=0`.
 
 **Hardware and measurement findings**
 
@@ -84,7 +84,7 @@ No engine work past `0258` exists in any `tfref-*` checkout, so this is the next
 
 1. **Reuse fetched KV and renumbered picks between decode layers (sharded fetch mode).**
    - The served checkpoint has eight stretches of layers that share a KV source and pick set. 30 of 38 fetches are repeats, 29.53 MiB of logical payload per round at 7 rows / 512 picks.
-   - It targets the largest repo-owned decode stage (`sh_rows` + `sh_fetch`: 3.7% head, 9.8% worker).
+   - It targets the largest repo-owned decode stage (`sh_rows` + `sh_fetch`: 3.7% head, 9.8% worker). `sh_rows` runs at 0.1–0.7 GB/s, so it is the exchange's wait time, not bytes. It is marked right after `fetchDecode`'s ring send (`round.zig:1420`). Price it by exchanges saved (30 of 38 per round), not by MiB.
    - Structure confirmed in the checkpoint config (2026-11-22): `kv_source_layer_ids [2, 8, 14, 20]` and `index_source_layer_ids [2, 8, 14, 20, 24, 28, 32, 36]`. So layers 2–39 form eight stretches (2–7, 8–13, 14–19, 20–23, 24–27, 28–31, 32–35, 36–39), each sharing one KV source and one pick set, and `fetchDecode` (`round.zig:1380`) runs once per compressed layer. Next, with no restart: size `sh_fetch`/`sh_rows` with graphs on, using the `84806bb` stage trace on the idle head.
    - Invalidate on a new round, a KV update or a pick update, and keep both ranks' ring schedules identical. (`round.zig:1329–1374`, `config.zig:287–290`)
 2. **Sampled verification: exchange rank-local top-k instead of full logits.** Clients run at T=1.0, so this is on every real decode round. Each rank's collective input drops from 258,560 to 448 bytes per row (`top_k` ≤ 56). The host check matched 96 cases. Benchmark selection + exchange + draw with graphs on. (`lanes.zig:1449–1523`, `round.zig:2009–2027`)
