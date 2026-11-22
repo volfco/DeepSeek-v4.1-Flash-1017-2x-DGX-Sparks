@@ -19,12 +19,17 @@ echo "$(date -u +%T) snapshotting production env (both ranks)" >> $O/launch.log
 docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' dsv41-1017-exl3-tf > $O/production.rank0.env
 ssh -o BatchMode=yes "$W" "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' dsv41-1017-exl3-tf" > $O/production.rank1.env
 
-echo "$(date -u +%T) capturing guarded 0215 crossover timings (~2 min)" >> $O/launch.log
-if (cd ~/tf-bench/pre-bench-20261121/crossover && python3 run_timing_loop.py --cubin bin/ops.cubin --json results.json --budget-s 120) >> $O/launch.log 2>&1; then
-  rsync -a ~/tf-bench/pre-bench-20261121/crossover/results.json ~/tf-bench/pre-bench-20261121/crossover/timing.log \
-    ~/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/pre-bench-20261121/crossover-0215/ || true
+echo "$(date -u +%T) refreshing 0215 parity state (~3 s, 36 cases; timing-burst refuses without it)" >> $O/launch.log
+if (cd ~/tf-bench/pre-bench-20261121/crossover && flock ~/tf-bench/gpu.lock python3 measure.py --mode parity --cubin bin/ops.cubin --json results.json) >> $O/launch.log 2>&1; then
+  echo "$(date -u +%T) capturing guarded 0215 crossover timings (~2 min)" >> $O/launch.log
+  if (cd ~/tf-bench/pre-bench-20261121/crossover && python3 run_timing_loop.py --cubin bin/ops.cubin --json results.json --budget-s 120) >> $O/launch.log 2>&1; then
+    rsync -a ~/tf-bench/pre-bench-20261121/crossover/results.json ~/tf-bench/pre-bench-20261121/crossover/timing.log \
+      ~/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/pre-bench-20261121/crossover-0215/ || true
+  else
+    echo "$(date -u +%T) 0215 timing capture stayed busy or failed: continuing (small_nbk stays 6144)" >> $O/launch.log
+  fi
 else
-  echo "$(date -u +%T) 0215 timing capture failed or stayed busy: continuing (small_nbk stays 6144)" >> $O/launch.log
+  echo "$(date -u +%T) 0215 parity state refresh FAILED (environmental, or a byte mismatch to inspect): skipping 0215 timings, continuing to the suite" >> $O/launch.log
 fi
 
 echo "$(date -u +%T) starting suite" >> $O/launch.log

@@ -12,7 +12,7 @@ sha=$(git -C ~/Workspace/tfref-fused-next rev-parse --short 84806bb)
 [ "$sha" = "84806bb" ] || { echo "unexpected short sha $sha"; exit 1; }
 
 avail_kb=$(ssh -o BatchMode=yes "$H" "awk '/MemAvailable/{print \$2}' /proc/meminfo")
-if [ "${avail_kb:-0}" -lt 4500000 ]; then
+if [ "${avail_kb:-0}" -lt 4718592 ]; then   # 4.5 GiB in kB
   echo "head MemAvailable ${avail_kb} kB < 4.5 GiB: the image build (zig build -j4 + nvcc) needs headroom; retry when quieter"
   exit 1
 fi

@@ -22,9 +22,10 @@ Paired two-Spark gate for `todo.md` "Measure patches 0254-0258 on both Sparks": 
   audit found; cross-checked against s01's own dec8 prompts/hashes from s02 on.
 - `table2.py`: fixed_replay identity+rate table (deltas vs s01), `dec8_replay_audit compare` invocations, and
   standard-cell rate orientation.
-- `launch.sh`'s 0215 capture uses the crossover harness's real CLI (`run_timing_loop.py --cubin bin/ops.cubin
-  --json results.json --budget-s 120`; verified against the head's `~/tf-bench/pre-bench-20261121/crossover/` tree) —
-  an earlier draft's `--wait-seconds` flag did not exist and would have silently skipped the capture.
+- `launch.sh`'s 0215 capture uses the crossover harness's real CLI and refreshes the parity state first
+  (`measure.py --mode parity` writes the `cases` + `all_parity_passed` that `--mode timing-burst` requires; without
+  it the burst exits 1 and the capture would silently skip). Verified against the head's
+  `~/tf-bench/pre-bench-20261121/crossover/` tree.
 
 ## How to run (nothing runs until the operator starts it)
 
@@ -34,10 +35,11 @@ Paired two-Spark gate for `todo.md` "Measure patches 0254-0258 on both Sparks": 
    (never `just sync-head`: it would push the recipe's `zig/patches` over the head's and change the production build
    hash), and starts `launch.sh` detached on the head.
 2. `launch.sh` (head) waits for 30 external-idle minutes (12h cap), snapshots `production.rank{0,1}.env` from the
-   running containers, captures the guarded `0215` small-row crossover timings into
-   `runs/pre-bench-20261121/crossover-0215/` via `run_timing_loop.py --cubin bin/ops.cubin --json results.json
-   --budget-s 120` (~2 min; on failure or continuous traffic it continues with `small_nbk = 6144` unchanged and
-   `timing_valid: false` rather than dirty medians), then starts `start.sh`.
+   running containers, refreshes the `0215` parity state (`measure.py --mode parity`, ~3 s — `timing-burst` refuses
+   to run without `all_parity_passed` in the state JSON), then captures the guarded `0215` small-row crossover
+   timings into `runs/pre-bench-20261121/crossover-0215/` via `run_timing_loop.py --cubin bin/ops.cubin --json
+   results.json --budget-s 120` (~2 min; on failure or continuous traffic it continues with `small_nbk = 6144`
+   unchanged and `timing_valid: false` rather than dirty medians), then starts `start.sh`.
 3. `start.sh` runs `run_suite.py` detached; the runner restores production from `.env` on completion, `STOP`, any
    exception, or a non-loopback client. Per block: fresh `SPILL_DIR=/home/colum/.cache/dsv41-suite-fnext2-s0X` on
    both Sparks (cold spill namespace), arm proof, `image_ok` by running image tag.
