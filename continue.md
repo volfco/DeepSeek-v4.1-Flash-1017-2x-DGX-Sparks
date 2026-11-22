@@ -23,6 +23,13 @@
   - **Noise floor (key finding):** the r271 arms run code identical to control, so they're an A/A test. They show **±2–3% per round-time cell** (+3.02% at 32K×1). The "both test arms below both controls" rule passes by chance in ~1 of 6 cells; that likely explains k265's unreproduced −1.8%.
   - **Better round-time signal:** use the rank-0 lifetime `forward_ms` (±0.25% across 8 arms) or a replicate suite.
   - **New probe metrics:** chunk-gap p95 has a ~±0.5% arm-to-arm spread. Streamed x1 runs 129.6–129.9 tok/s at p95 45.5 ms; streamed x4 runs ≈215 tok/s at p95 71 ms.
+- **Round B2 done (`runs/sched-20261122/b2/RESULTS.md`): root cause of rank 1's wait.**
+  - **Measurement artifact:** most of k272's "rank 0 late" came from `arms.sh`'s `TF_DS_ROUND_PROFILE=1`, which only rank 0 reads; rank 1 needs `RANK1_PROFILE`. **Trace and per-rank work must set `TF_DS_ROUND_PROFILE=0`.** Arm-vs-arm comparisons in past suites stay valid.
+  - **Real residual (profile off):** rank 1 late by ≈2–5 µs a gather at 1 stream, ≈0.15 ms a round (~0.4%); balanced at 4 streams.
+  - **Cause:** the paced L2 prefetch, which saves rank 0 ~4 µs a gather more than rank 1. With `PREFETCH=0` the ranks are equal to 0.1%, but prefetch is a large net win (4.12 vs 4.34 s), so it stays on.
+  - **Head box:** 1.2–1.4% slower on small-row bf16 GEMV microbench, not clocks/config/fragmentation. It does **not** show in the engine's kernels.
+  - **nsys:** CUDA injection doesn't take effect in this engine (only OS-runtime calls were captured).
+  - **Possible next step:** a per-rank prefetch budget knob (≤0.4% at 1 stream).
 - **PRODUCTION CHANGED 21:25 UTC: image `tensorfold-dsv41:bench-fused-next-10c9866`** (`kernel-stack-0272` = `27baa93` + 0272 + 0273 + 0274 + 0275). This adopts the 0273 failed-capture join fix and the 0274 tool-call first-token fix. 0272 (`RING_TRACE`) and 0275 (`COPY_MIN`) are in the image but unset.
   - Deploy checks: exact 39/39 and sampled IDENTICAL vs `sched2/ctl1`, `tool_choice: required` + thinking returns a tool call, validate rc=0.
   - Backup: `~/dsv41-env-backups/.env.bak-20261122-pre-10c9866`.
