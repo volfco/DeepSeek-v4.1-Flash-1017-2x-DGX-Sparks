@@ -1,0 +1,10 @@
+# kernel round 0265/0266/0268 on one stacked image (5ec7aba = recipe-0264 + 0265 + 0266 + 0268), production env + KEPT=2.
+# ctl arms: every new switch off (must equal production bit for bit: REF/SREF are production's sched2 ctl1).
+ctl1|tensorfold-dsv41:bench-fused-next-5ec7aba|
+h265a|tensorfold-dsv41:bench-fused-next-5ec7aba|TF_DS_DRAFT_HEAD_SCORED=1
+p266a|tensorfold-dsv41:bench-fused-next-5ec7aba|TF_DS_COMPRESS2_PAIR_ONCE=1
+q268a|tensorfold-dsv41:bench-fused-next-5ec7aba|TF_DS_DRAFT_QKV_NORM=1
+ctl2|tensorfold-dsv41:bench-fused-next-5ec7aba|
+q268b|tensorfold-dsv41:bench-fused-next-5ec7aba|TF_DS_DRAFT_QKV_NORM=1
+p266b|tensorfold-dsv41:bench-fused-next-5ec7aba|TF_DS_COMPRESS2_PAIR_ONCE=1
+h265b|tensorfold-dsv41:bench-fused-next-5ec7aba|TF_DS_DRAFT_HEAD_SCORED=1
