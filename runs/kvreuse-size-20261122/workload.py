@@ -18,12 +18,19 @@ STREAMS = [1, 4]
 MAX_TOKENS = 320
 ASK = "\n\nSummarize the document above in detail, section by section, in plain prose."
 
-files = sorted(glob.glob("runs/**/RESULTS.md", recursive=True)) + sorted(glob.glob("docs/*.md"))
-corpus_ids = []
-for f in files:
-    corpus_ids += TOK.encode(open(f, errors="replace").read()).ids
-    if len(corpus_ids) > max(DEPTHS) * 5:
-        break
+# WORKLOAD_CORPUS (a JSON list of token ids): a frozen corpus. Without it the corpus is rebuilt from the repo's
+# RESULTS.md files, which change as runs are recorded - prompts (and so draft acceptance and rounds a cell) then differ
+# between suites; compare round times across suites only on a frozen corpus.
+import os
+if os.environ.get("WORKLOAD_CORPUS"):
+    corpus_ids = json.load(open(os.environ["WORKLOAD_CORPUS"]))
+else:
+    files = sorted(glob.glob("runs/**/RESULTS.md", recursive=True)) + sorted(glob.glob("docs/*.md"))
+    corpus_ids = []
+    for f in files:
+        corpus_ids += TOK.encode(open(f, errors="replace").read()).ids
+        if len(corpus_ids) > max(DEPTHS) * 5:
+            break
 
 
 def prompt(depth, salt):

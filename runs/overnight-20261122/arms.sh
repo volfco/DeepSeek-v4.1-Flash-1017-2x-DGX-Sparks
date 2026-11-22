@@ -20,6 +20,7 @@ mkdir -p "$OUT"
 C=dsv41-1017-exl3-tf
 worker=$(grep -m1 '^WORKER=' .env | cut -d= -f2-)
 export PATH="$HOME/.local/bin:$PATH" HF_HUB_OFFLINE=1
+export WORKLOAD_CORPUS=${WORKLOAD_CORPUS:-runs/overnight-20261122/corpus.json}   # frozen (see workload.py)
 insp() { if [[ $1 == 0 ]]; then bash -c "$2" < /dev/null; else ssh -n -o BatchMode=yes "$worker" "$2"; fi; }
 prod_img=$(grep -m1 '^IMAGE=' .env | cut -d= -f2-)
 echo "$(date -u +%FT%TZ) production image $prod_img; ref=${REF:-<first arm>}"

@@ -1,0 +1,85 @@
+2026-11-22T08:50:04Z production image tensorfold-dsv41:bench-fused-next-69335b8; ref=runs/kvreuse-ab-20261122/off1.exact.json
+2026-11-22T08:50:04Z arm base1 image=tensorfold-dsv41:bench-fused-next-864d32f env=[]
+  exact record rc=0
+  exact vs ref rc=0 RESULT: IDENTICAL (0 problem(s), 39 cases)
+  base1 waves [[(1, '147aeda9', 160), (5, 'f411a212', 160), (20, '70266177', 160), (56, '3a5ffbb3', 160)], [(3, '19db3fe7', 160), (8, 'bc076437', 160), (40, '41a3b634', 160), (56, '5c14b7ca', 160)], [(20, '8285796b', 160), (20, '3ead00fb', 160), (20, '298c1635', 160), (20, '0df2250c', 160)]]
+  {"depth": 4096, "streams": 1, "wall_s": 5.02} {"forward_ms_per_round": 33.307, "profile_rounds": 98}
+  {"depth": 4096, "streams": 4, "wall_s": 14.94} {"forward_ms_per_round": 54.406, "profile_rounds": 157}
+  {"depth": 32768, "streams": 1, "wall_s": 5.59} {"forward_ms_per_round": 32.422, "profile_rounds": 114}
+  {"depth": 32768, "streams": 4, "wall_s": 14.58} {"forward_ms_per_round": 61.917, "profile_rounds": 129}
+  {"depth": 131072, "streams": 1, "wall_s": 6.09} {"forward_ms_per_round": 32.636, "profile_rounds": 124}
+  {"depth": 131072, "streams": 4, "wall_s": 15.81} {"forward_ms_per_round": 57.208, "profile_rounds": 153}
+  done runs/overnight-20261122/k260-gate/base1.json
+  rank0 banners: 1 errors: 0
+  rank1 banners: 1 errors: 0
+2026-11-22T09:00:46Z arm conf1 image=tensorfold-dsv41:bench-fused-next-864d32f env=[TF_DS_CONF_PACK=1]
+  exact record rc=0
+  exact vs ref rc=0 RESULT: IDENTICAL (0 problem(s), 39 cases)
+  sampled vs ref: IDENTICAL
+  {"depth": 4096, "streams": 1, "wall_s": 5.04} {"forward_ms_per_round": 33.495, "profile_rounds": 98}
+  {"depth": 4096, "streams": 4, "wall_s": 15.12} {"forward_ms_per_round": 54.719, "profile_rounds": 159}
+  {"depth": 32768, "streams": 1, "wall_s": 5.6} {"forward_ms_per_round": 32.69, "profile_rounds": 114}
+  {"depth": 32768, "streams": 4, "wall_s": 14.51} {"forward_ms_per_round": 62.661, "profile_rounds": 127}
+  {"depth": 131072, "streams": 1, "wall_s": 6.09} {"forward_ms_per_round": 32.668, "profile_rounds": 124}
+  {"depth": 131072, "streams": 4, "wall_s": 15.86} {"forward_ms_per_round": 57.67, "profile_rounds": 153}
+  done runs/overnight-20261122/k260-gate/conf1.json
+  rank0 banners: 1 errors: 0
+  rank1 banners: 1 errors: 0
+2026-11-22T09:06:01Z arm merge1 image=tensorfold-dsv41:bench-fused-next-864d32f env=[TF_DS_TOPK_MERGE=1]
+  exact record rc=0
+  exact vs ref rc=0 RESULT: IDENTICAL (0 problem(s), 39 cases)
+  sampled vs ref: IDENTICAL
+  {"depth": 4096, "streams": 1, "wall_s": 5.04} {"forward_ms_per_round": 33.505, "profile_rounds": 98}
+  {"depth": 4096, "streams": 4, "wall_s": 15.09} {"forward_ms_per_round": 54.336, "profile_rounds": 160}
+  {"depth": 32768, "streams": 1, "wall_s": 5.58} {"forward_ms_per_round": 32.528, "profile_rounds": 114}
+  {"depth": 32768, "streams": 4, "wall_s": 14.6} {"forward_ms_per_round": 61.235, "profile_rounds": 131}
+  {"depth": 131072, "streams": 1, "wall_s": 6.05} {"forward_ms_per_round": 32.424, "profile_rounds": 124}
+  {"depth": 131072, "streams": 4, "wall_s": 15.69} {"forward_ms_per_round": 59.339, "profile_rounds": 146}
+  done runs/overnight-20261122/k260-gate/merge1.json
+  rank0 banners: 1 errors: 0
+  rank1 banners: 1 errors: 0
+2026-11-22T09:11:15Z arm both1 image=tensorfold-dsv41:bench-fused-next-864d32f env=[TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1]
+  exact record rc=0
+  exact vs ref rc=0 RESULT: IDENTICAL (0 problem(s), 39 cases)
+  sampled vs ref: IDENTICAL
+  {"depth": 4096, "streams": 1, "wall_s": 5.02} {"forward_ms_per_round": 33.36, "profile_rounds": 98}
+  {"depth": 4096, "streams": 4, "wall_s": 14.97} {"forward_ms_per_round": 54.758, "profile_rounds": 157}
+  {"depth": 32768, "streams": 1, "wall_s": 5.59} {"forward_ms_per_round": 32.566, "profile_rounds": 114}
+  {"depth": 32768, "streams": 4, "wall_s": 14.58} {"forward_ms_per_round": 62.01, "profile_rounds": 129}
+  {"depth": 131072, "streams": 1, "wall_s": 6.07} {"forward_ms_per_round": 32.514, "profile_rounds": 124}
+  {"depth": 131072, "streams": 4, "wall_s": 15.94} {"forward_ms_per_round": 57.042, "profile_rounds": 156}
+  done runs/overnight-20261122/k260-gate/both1.json
+  rank0 banners: 1 errors: 0
+  rank1 banners: 1 errors: 0
+2026-11-22T09:16:29Z arm both2 image=tensorfold-dsv41:bench-fused-next-864d32f env=[TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1]
+  exact record rc=0
+  exact vs ref rc=0 RESULT: IDENTICAL (0 problem(s), 39 cases)
+  sampled vs ref: IDENTICAL
+  {"depth": 4096, "streams": 1, "wall_s": 5.02} {"forward_ms_per_round": 33.321, "profile_rounds": 98}
+  {"depth": 4096, "streams": 4, "wall_s": 15.07} {"forward_ms_per_round": 54.469, "profile_rounds": 159}
+  {"depth": 32768, "streams": 1, "wall_s": 5.57} {"forward_ms_per_round": 32.482, "profile_rounds": 114}
+  {"depth": 32768, "streams": 4, "wall_s": 14.56} {"forward_ms_per_round": 61.917, "profile_rounds": 129}
+  {"depth": 131072, "streams": 1, "wall_s": 6.08} {"forward_ms_per_round": 32.565, "profile_rounds": 124}
+  {"depth": 131072, "streams": 4, "wall_s": 15.77} {"forward_ms_per_round": 57.188, "profile_rounds": 153}
+  done runs/overnight-20261122/k260-gate/both2.json
+  rank0 banners: 1 errors: 0
+  rank1 banners: 1 errors: 0
+2026-11-22T09:21:44Z arm base2 image=tensorfold-dsv41:bench-fused-next-864d32f env=[]
+  exact record rc=0
+  exact vs ref rc=0 RESULT: IDENTICAL (0 problem(s), 39 cases)
+  sampled vs ref: IDENTICAL
+  {"depth": 4096, "streams": 1, "wall_s": 5.02} {"forward_ms_per_round": 33.396, "profile_rounds": 98}
+  {"depth": 4096, "streams": 4, "wall_s": 15.04} {"forward_ms_per_round": 54.405, "profile_rounds": 159}
+  {"depth": 32768, "streams": 1, "wall_s": 5.57} {"forward_ms_per_round": 32.295, "profile_rounds": 114}
+  {"depth": 32768, "streams": 4, "wall_s": 14.6} {"forward_ms_per_round": 61.525, "profile_rounds": 130}
+  {"depth": 131072, "streams": 1, "wall_s": 6.08} {"forward_ms_per_round": 32.644, "profile_rounds": 124}
+  {"depth": 131072, "streams": 4, "wall_s": 15.72} {"forward_ms_per_round": 56.984, "profile_rounds": 152}
+  done runs/overnight-20261122/k260-gate/base2.json
+  rank0 banners: 1 errors: 0
+  rank1 banners: 1 errors: 0
+2026-11-22T09:26:58Z restore production (.env alone)
+tensorfold-dsv41:bench-fused-next-69335b8
+restored: validate rc=0
+
+all passed
+2026-11-22T09:29:26Z finished
