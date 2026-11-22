@@ -817,3 +817,20 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
   the head's `.env`. `validate.py --compare`: all passed, 8/8 saved replies. Undo:
   `cp ~/dsv41-env-backups/.env.bak-20261122-pre-kvreuse .env && ./start.sh restart`.
 - Open: export 0259 onto the rebased recipe tree (`zig/patches/`); the recipe image is still unbuilt.
+
+## 2026-11-22: production onto the recipe lineage, with 0260 `TF_DS_CONF_PACK` and 0261 `TF_DS_TOPK_MERGE`
+
+- Image `bench-fused-next-086e8cb`: `TF_REF + zig/patches 0001–0261`. The 0260/0261 one-time engagement banners are
+  folded into those patches (`recipe-0261`, tree `bfc02e5` = the image's). **Production now equals the recipe's patch
+  chain**, which `scripts/export-fnext-series.sh` verifies.
+- Evidence:
+  - `runs/overnight-20261122/recipe-gate`: the rebased tree is exact on hardware.
+  - `k260-gate`: 0260/0261 exact on the greedy and sampled panels, neutral.
+  - `lineage`: 3 ABBA pairs against the previous production; exact and sampled identical in every arm; banners on
+    both ranks; +0.30% within drift; the gate's earlier 128K × 4 +3.2% did not reproduce.
+- Decision: the operator's adopt rule (exact plus neutral-or-faster). Deployed 10:11–10:13 UTC with
+  `runs/deploy-recipe-20261122/deploy.sh` (IMAGE swap, plus `TF_DS_CONF_PACK=1` and `TF_DS_TOPK_MERGE=1`).
+  `validate.py --compare`: all passed, 8/8. Undo: `cp ~/dsv41-env-backups/.env.bak-20261122-pre-recipe .env &&
+  ./start.sh restart`.
+- Not adopted from the round: 0262 (pool scoring; its scope is ≈0.02% of prefill, and its brief's stop condition hit)
+  and 0263 (drafter KV ring batch; ≈0.02%, kit spec now pinned but parked).

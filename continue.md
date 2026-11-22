@@ -1,8 +1,10 @@
 # Continue
 
-**Current state (2026-11-22 07:15 UTC): production runs `84806bb` + 0259 `TF_DS_KV_FETCH_REUSE`; candidate 1 is done, candidate 3 is next.**
+**Current state (2026-11-22 10:15 UTC, overnight run): production runs the recipe lineage, `TF_REF + zig/patches 0001–0261`, with 0259/0260/0261 on.**
 
-- **Production: `tensorfold-dsv41:bench-fused-next-69335b8` with `TF_DS_KV_FETCH_REUSE=1`, since 07:10 UTC.** All other switches are unchanged. Smoke ok. `validate.py --compare`: all passed, 8/8 saved replies. **Undo to `84806bb`:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-kvreuse .env && ./start.sh restart`. **Undo to before today:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-fnext .env && ./start.sh restart`. [Deploy](runs/deploy-kvreuse-20261122/) · [decision](decisions.md)
+- **Production: `tensorfold-dsv41:bench-fused-next-086e8cb` since 10:13 UTC**, with `TF_DS_KV_FETCH_REUSE=1 TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1` plus the earlier switches. **It is byte-for-byte what `zig/patches/` builds** (`recipe-0261` tree `bfc02e5` = the image's source; the export chain is verified). Validated 8/8.
+- **Undo, one step:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-recipe .env && ./start.sh restart` returns to `69335b8` with 0259. Earlier steps: `.env.bak-20261122-pre-kvreuse` (`84806bb`) and `.env.bak-20261122-pre-fnext` (before today). [Lineage A/B](runs/overnight-20261122/lineage/RESULTS.md) · [decision](decisions.md)
+- **Engine source of record:** branch `recipe-0261` in `~/Workspace/tfref-fnext-rebase` (worktree of `tfref-fused-next`). Build bench images from it or its descendants with `runs/fused-next-20261121/bench/build.sh <rev>`. Patches go on top and get exported with `scripts/export-fnext-series.sh --branch <rev>`.
 - **Candidate 1 is done: bit-identical, decode rounds 1.7% shorter.**
   - Sizing found the sharded-KV fetch and exchange at 3.6–4.2% of a round, projecting 3.0–3.5%. [Sizing](runs/kvreuse-size-20261122/RESULTS.md)
   - The ABBA gate on one image: 39/39 identical in every arm, reuse engaged on both ranks, rounds −0.5 to −2.5% (mean −1.7%). [A/B](runs/kvreuse-ab-20261122/RESULTS.md)

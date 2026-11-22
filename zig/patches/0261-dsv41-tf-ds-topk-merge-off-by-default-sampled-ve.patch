@@ -1,0 +1,854 @@
+# export-fnext-series.sh: recipe-0261 @ ea0889c82ef5 over c3b3859 @ c3b3859952fd (commit ea0889c82ef5)
+# 0261 dsv41: TF_DS_TOPK_MERGE (off by default): sampled verification exchanges rank-local top-k pairs
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index 972f17b11e40ae309ad76539b3106790978c8611..89f7220b70d598ec51eb959ea1c15ec502d24dc4 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -1647,6 +1647,174 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_draw_rows_kernel(const
+     out[blockIdx.x] = sid[best];
+ }
+ 
++// TF_DS_TOPK_MERGE (topk_merge.zig): a rank's best kmax candidates a row of its own head columns, for the exchange that
++// replaces the vocabulary halves' gather in a device-drawn round. logits [rows, n] fp32 (row stride ld) is this rank's
++// head output; its column c is the whole row's col0 + c. out [rows][kmax][2] u32: the value's bits (as read: -0 and NaN
++// unchanged) and the global id, in tf_ds_draw_key order (descending), selected by tf_ds_draw_rows_kernel's radix select
++// and rank sort. Bit 31 of a row's first id says this rank's column 0 is NaN (only rank 0's is read: the whole row's
++// row[0] rule, as tf_ds_argmax_pair_kernel carries it). One block (1024 threads) a row; kmax <= 56 <= n.
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_select_kernel(const float* logits, unsigned long long ld, int n,
++                                                                             unsigned col0, int kmax, unsigned* out, int pdl) {
++    pdl_enter(pdl);
++    const float* row = logits + (unsigned long long)blockIdx.x * ld;
++    unsigned* o = out + (unsigned long long)blockIdx.x * kmax * 2;
++    __shared__ unsigned hist[256];
++    __shared__ uint64_t sel[64];
++    __shared__ unsigned count, digit, remain;
++    const int tid = threadIdx.x;
++    const unsigned k = min((unsigned)kmax, (unsigned)n);
++
++    uint64_t prefix = 0;
++    unsigned want = k;
++    for (int d = 0; d < 8; ++d) {
++        const int shift = 56 - 8 * d;
++        for (int i = tid; i < 256; i += blockDim.x) hist[i] = 0;
++        __syncthreads();
++        for (int i = tid; i < n; i += blockDim.x) {
++            const uint64_t key = tf_ds_draw_key(row[i], (int)(col0 + (unsigned)i));
++            if (d == 0 || (key >> (shift + 8)) == (prefix >> (shift + 8))) atomicAdd(&hist[(key >> shift) & 0xFF], 1u);
++        }
++        __syncthreads();
++        if (tid == 0) {
++            unsigned above = 0;
++            int b = 255;
++            for (; b > 0; --b) {
++                if (above + hist[b] >= want) break;
++                above += hist[b];
++            }
++            digit = b;
++            remain = want - above;
++        }
++        __syncthreads();
++        prefix |= uint64_t(digit) << shift;
++        want = remain;
++    }
++    // prefix is the k-th largest key (keys are unique: exactly k at or above it)
++    if (tid == 0) count = 0;
++    __syncthreads();
++    for (int i = tid; i < n; i += blockDim.x) {
++        const uint64_t key = tf_ds_draw_key(row[i], (int)(col0 + (unsigned)i));
++        if (key >= prefix) {
++            const unsigned at = atomicAdd(&count, 1u);
++            if (at < 64) sel[at] = key;
++        }
++    }
++    __syncthreads();
++    if (tid < (int)k) {
++        unsigned rank = 0;
++        for (unsigned m = 0; m < k; ++m) rank += sel[m] > sel[tid] ? 1u : 0u;
++        const unsigned id = ~uint32_t(sel[tid]);
++        o[2 * rank] = __float_as_uint(row[id - col0]);
++        o[2 * rank + 1] = id | (rank == 0 && row[0] != row[0] ? 0x80000000u : 0u);
++    }
++}
++
++// TF_DS_TOPK_MERGE: the two ranks' lists (the all-gather's rank-major pairs [2][rows][kmax][2] u32) merged into the
++// round's first kmax candidates a row, merged [rows][kmax][2], in tf_ds_draw_key order: global ids are unique, so the
++// two-list merge is exact. Rank 0's row[0] NaN flag moves to the merged first id; every other id's bit 31 is cleared.
++// shortcut: two lists (the predicate's world == 2), a generic merge would index a per-rank cursor array in local
++// memory; upgrade when a wider transport takes this exchange. A thread a row.
++extern "C" __global__ void tf_ds_topk_merge_kernel(const unsigned* pairs, int rows, int kmax, unsigned* merged, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x * blockDim.x + threadIdx.x;
++    if (r >= rows) return;
++    const unsigned* a = pairs + (long long)r * kmax * 2;
++    const unsigned* b = pairs + ((long long)rows + r) * kmax * 2;
++    unsigned* m = merged + (long long)r * kmax * 2;
++    const unsigned flag = a[1] & 0x80000000u;
++    int i = 0, j = 0;
++    for (int q = 0; q < kmax; ++q) {
++        // (kmax picks from two lists of kmax: at most one list runs out, and then the other has what is left)
++        bool take_a = j >= kmax;
++        if (i < kmax && j < kmax)
++            take_a = tf_ds_draw_key(__uint_as_float(a[2 * i]), (int)(a[2 * i + 1] & 0x7fffffffu)) >
++                     tf_ds_draw_key(__uint_as_float(b[2 * j]), (int)(b[2 * j + 1] & 0x7fffffffu));
++        const unsigned* p = take_a ? a + 2 * i : b + 2 * j;
++        m[2 * q] = p[0];
++        m[2 * q + 1] = (p[1] & 0x7fffffffu) | (q == 0 ? flag : 0u);
++        if (take_a) ++i; else ++j;
++    }
++}
++
++// TF_DS_TOPK_MERGE: a row's token from the merged candidates (merged [rows][kmax][2] u32, rules the setDraw table): a
++// greedy row takes tf_ds_block_argmax's answer for the whole row (the largest key's id; pick 0 under rank 0's row[0] NaN
++// flag), a sampled row tf_ds_draw_rows_kernel's draw over its first top_k candidates. One block (64 threads) a row.
++extern "C" __global__ void __launch_bounds__(64) tf_ds_draw_rows_topk_kernel(const unsigned* merged, int kmax,
++                                                                            const TfDsDrawRow* rules, unsigned* out, int pdl) {
++    pdl_enter(pdl);
++    const unsigned* mr = merged + (unsigned long long)blockIdx.x * kmax * 2;
++    const TfDsDrawRow rule = rules[blockIdx.x];
++    if (rule.temp <= 0.0) {
++        if (threadIdx.x == 0) out[blockIdx.x] = (mr[1] & 0x80000000u) ? 0u : mr[1];
++        return;
++    }
++    __shared__ unsigned sid[64];
++    __shared__ float val[64];
++    __shared__ double scaled[64];
++    __shared__ double score[64];
++    const int tid = threadIdx.x;
++    const unsigned k = min(rule.top_k, (unsigned)kmax);
++    if (tid < (int)k) {
++        sid[tid] = mr[2 * tid + 1] & 0x7fffffffu;
++        val[tid] = __uint_as_float(mr[2 * tid]);
++    }
++    __syncthreads();
++    // from here tf_ds_draw_rows_kernel's tail, duplicated so that hardware-qualified kernel stays untouched (row[id] is
++    // the candidate's value val[tid])
++    const double t = fmax(rule.temp, 1e-6);
++    if (tid < (int)k) {
++        const unsigned id = sid[tid];
++        scaled[tid] = double(val[tid]) / t;
++        uint64_t x = tf_ds_mix64(rule.seed + 0x9E3779B97F4A7C15ull);
++        x = tf_ds_mix64(x ^ (rule.pos * 0xD1B54A32D192ED03ull));
++        x = tf_ds_mix64(x ^ uint64_t(id));
++        const double u = double(x >> 11) * 0x1p-53 + 0x1p-54;
++        score[tid] = scaled[tid] - log(-log(u));
++    }
++    __syncthreads();
++    if (tid != 0) return;
++    const double ninf = -__longlong_as_double(0x7ff0000000000000ll);
++    if (0.0 < rule.top_p && rule.top_p < 1.0) {
++        double mx = scaled[0];
++        for (unsigned j = 1; j < k; ++j) mx = fmax(mx, scaled[j]);
++        double probs[64];
++        for (unsigned j = 0; j < k; ++j) probs[j] = exp(scaled[j] - mx);
++        // numpy's pairwise sum of k <= 56 values (sampling.pairwiseSum)
++        double sum;
++        if (k < 8) {
++            sum = 0.0;
++            for (unsigned j = 0; j < k; ++j) sum += probs[j];
++        } else {
++            double r[8];
++            for (int j = 0; j < 8; ++j) r[j] = probs[j];
++            unsigned i = 8;
++            for (; i < k - k % 8; i += 8) {
++                for (int j = 0; j < 8; ++j) r[j] += probs[i + j];
++            }
++            sum = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
++            for (; i < k; ++i) sum += probs[i];
++        }
++        double acc = 0.0;
++        unsigned below = 0;
++        for (unsigned j = 0; j < k; ++j) {
++            acc += probs[j] / sum;
++            if (acc < rule.top_p) below += 1;
++        }
++        for (unsigned j = below + 1; j < k; ++j) score[j] = ninf;
++    }
++    if (rule.min_p > 0.0) {
++        const double floor_ = scaled[0] + log(rule.min_p);
++        for (unsigned j = 0; j < k; ++j) {
++            if (scaled[j] < floor_) score[j] = ninf;
++        }
++    }
++    unsigned best = 0;
++    for (unsigned j = 0; j < k; ++j) {
++        if (score[j] > score[best]) best = j;
++    }
++    out[blockIdx.x] = sid[best];
++}
++
+ // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the round's picked experts counted per layer (hist [layers, experts] u32 on the
+ // device), for the prefetch's hot set. Counts only: invisible to every output. The count comes from the decode
+ // scratch (decode_prep's ids/count), so the launch rides after it on the same stream.
+diff --git a/zig/src/families/dsv41/dsv41.zig b/zig/src/families/dsv41/dsv41.zig
+index 97fa83b7923342961c3d0ee42fae4ca173b5a038..6f84f11315e39fcc0dbad9ee6c0c701d10d2a015 100644
+--- a/zig/src/families/dsv41/dsv41.zig
++++ b/zig/src/families/dsv41/dsv41.zig
+@@ -57,6 +57,7 @@ pub const idx_fused = @import("idx_fused.zig");
+ pub const compress2_norm = @import("compress2_norm.zig");
+ pub const rope_store = @import("rope_store.zig");
+ pub const conf_pack = @import("conf_pack.zig");
++pub const topk_merge = @import("topk_merge.zig");
+ pub const fused_trace = @import("fused_trace.zig");
+ pub const lanes = @import("lanes.zig");
+ pub const pool = @import("pool.zig");
+@@ -122,6 +123,7 @@ test {
+     refAll(compress2_norm);
+     refAll(rope_store);
+     refAll(conf_pack);
++    refAll(topk_merge);
+     refAll(fused_trace);
+     refAll(lanes);
+     refAll(pool);
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 1b7b917c712108b3a86f9109296d954369ec23cc..1b71a4b247a0211031f62b3b4bbc28e6ed20e47d 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -22,6 +22,7 @@ const round = @import("round.zig");
+ const draft = @import("draft.zig");
+ const ops = @import("ops.zig");
+ const sampling = @import("sampling.zig");
++const topk_merge = @import("topk_merge.zig");
+ const link = @import("link.zig");
+ const cuda = @import("cuda");
+ const spill_tier = @import("spill_tier.zig");
+@@ -1462,9 +1463,17 @@ fn chunkRows(start: usize, len: usize) usize {
+         // (value, index) a row instead of the vocabulary halves; the round decides, so the stretch's graph carries it
+         m.rd.map = m.argmax_map and sampling.argmaxMapWorks(m.eng.world, m.two != null, path);
+         defer m.rd.map = false;
++        // TF_DS_TOPK_MERGE: a device-drawn round's head exchanges each rank's best kmax candidates a row (kmax the
++        // round's largest sampled top_k), decided here so the frame carries it to the follower and the graph key
++        var kmax: usize = 0;
++        for (windows) |w| if (w.stream.sampling) |sm| {
++            kmax = topk_merge.addRow(kmax, sm.temperature, sm.top_k);
++        };
++        m.rd.topk = if (topk_merge.works(m.ops.topk_merge, path, m.eng.world, m.two != null, false, m.vocab, m.eng.w.head.n, kmax)) @intCast(kmax) else 0;
++        defer m.rd.topk = 0;
+         const t0 = m.now();
+         if (try self.begin(.verify)) {
+-            try self.wire.int(gpa, u32, @as(u32, @intCast(windows.len)) | (@as(u32, @intFromBool(m.rd.map)) << 31));
++            try self.wire.int(gpa, u32, @as(u32, @intCast(windows.len)) | (@as(u32, m.rd.topk) << topk_merge.header_shift) | (@as(u32, @intFromBool(m.rd.map)) << 31));
+             for (wins[0..windows.len]) |w| try writeWin(&self.wire, gpa, w, self.kv != null);
+             try self.flush();
+         }
+@@ -1522,6 +1531,7 @@ fn chunkRows(start: usize, len: usize) usize {
+         defer m.draw_rows = 0;
+         const tokens: []const u32 = if (path == .host_draw) &.{} else try m.roundArgmax(n_rows);
+         m.rd.map = false; // (the round's own; the next one decides again)
++        m.rd.topk = 0;
+         // TF_DS_DEVICE_ACCEPT: the keeps ride the amax buffer right after the picks (roundArgmax memcpy'd them out)
+         if (accept_n != 0) {
+             for (0..accept_n) |k| out[k].device_keep = m.amax_host[n_rows + k];
+@@ -2609,10 +2619,11 @@ pub fn followWith(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower) !vo
+     return followPair(gpa, m, spill, null);
+ }
+ 
+-/// Both-rank switches: bit 0 exact resume, bit 1 speculative sampling, bit 2 BF16 prompt partials.
++/// Both-rank switches: bit 0 exact resume, bit 1 speculative sampling, bit 2 BF16 prompt partials, bit 3
++/// TF_DS_TOPK_MERGE (the head's exchange).
+ fn pairSwitches(m: *const Model) u8 {
+     return @as(u8, @intFromBool(m.exact_resume)) | (@as(u8, @intFromBool(m.ops.spec)) << 1) |
+-        (@as(u8, @intFromBool(m.eng.bf16_partials)) << 2);
++        (@as(u8, @intFromBool(m.eng.bf16_partials)) << 2) | (@as(u8, @intFromBool(m.ops.topk_merge)) << 3);
+ }
+ 
+ /// followWith, with `fx` for the pair's one rank_wire Follower's hello instead of its default: the spill side's full
+@@ -2697,7 +2708,7 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+         };
+         // Rank 0 sends its bits first when any pair switch is on (Lanes.sendSwitches).
+         if (kind != .switches and !switches_seen and own_switches != 0) {
+-            std.log.err("dsv41: this rank runs TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE/TF_DS_BF16_PARTIALS ({d}) and rank 0 sent no switches: set them alike on every rank", .{own_switches});
++            std.log.err("dsv41: this rank runs TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE/TF_DS_BF16_PARTIALS/TF_DS_TOPK_MERGE ({d}) and rank 0 sent no switches: set them alike on every rank", .{own_switches});
+             return error.PairSwitchesDiffer;
+         }
+         switches_seen = true;
+@@ -2764,7 +2775,11 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+                 m.rd.map = header >> 31 != 0;
+                 if (m.rd.map and !m.argmax_map) return error.BadFrame;
+                 defer m.rd.map = false;
+-                const nw = header & 0x7fffffff;
++                // TF_DS_TOPK_MERGE: rank 0's kmax for this round's head (0: the logits' gather)
++                if (!topk_merge.headerOk(header, m.ops.topk_merge)) return error.BadFrame;
++                m.rd.topk = @intCast(topk_merge.headerK(header));
++                defer m.rd.topk = 0;
++                const nw = topk_merge.headerWindows(header);
+                 if (nw == 0 or nw > max_streams) return error.BadFrame;
+                 var wins: [max_streams]Win = undefined;
+                 for (0..nw) |k| {
+@@ -2928,7 +2943,7 @@ pub fn followPair(gpa: std.mem.Allocator, m: *Model, spill: ?*SpillFollower, fx:
+             .switches => {
+                 const theirs = try r.int(u8);
+                 if (theirs != own_switches) {
+-                    std.log.err("dsv41: rank 0's TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE/TF_DS_BF16_PARTIALS bits ({d}) differ from this rank's ({d}): set them alike on every rank", .{ theirs, own_switches });
++                    std.log.err("dsv41: rank 0's TF_DS_EXACT_RESUME/TF_DS_SPEC_SAMPLE/TF_DS_BF16_PARTIALS/TF_DS_TOPK_MERGE bits ({d}) differ from this rank's ({d}): set them alike on every rank", .{ theirs, own_switches });
+                     return error.PairSwitchesDiffer;
+                 }
+             },
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index d809dee6477852e4ae656dd545545290d0d08b83..3863f977f6ed14321b67b5e38e6b6c4884ba922c 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -36,6 +36,7 @@ const shard_ops = @import("shard_ops.zig");
+ const prompt_rows = @import("prompt_rows.zig");
+ const expert_prune = @import("expert_prune.zig");
+ const prefill_prof = @import("prefill_prof.zig");
++const topk_merge = @import("topk_merge.zig");
+ 
+ /// The served prompt chunk (TF_DS_PREFILL_CHUNK): a prompt runs in chunks that start at its multiples.
+ pub const chunk_rows = 2048;
+@@ -212,6 +213,7 @@ pub const Model = struct {
+     amax: u64, // u32 [round.max_rows + max_streams]: a round's greedy tokens on the device (roundArgmax), then each window's keep (TF_DS_DEVICE_ACCEPT)
+     amax_host: [round.max_rows + max_streams]u32 = undefined,
+     draw_tab: u64 = 0, // ops.DrawRow [round.max_rows] (TF_DS_T27_DEVICE_DRAW; 0: off)
++    topk_merged: u64 = 0, // TF_DS_TOPK_MERGE (0: off): the round's merged candidates [round.max_rows][kmax][2] u32
+     triage: ?f64 = null, // 0177 (TF_DS_DRAFT_TRIAGE): the conf rule's survival threshold (null: off)
+     hot_k: ?u8 = null, // 0179 (TF_DS_EXPERT_HOT_CACHE=hot:<n>): the prefetch's hot experts a layer (null: off)
+     hot_age: u32 = 0, // rounds since the hot plan was rebuilt (32: the first round rebuilds)
+@@ -524,6 +526,11 @@ pub const Model = struct {
+         m.amax = try m.arena.take((round.max_rows + max_streams) * 4);
+         m.accept_tab = try m.arena.take(max_streams * 8); // [row0 ..][wrows ..] u32 each, the wrows half nwin * 4 bytes in
+         m.draw_tab = if (m.ops.draw_rows != null) try m.arena.take(round.max_rows * @sizeOf(ops_mod.DrawRow)) else 0;
++        if (m.ops.topk_merge) {
++            // TF_DS_TOPK_MERGE: the ranks' pairs (the head's exchange) and their merge, at the largest kmax
++            m.rd.tpairs = try m.arena.take(m.world * round.max_rows * topk_merge.max_k * 8);
++            m.topk_merged = try m.arena.take(round.max_rows * topk_merge.max_k * 8);
++        }
+         if (m.hot_k) |k| {
+             // 0179 (TF_DS_EXPERT_HOT_CACHE=hot): the picked-experts histogram (zeroed at open) and the prefetch plan
+             // (the model's lifetime, as the weights' named entries)
+@@ -1896,6 +1903,10 @@ pub const Model = struct {
+         }
+         if (m.draw_rows == 0) return m.ops.argmaxRows(m.stream, m.rd.logits, m.vocab, m.vocab, R, m.amax);
+         if (R != m.draw_rows) return error.BadRound;
++        if (m.rd.topk != 0) { // TF_DS_TOPK_MERGE: the head exchanged the ranks' candidates; merge them, then draw
++            try m.ops.topkMerge(m.stream, m.rd.tpairs, R, m.rd.topk, m.topk_merged);
++            return m.ops.drawTopk(m.stream, m.topk_merged, m.rd.topk, R, m.draw_tab, m.amax);
++        }
+         try m.ops.drawRows(m.stream, m.rd.logits, m.vocab, m.vocab, R, m.draw_tab, m.amax);
+     }
+ 
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index b8be9c7a119eb31ccb7053fb97c710938e6e0a6d..b8dff45fa7ab0b10a494d26dcc019d27df8490a5 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -900,7 +900,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+         error.BadRoundRows => "TF_DS_ROUND_ROWS: a round's rows at most, 16 .. 48",
+         error.SpecAndKeyedDraft => ops_mod.spec_keyed_why,
+         error.SpecSampleWorld => "TF_DS_SPEC_SAMPLE runs on the TP2 pair (or one rank) with the drafter on: not on the four-node lane or a 2D drafter head; unset it",
+-        error.PairSwitchesDiffer => "TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE / TF_DS_BF16_PARTIALS differ between the ranks: set them alike on every rank",
++        error.PairSwitchesDiffer => "TF_DS_EXACT_RESUME / TF_DS_SPEC_SAMPLE / TF_DS_BF16_PARTIALS / TF_DS_TOPK_MERGE differ between the ranks: set them alike on every rank",
+         error.BadGraphCap => "TF_DS_GRAPH_CAP: the captured CUDA graphs kept at most, a count (0: all)",
+         error.BadPlainRows => "TF_DS_PLAIN_ROWS: the rows a mixed pack's plain linear runs over, 0 (the round's own) or a count up to TF_DS_ROUND_ROWS",
+         error.BadStreams => "TF_DS_STREAMS: the pool's streams, 1 .. 16",
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 2a252d8bb34767a4bfaa2f327281aa61823d7c1c..73ead1707acca17dbc416b4912f5023805c77f29 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -12,6 +12,7 @@ const fused_trace = @import("fused_trace.zig");
+ const compress2_norm = @import("compress2_norm.zig");
+ const rope_store = @import("rope_store.zig");
+ const conf_pack = @import("conf_pack.zig");
++const topk_merge = @import("topk_merge.zig");
+ 
+ /// launch_shape.h's tf_launch_blocks: a block a `threads` elements, at most 65535.
+ fn blocks(count: usize, threads: usize) u32 {
+@@ -148,6 +149,10 @@ pub const Ops = struct {
+     pdl: bool = false, // TF_DS_PDL
+     topk_fast: bool = false, // TF_DS_TOPK_FAST
+     draw_rows: ?cuda.Function = null, // TF_DS_T27_DEVICE_DRAW, looked up only when on
++    topk_merge: bool = false, // TF_DS_TOPK_MERGE, read at load; off by default
++    topk_select_fn: ?cuda.Function = null, // TF_DS_TOPK_MERGE: the three kernels, looked up only when the switch is on
++    topk_merge_fn: ?cuda.Function = null,
++    draw_topk_fn: ?cuda.Function = null,
+     lora_add: ?cuda.Function = null, // TF_DS_LORA: the adapter epilogue's add, looked up only when on
+ 
+     /// The three images (cuda.kernels.torch_pointwise, torch_movement and dsv41_ops, or the fatbins' bytes).
+@@ -169,6 +174,7 @@ pub const Ops = struct {
+         const compress2_norm_on = try compress2_norm.fromText(envSpan(compress2_norm.env_name));
+         const rope_store_on = try rope_store.fromText(envSpan(rope_store.env_name));
+         const conf_pack_on = try conf_pack.fromText(envSpan(conf_pack.env_name));
++        const topk_merge_on = try topk_merge.fromText(envSpan(topk_merge.env_name));
+         const pdl = onValue(envSpan(pdl_env));
+         const topk_fast = onValue(envSpan(topk_fast_env));
+         const o: Ops = .{
+@@ -223,6 +229,10 @@ pub const Ops = struct {
+             .pdl = pdl,
+             .topk_fast = topk_fast,
+             .draw_rows = if (envOn(draw_env)) try fm.function("tf_ds_draw_rows_kernel") else null,
++            .topk_merge = topk_merge_on,
++            .topk_select_fn = if (topk_merge_on) try fm.function("tf_ds_topk_select_kernel") else null,
++            .topk_merge_fn = if (topk_merge_on) try fm.function("tf_ds_topk_merge_kernel") else null,
++            .draw_topk_fn = if (topk_merge_on) try fm.function("tf_ds_draw_rows_topk_kernel") else null,
+             .lora_add = if (loraOn()) try fm.function("tf_ds_add_bf16_kernel") else null,
+         };
+         // the fused pool's maxima are dynamic shared memory: past 48 KiB each kernel opts in (max_nbk blocks of fp32)
+@@ -709,6 +719,52 @@ pub const Ops = struct {
+ 
+     /// dst row i = src row idx[i] (int64 indices, rows of `bytes` bytes); an index outside [0, src_rows) sets the
+     /// caller's zeroed uint32 flag `invalid` and leaves that row as it was.
++    /// TF_DS_TOPK_MERGE: this rank's best kmax (value bits, global id) pairs a row of its head columns `logits` [rows, n]
++    /// (row stride ld; column c is the whole row's col0 + c) into out [rows][kmax][2] u32, in tf_ds_draw_key order
++    /// (tf_ds_topk_select_kernel). Only called when the switch is on and topk_merge.works agreed (kmax <= 56 <= n).
++    pub fn topkSelect(o: *const Ops, s: cuda.Stream, logits: u64, ld: usize, n: usize, rows: usize, col0: usize, kmax: usize, out: u64) !void {
++        const f = o.topk_select_fn orelse return error.TopkMergeUnavailable;
++        if (rows == 0) return;
++        if (kmax == 0 or kmax > topk_merge.max_k or kmax > n) return error.BadTopK;
++        var a: cuda.Args = .{};
++        a.add(logits);
++        a.add(@as(c_ulonglong, @intCast(ld)));
++        a.add(@as(c_int, @intCast(n)));
++        a.add(@as(c_uint, @intCast(col0)));
++        a.add(@as(c_int, @intCast(kmax)));
++        a.add(out);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, f, s, rows, 1024, &a);
++    }
++
++    /// TF_DS_TOPK_MERGE: the two ranks' pairs [2][rows][kmax][2] (the all-gather's rank order) into the round's first
++    /// kmax candidates a row, merged [rows][kmax][2] (tf_ds_topk_merge_kernel, a thread a row).
++    pub fn topkMerge(o: *const Ops, s: cuda.Stream, pairs: u64, rows: usize, kmax: usize, merged: u64) !void {
++        const f = o.topk_merge_fn orelse return error.TopkMergeUnavailable;
++        if (rows == 0) return;
++        var a: cuda.Args = .{};
++        a.add(pairs);
++        a.add(@as(c_int, @intCast(rows)));
++        a.add(@as(c_int, @intCast(kmax)));
++        a.add(merged);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, f, s, blocks(rows, 64), 64, &a);
++    }
++
++    /// TF_DS_TOPK_MERGE: the round's tokens from the merged candidates under the setDraw table `rules` into out [rows]
++    /// u32 (tf_ds_draw_rows_topk_kernel: tf_ds_draw_rows_kernel's answers over the whole rows).
++    pub fn drawTopk(o: *const Ops, s: cuda.Stream, merged: u64, kmax: usize, rows: usize, rules: u64, out: u64) !void {
++        const f = o.draw_topk_fn orelse return error.TopkMergeUnavailable;
++        if (rows == 0) return;
++        var a: cuda.Args = .{};
++        a.add(merged);
++        a.add(@as(c_int, @intCast(kmax)));
++        a.add(rules);
++        a.add(out);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try go(o, f, s, rows, 64, &a);
++    }
++
+     /// TF_DS_CONF_PACK: the confidence head's input conf_in fp32 [streams * steps, d + rank] in one launch
+     /// (tf_ds_conf_pack_kernel; conf_pack.pack is its host reference): xc's first `steps` block rows of each stream
+     /// (n a stream) widened, then the markov_embed rows of the tokens ids[i * (steps + 1) + s] widened and gathered
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 419f41453a523f5054d88bb195cead7423496a84..003f9a703a933751e33fb9b1c55f1be6c0d92bbc 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -294,6 +294,11 @@ pub const Round = struct {
+     // reduce over them; amap holds them, [R, world, 2] u32 in rank order.
+     map: bool = false,
+     amap: u64,
++    // TF_DS_TOPK_MERGE: `topk` is this round's kmax when its head exchanges each rank's best kmax (value, id) pairs a
++    // row instead of its columns (0: the logits' gather; the caller sets it before the forward, as `map`); tpairs holds
++    // them, [world][R][topk][2] u32 in rank order (Model allocates it under the switch; 0 otherwise)
++    topk: u8 = 0,
++    tpairs: u64 = 0,
+     taps: u64, // bf16 [R, taps * D]
+     // wo_a's suh concatenated a layer (wo_a_rot: torch.cat of the slices' suh, cached on the layer)
+     wo_suh: []u64,
+@@ -562,6 +567,8 @@ pub const Round = struct {
+         rd.logits = try a.take(R * e.world * hh * 4);
+         rd.amap = try a.take(R * e.world * 8); // (TF_DS_GREEDY_ARGMAX: pairs, tiny; allocated either way)
+         rd.map = false;
++        rd.topk = 0; // (TF_DS_TOPK_MERGE: off until a round's caller sets it; Model allocates tpairs under the switch)
++        rd.tpairs = 0;
+         rd.taps = try a.take(R * @max(c.dspark_taps.slice().len, 1) * d * 2);
+         // wo_a_rot's suh: the slices' suh one after another (torch.cat's bytes)
+         rd.wo_suh = try gpa.alloc(u64, w.layers.len);
+@@ -1429,6 +1436,7 @@ pub const FetchKey = struct {
+ };
+ 
+ var reuse_noted = std.atomic.Value(bool).init(false);
++var topk_merge_noted = std.atomic.Value(bool).init(false);
+ 
+ /// TF_DS_KV_FETCH_REUSE=1 turns the reuse on (unset, empty or anything else: off, the reference schedule).
+ pub fn fetchReuseOn() bool {
+@@ -1838,7 +1846,9 @@ pub const Graphs = struct {
+     lru: graph_cache.Lru(Key, Entry),
+ 
+     // mode: the round's shard.Mode (auto's choice); map: TF_DS_GREEDY_ARGMAX's head (the exchange, not the logits' gather)
+-    pub const Key = struct { rows: u32, bucket: u64, stretch: u32, mode: u8 = 0, map: u8 = 0 };
++    // topk: TF_DS_TOPK_MERGE's kmax on the stretch that runs the head (the select's argument and the exchange's size;
++    // 0 elsewhere, whose launches it does not change)
++    pub const Key = struct { rows: u32, bucket: u64, stretch: u32, mode: u8 = 0, map: u8 = 0, topk: u8 = 0 };
+     const Entry = struct { exec: cuda.graph.Exec, start: Carry, end: Carry };
+ 
+     pub fn init(gpa: std.mem.Allocator, cap: usize) Graphs {
+@@ -1969,7 +1979,7 @@ pub fn forward(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches
+         }
+         try rd.clock(e, Round.clock_wait);
+         if (graphs) |g| {
+-            try g.run(.{ .rows = @intCast(R), .bucket = rd.bucket, .stretch = sn, .mode = @intFromEnum(rd.smode), .map = @intFromBool(rd.map) }, e, rd, ch, cs, rings, &cy, li, end);
++            try g.run(.{ .rows = @intCast(R), .bucket = rd.bucket, .stretch = sn, .mode = @intFromEnum(rd.smode), .map = @intFromBool(rd.map), .topk = if (end == w.layers.len) rd.topk else 0 }, e, rd, ch, cs, rings, &cy, li, end);
+         } else try stretch(e, rd, ch, cs, rings, &cy, li, end, probe);
+         try rd.clock(e, Round.clock_tail);
+         if (!ahead) try engramAhead(e, eh orelse return error.NoEngramTables, seq, rows, &ah);
+@@ -2081,6 +2091,17 @@ fn stretch(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches, ri
+         try rd.mark(e, .head);
+         return;
+     }
++    if (rd.topk != 0 and probe == null) {
++        // TF_DS_TOPK_MERGE: a device-drawn round reads only each row's first top_k candidates, so the ranks' best kmax
++        // (value, id) pairs a row travel instead of the vocabulary halves (topk_merge.works: TP2, no 2D split, the
++        // halves the vocabulary) - an in-place all-gather of R * kmax * 8 bytes a rank; Model.launchPick merges them
++        const kmax: usize = rd.topk;
++        if (!topk_merge_noted.swap(true, .monotonic)) std.log.info("dsv41: TF_DS_TOPK_MERGE: the head exchanges each rank's best {d} pairs a row (first at {d} rows)", .{ kmax, R });
++        try e.ops.topkSelect(e.s, rd.hl, hn, hn, R, e.comm.rank * hn, kmax, rd.tpairs + e.comm.rank * R * kmax * 8);
++        try e.comm.allGatherInPlace(rd.tpairs, R * kmax * 8, e.s);
++        try rd.mark(e, .head);
++        return;
++    }
+     if (e.two) |tw| try tw.quarters(e, rd.hl, rd.hg, R, tw.hw, 4) else try e.gatherF32(rd.hl, rd.hg, R * hn);
+     try Probe.check(probe, .head_gather, w.layers.len, rd.hg);
+     for (0..e.world) |k| try e.ops.copyRows(e.s, rd.hg + k * R * hh * 4, hh * 4, rd.logits + k * hh * 4, e.world * hh * 4, hh * 4, R);
+diff --git a/zig/src/families/dsv41/sampling.zig b/zig/src/families/dsv41/sampling.zig
+index 616855add203d14708be29f4adf13c824619665b..05e98abbee9fca39af0e3a1fc3009ea8e815e197 100644
+--- a/zig/src/families/dsv41/sampling.zig
++++ b/zig/src/families/dsv41/sampling.zig
+@@ -388,7 +388,7 @@ test "top candidates by value, then id" {
+ 
+ /// A deterministic fp32 row of `n` logits for the device draw's checks: values on a 1/8 grid (many equal ones, so the
+ /// ties by id matter), a few large outliers, a spread like a trained model's top.
+-fn testRow(a: std.mem.Allocator, n: usize, seed: u64) ![]f32 {
++pub fn testRow(a: std.mem.Allocator, n: usize, seed: u64) ![]f32 {
+     var prng = std.Random.DefaultPrng.init(seed);
+     const rnd = prng.random();
+     const row = try a.alloc(f32, n);
+diff --git a/zig/src/families/dsv41/topk_merge.zig b/zig/src/families/dsv41/topk_merge.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..118a2854a6ca7c4ab93b69e99d977863c7ca59d0
+--- /dev/null
++++ b/zig/src/families/dsv41/topk_merge.zig
+@@ -0,0 +1,327 @@
++//! TF_DS_TOPK_MERGE (off by default): a TP2 verify round whose sampled rows the device draws (path .device_draw)
++//! exchanges each rank's best `kmax` (value, global id) pairs a row instead of the vocabulary halves: 448 bytes a row a
++//! rank at kmax 56 against 258,560. Pure: no cuda import. The kernels are tf_ds_topk_select_kernel (the head, both
++//! ranks, then an in-place all-gather), tf_ds_topk_merge_kernel and tf_ds_draw_rows_topk_kernel (rank 0's pick), all in
++//! dsv41_ops.cu; the launchers are Ops.topkSelect/topkMerge/drawTopk, the call sites round.zig's head, Model.launchPick
++//! and lanes.zig's verify (which decides `kmax` and carries it to the follower in the verify frame's header).
++//!
++//! Order: tf_ds_draw_key descending (the value's order-preserving bits with -0 as +0 and NaN lowest, then the lower
++//! id), which for rows without NaN is sampling.zig's (value desc, id asc). A row's draw reads only its first top_k
++//! candidates (tf_ds_draw_rows_kernel's own note), so every row takes the merged list's top_k prefix, kmax being the
++//! round's largest sampled top_k. A greedy row takes the merged top 1 with rank 0's row[0] NaN rule (tf_ds_block_argmax:
++//! pick 0), the flag riding bit 31 of rank 0's first id as in TF_DS_GREEDY_ARGMAX. A malformed switch refuses startup.
++const std = @import("std");
++const sampling = @import("sampling.zig");
++
++pub const env_name: [:0]const u8 = "TF_DS_TOPK_MERGE";
++
++/// The switch's value: unset, "" or "0" off; "1" on; anything else is a refusal to start (the message is on stderr).
++pub fn parse(text: ?[]const u8) ?bool {
++    const t = text orelse return false;
++    if (t.len == 0 or std.mem.eql(u8, t, "0")) return false;
++    if (std.mem.eql(u8, t, "1")) return true;
++    std.debug.print("{s}: expected 1 or 0\n", .{env_name});
++    return null;
++}
++
++pub fn fromText(text: ?[]const u8) error{BadTopkMerge}!bool {
++    return parse(text) orelse error.BadTopkMerge;
++}
++
++/// The largest top_k the device draw takes (sampling.deviceDrawable: top_k + margin <= max_candidates).
++pub const max_k = sampling.max_candidates - sampling.margin;
++
++/// The round's kmax as rows are added: the largest top_k of a sampled row (a greedy row's top_k is not bounded by
++/// deviceDrawable and is never read).
++pub fn addRow(kmax: usize, temperature: f64, top_k: usize) usize {
++    return if (temperature > 0) @max(kmax, top_k) else kmax;
++}
++
++/// Whether a round takes the merged exchange: the switch, a device-drawn round, the TP2 pair without the 2D split, no
++/// probe reading the full logits, kmax in 1..max_k, and the head's halves covering the vocabulary exactly (each rank's
++/// `hn` columns, global id rank * hn + column, at least kmax of them). Anything else keeps today's full gather.
++pub fn works(on: bool, path: sampling.RoundPath, world: usize, two: bool, probe: bool, vocab: usize, hn: usize, kmax: usize) bool {
++    return on and path == .device_draw and world == 2 and !two and !probe and kmax >= 1 and kmax <= max_k and world * hn == vocab and hn >= kmax;
++}
++
++/// The verify frame's header: the window count in bits 0..23, kmax in 24..29 (0: the full gather), bit 30 clear, bit 31
++/// TF_DS_GREEDY_ARGMAX's map. With kmax 0 the bytes are the header as it was.
++pub const header_shift = 24;
++pub fn headerK(header: u32) u32 {
++    return (header >> header_shift) & 0x3f;
++}
++pub fn headerWindows(header: u32) u32 {
++    return header & 0x00ffffff;
++}
++/// A follower's check of a header's kmax: zero, or in 1..max_k with its own switch on; and bit 30 clear.
++pub fn headerOk(header: u32, on: bool) bool {
++    const k = headerK(header);
++    return header & 0x40000000 == 0 and (k == 0 or (on and k <= max_k));
++}
++
++// -- host reference -------------------------------------------------------------------------------------------------
++
++/// tf_ds_draw_key: the value's order-preserving bits (-0 as +0, NaN lowest) above the inverted id.
++pub fn drawKey(v: f32, id: u32) u64 {
++    var b: u32 = @bitCast(v);
++    if (b << 1 == 0) b = 0;
++    const hi: u32 = if (std.math.isNan(v)) 0 else if (b & 0x80000000 != 0) ~b else b | 0x80000000;
++    return (@as(u64, hi) << 32) | @as(u64, 0xFFFFFFFF - id);
++}
++
++pub const Pair = struct { v: f32, id: u32 };
++
++fn keyAbove(_: void, a: Pair, b: Pair) bool {
++    return drawKey(a.v, a.id) > drawKey(b.v, b.id);
++}
++
++/// A rank's list (tf_ds_topk_select_kernel): its `shard` columns' best `kmax` by key, global ids from col0, in key
++/// order; bit 31 of the first id set when the shard's column 0 is NaN. `out` holds kmax pairs; returns how many.
++pub fn localTop(shard: []const f32, col0: u32, kmax: usize, out: []Pair) usize {
++    const k = @min(kmax, shard.len);
++    var n: usize = 0;
++    for (shard, 0..) |v, c| {
++        const p: Pair = .{ .v = v, .id = col0 + @as(u32, @intCast(c)) };
++        if (n == k and !keyAbove({}, p, out[k - 1])) continue;
++        var j: usize = if (n < k) n else k - 1;
++        while (j > 0 and keyAbove({}, p, out[j - 1])) : (j -= 1) out[j] = out[j - 1];
++        out[j] = p;
++        if (n < k) n += 1;
++    }
++    if (n > 0 and std.math.isNan(shard[0])) out[0].id |= 0x80000000;
++    return n;
++}
++
++/// tf_ds_topk_merge_kernel: two key-ordered lists to the first kmax of their union, the flag of `a`'s first id moved
++/// to the merged first id (every other id's bit 31 cleared).
++pub fn merge2(a: []const Pair, b: []const Pair, kmax: usize, out: []Pair) void {
++    const flag = a[0].id & 0x80000000;
++    var i: usize = 0;
++    var j: usize = 0;
++    for (0..kmax) |m| {
++        const pa: ?Pair = if (i < a.len) Pair{ .v = a[i].v, .id = a[i].id & 0x7fffffff } else null;
++        const pb: ?Pair = if (j < b.len) Pair{ .v = b[j].v, .id = b[j].id & 0x7fffffff } else null;
++        const take_a = pb == null or (pa != null and keyAbove({}, pa.?, pb.?));
++        out[m] = if (take_a) pa.? else pb.?;
++        if (take_a) i += 1 else j += 1;
++    }
++    out[0].id |= flag;
++}
++
++/// A greedy row's pick from the merged list: 0 under rank 0's row[0] NaN flag, else the top id.
++pub fn greedyPick(merged: []const Pair) u32 {
++    return if (merged[0].id & 0x80000000 != 0) 0 else merged[0].id;
++}
++
++extern "c" fn exp(x: f64) f64;
++extern "c" fn log(x: f64) f64;
++
++/// The served draw over the first top_k merged candidates (sampling.sampleRow's arithmetic after its topCandidates:
++/// the scaled values, the keyed Gumbel scores, top_p's pairwise-sum prefix, min_p's floor, the first best score).
++pub fn sampleCandidates(merged: []const Pair, position: u64, s: sampling.Sampling) i64 {
++    const k = @max(1, @min(s.top_k, merged.len));
++    const t = @max(s.temperature, 1e-6);
++    var scaled: [max_k]f64 = undefined;
++    var score: [max_k]f64 = undefined;
++    for (0..k) |j| {
++        const id: u64 = merged[j].id & 0x7fffffff;
++        scaled[j] = @as(f64, merged[j].v) / t;
++        score[j] = scaled[j] - log(-log(sampling.uniform(s.seed, position, id)));
++    }
++    if (0.0 < s.top_p and s.top_p < 1.0) {
++        var mx = scaled[0];
++        for (scaled[1..k]) |v| mx = @max(mx, v);
++        var probs: [max_k]f64 = undefined;
++        for (0..k) |j| probs[j] = exp(scaled[j] - mx);
++        const sum = sampling.pairwiseSum(probs[0..k]);
++        var acc: f64 = 0.0;
++        var below: usize = 0;
++        for (0..k) |j| {
++            acc += probs[j] / sum;
++            if (acc < s.top_p) below += 1;
++        }
++        for (below + 1..k) |j| score[j] = -std.math.inf(f64);
++    }
++    if (s.min_p > 0.0) {
++        const floor = scaled[0] + log(s.min_p);
++        for (0..k) |j| {
++            if (scaled[j] < floor) score[j] = -std.math.inf(f64);
++        }
++    }
++    var best: usize = 0;
++    for (0..k) |j| {
++        if (score[j] > score[best]) best = j;
++    }
++    return merged[best].id & 0x7fffffff;
++}
++
++// -- tests ----------------------------------------------------------------------------------------------------------
++
++test "switch parse, header and eligibility" {
++    try std.testing.expectEqual(@as(?bool, false), parse(null));
++    try std.testing.expectEqual(@as(?bool, false), parse("0"));
++    try std.testing.expectEqual(@as(?bool, true), parse("1"));
++    try std.testing.expectError(error.BadTopkMerge, fromText("yes"));
++    try std.testing.expectEqual(@as(usize, 56), max_k);
++    const h: u32 = 3 | (40 << header_shift) | (1 << 31);
++    try std.testing.expectEqual(@as(u32, 40), headerK(h));
++    try std.testing.expectEqual(@as(u32, 3), headerWindows(h));
++    try std.testing.expect(headerOk(h, true) and !headerOk(h, false) and headerOk(3, false));
++    try std.testing.expect(!headerOk(3 | (57 << header_shift), true) and !headerOk(3 | (1 << 30), true));
++    try std.testing.expect(works(true, .device_draw, 2, false, false, 129280, 64640, 56));
++    try std.testing.expect(!works(false, .device_draw, 2, false, false, 129280, 64640, 56));
++    try std.testing.expect(!works(true, .greedy, 2, false, false, 129280, 64640, 1)); // TF_DS_GREEDY_ARGMAX's arm
++    try std.testing.expect(!works(true, .host_draw, 2, false, false, 129280, 64640, 20)); // score streams, SPEC_SAMPLE
++    try std.testing.expect(!works(true, .device_draw, 1, false, false, 129280, 129280, 20));
++    try std.testing.expect(!works(true, .device_draw, 4, false, false, 129280, 32320, 20));
++    try std.testing.expect(!works(true, .device_draw, 2, true, false, 129280, 64640, 20)); // the four-node split
++    try std.testing.expect(!works(true, .device_draw, 2, false, true, 129280, 64640, 20)); // a probe reads the logits
++    try std.testing.expect(!works(true, .device_draw, 2, false, false, 129281, 64640, 20)); // halves not the vocabulary
++    try std.testing.expect(!works(true, .device_draw, 2, false, false, 129280, 64640, 57) and !works(true, .device_draw, 2, false, false, 129280, 64640, 0));
++    try std.testing.expectEqual(@as(usize, 20), addRow(addRow(addRow(0, 0.0, 999), 0.7, 20), 1.0, 8));
++}
++
++/// The ordered global candidates by key over the whole row (a full sort: the reference for rows with NaN).
++fn fullTop(a: std.mem.Allocator, row: []const f32, kmax: usize) ![]Pair {
++    const all = try a.alloc(Pair, row.len);
++    for (row, 0..) |v, i| all[i] = .{ .v = v, .id = @intCast(i) };
++    std.mem.sort(Pair, all, {}, keyAbove);
++    return all[0..@min(kmax, row.len)];
++}
++
++/// The two ranks' lists merged, as the device builds them (`hh` columns a rank).
++fn mergedTop(a: std.mem.Allocator, row: []const f32, hh: usize, kmax: usize) ![]Pair {
++    const l0 = try a.alloc(Pair, kmax);
++    const l1 = try a.alloc(Pair, kmax);
++    const n0 = localTop(row[0..hh], 0, kmax, l0);
++    const n1 = localTop(row[hh..], @intCast(hh), kmax, l1);
++    const out = try a.alloc(Pair, kmax);
++    merge2(l0[0..n0], l1[0..n1], kmax, out);
++    return out;
++}
++
++fn hasNan(row: []const f32) bool {
++    for (row) |v| if (std.math.isNan(v)) return true;
++    return false;
++}
++
++/// tf_ds_block_argmax over the whole row (the full path's greedy pick): pick 0 when row[0] is NaN, else the first of
++/// the largest non-NaN values.
++fn deviceArgmax(row: []const f32) u32 {
++    if (std.math.isNan(row[0])) return 0;
++    var bv = -std.math.inf(f32);
++    var bi: u32 = 0x7fffffff;
++    for (row, 0..) |v, i| {
++        if (v == v and (v > bv or (v == bv and i < bi))) {
++            bv = v;
++            bi = @intCast(i);
++        }
++    }
++    return bi;
++}
++
++/// One case: the merged list against the full sort (every row) and sampling.topCandidates (rows without NaN), each
++/// top_k <= kmax's prefix, and the greedy pick against the full row's.
++fn checkRow(a: std.mem.Allocator, row: []const f32, kmax: usize) !void {
++    const hh = row.len / 2;
++    const merged = try mergedTop(a, row, hh, kmax);
++    const want = try fullTop(a, row, kmax);
++    for (merged, want, 0..) |m, w, j| {
++        const id = if (j == 0) m.id & 0x7fffffff else m.id;
++        try std.testing.expectEqual(w.id, id);
++        try std.testing.expectEqual(@as(u32, @bitCast(w.v)), @as(u32, @bitCast(m.v)));
++    }
++    try std.testing.expectEqual(deviceArgmax(row), greedyPick(merged));
++    if (hasNan(row)) return;
++    var values: [sampling.max_candidates]f32 = undefined;
++    var ids: [sampling.max_candidates]i64 = undefined;
++    // every top_k <= kmax reads the merged prefix: the host's own top_k candidates
++    for ([_]usize{ 1, kmax / 2, kmax }) |top_k| {
++        if (top_k == 0) continue;
++        const n = sampling.topCandidates(row, top_k, &values, &ids);
++        for (0..n) |j| {
++            try std.testing.expectEqual(ids[j], @as(i64, merged[j].id & 0x7fffffff));
++            try std.testing.expectEqual(@as(u32, @bitCast(values[j])), @as(u32, @bitCast(merged[j].v)));
++        }
++    }
++}
++
++test "merged rank-local candidates equal the global candidates over 96+ cases" {
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var prng = std.Random.DefaultPrng.init(0x261);
++    const rnd = prng.random();
++    const inf = std.math.inf(f32);
++    const nan = std.math.nan(f32);
++    var cases: usize = 0;
++    // fuzz rows (sampling.testRow: a 1/8 grid, many ties, outliers), k = 1..56
++    for (1..max_k + 1) |kmax| {
++        const row = try sampling.testRow(a, 2 * (64 + kmax * 3), 0x2610 + kmax);
++        try checkRow(a, row, kmax);
++        cases += 1;
++    }
++    // cross-rank ties at the cutoff: equal values straddling kmax, split across the halves (the lower id must win)
++    for ([_]usize{ 1, 7, 20, 56 }) |kmax| {
++        const hh = 128;
++        const row = try a.alloc(f32, 2 * hh);
++        for (row) |*v| v.* = -1.0;
++        // kmax - 1 clear winners on rank 1, then a block of ties on both ranks at the cutoff
++        for (0..kmax - 1) |j| row[hh + j] = 10.0 + @as(f32, @floatFromInt(j));
++        for (0..8) |j| {
++            row[hh - 1 - j] = 3.0; // rank 0's high columns
++            row[hh + 64 + j] = 3.0; // rank 1's
++        }
++        try checkRow(a, row, kmax);
++        // and every value equal: the first kmax ids, all from rank 0
++        for (row) |*v| v.* = 0.5;
++        try checkRow(a, row, kmax);
++        cases += 2;
++    }
++    // signed zeros (-0 as +0: ties to the lower id), infinities, NaN placement incl. rank 0's row[0]
++    const specials = [_]f32{ 0.0, -0.0, inf, -inf, nan, 1.0, -1.0, std.math.floatMax(f32), -std.math.floatMax(f32), std.math.floatTrueMin(f32) };
++    for (0..40) |c| {
++        const hh = 32 + rnd.uintLessThan(usize, 32);
++        const row = try a.alloc(f32, 2 * hh);
++        for (row) |*v| v.* = if (rnd.boolean()) specials[rnd.uintLessThan(usize, specials.len)] else @round(rnd.floatNorm(f32) * 4) / 4;
++        if (c % 4 == 0) row[0] = nan; // rank 0's row[0] NaN: the greedy pick is 0
++        if (c % 4 == 1) row[hh] = nan; // rank 1's first column NaN: no rule (the flag is rank 0's only)
++        if (c % 5 == 2) for (row) |*v| {
++            v.* = nan; // every value NaN: key order is id order
++        };
++        if (c % 7 == 3) for (row) |*v| {
++            v.* = if (rnd.boolean()) 0.0 else -0.0;
++        };
++        try checkRow(a, row, 1 + rnd.uintLessThan(usize, max_k));
++        cases += 1;
++    }
++    try std.testing.expect(cases >= 96);
++}
++
++test "the seeded draw on the merged candidates equals sampleRow on the full row" {
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var prng = std.Random.DefaultPrng.init(0x2611);
++    const rnd = prng.random();
++    var draws: usize = 0;
++    for (0..48) |c| {
++        const row = try sampling.testRow(a, 2 * 2048, 0x26110 + c);
++        // a round's rows: sampled with different top_k (kmax their largest) and greedy ones
++        var rules: [6]sampling.Sampling = undefined;
++        var kmax: usize = 0;
++        for (&rules, 0..) |*s, j| {
++            s.* = .{ .seed = rnd.int(u64), .temperature = if (j == 5) 0.0 else 0.3 + rnd.float(f64) * 1.2, .top_k = 1 + rnd.uintLessThan(usize, max_k), .top_p = ([_]f64{ 1.0, 0.95, 0.5, 0.0 })[j % 4], .min_p = if (j % 3 == 0) 0.05 else 0.0 };
++            kmax = addRow(kmax, s.temperature, s.top_k);
++        }
++        const merged = try mergedTop(a, row, row.len / 2, kmax);
++        for (rules) |s| {
++            const pos = rnd.uintLessThan(u64, 1 << 20);
++            const want = try sampling.sampleRow(row, pos, s);
++            const got: i64 = if (s.temperature <= 0) greedyPick(merged) else sampleCandidates(merged[0..kmax], pos, s);
++            try std.testing.expectEqual(want, got);
++            draws += 1;
++        }
++    }
++    try std.testing.expectEqual(@as(usize, 288), draws);
++}
