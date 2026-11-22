@@ -1,5 +1,7 @@
 # Candidate 3, November 22: prefill scores 4–8× more columns than it keeps; the kit's pool-only scorer is fast but not bit-equal
 
+> **Superseded scope (2026-11-22, [pool-union](../pool-union-20261122/RESULTS.md)):** the pooled path below runs only on each prompt's ≤128 bounded-replay rows, not every prompt row, so the "~10% of long-context prefill" estimate is wrong (it is about 0.02%). The kernel timings and parity findings stand.
+
 **Result.** At the four prompt indexer layers after the candidate source (24/28/32/36), prefill scores every compressed column with the kit's `_index_score_rows` and then masks all but the pool's 2,048 blocks (16,384 columns) to −inf. Scoring is linear in width, so at 64K and 128K deep rows 75% and 87.5% of that work is discarded. The kit already has a pool-only scorer (`_index_score_cand`, the decode form). It runs in constant time at any width and gets columns and visibility right. **Its score bits differ from `_index_score_rows` on about 60% of columns (1 to 12+ ULP)**, so substituting it changes selections near ties and would not be bit-identical to production. A bit-exact path has to keep `_index_score_rows`' arithmetic. Options are below.
 
 ## Kit prompt scorer cost (GB10, standalone, `timing_valid`, idle head)
