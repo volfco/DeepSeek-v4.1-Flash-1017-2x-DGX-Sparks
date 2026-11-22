@@ -15,6 +15,7 @@ export PATH="$HOME/.local/bin:$PATH" HF_HUB_OFFLINE=1
 grep -qx 'IMAGE=tensorfold-dsv41:bench-fused-next-84806bb' .env || { echo "production is not on 84806bb"; exit 2; }
 docker image inspect "$IMG" >/dev/null && ssh -o BatchMode=yes "$worker" "docker image inspect '$IMG' >/dev/null" || { echo "$IMG missing on a rank"; exit 3; }
 
+insp() { if [[ $1 == 0 ]]; then bash -c "$2"; else ssh -o BatchMode=yes "$worker" "$2"; fi; }
 arm() {
   local name=$1; shift
   echo "$(date -u +%FT%TZ) arm $name: $*"
@@ -22,15 +23,13 @@ arm() {
     || grep -q 'the smoke test request failed' "$out/$name.restart.log" || { echo "restart $name failed"; tail -5 "$out/$name.restart.log"; return 1; }
   for i in $(seq 60); do curl -sf -m 5 http://127.0.0.1:8000/health >/dev/null && break; sleep 5; done
   for r in 0 1; do
-    if [[ $r == 0 ]]; then q=bash; else q="ssh -o BatchMode=yes $worker"; fi
-    echo "rank$r $($q -c "docker inspect -f '{{.Config.Image}}' $C") $($q -c "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $C" | grep -E '^TF_DS_(KV_FETCH_REUSE|ROUND_PROFILE|IDX_FUSED|FUSED_ROUTE)=' | sort | tr '\n' ' ')"
+    echo "rank$r $(insp $r "docker inspect -f '{{.Config.Image}}' $C") $(insp $r "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $C" | grep -E '^TF_DS_(KV_FETCH_REUSE|ROUND_PROFILE|IDX_FUSED|FUSED_ROUTE)=' | sort | tr '\n' ' ')"
   done > "$out/$name.armed.txt"
   local like=(); [[ $name != off1 ]] && like=(--like "$out/off1.exact.json")
-  python3 -I tools/exact.py record --out "$out/$name.exact.json" --label "$name" "${like[@]}" > "$out/$name.exact.log" 2>&1; echo "exact rc=$?"
+  python3 -I tools/exact.py record --url http://127.0.0.1:8000 --out "$out/$name.exact.json" --label "$name" "${like[@]}" > "$out/$name.exact.log" 2>&1; echo "exact rc=$?"
   python3 runs/kvreuse-size-20261122/workload.py "$name" "$out/$name.json" 2>&1 | tee "$out/$name.log"
   for r in 0 1; do
-    if [[ $r == 0 ]]; then q=bash; else q="ssh -o BatchMode=yes $worker"; fi
-    echo "rank$r reuse banners: $($q -c "docker logs $C 2>&1 | grep -c 'TF_DS_KV_FETCH_REUSE: decode reuses'")"
+    echo "rank$r reuse banners: $(insp $r "docker logs $C 2>&1 | grep -c 'TF_DS_KV_FETCH_REUSE: decode reuses'")"
   done | tee "$out/$name.banner.txt"
 }
 arm off1 || true
