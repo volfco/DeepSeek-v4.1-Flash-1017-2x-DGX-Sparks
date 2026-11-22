@@ -1,0 +1,2573 @@
+{
+  "pid": 2650052,
+  "elapsed_sec": 0.6419,
+  "mem_available_start_gib": 5.391,
+  "mem_available_end_gib": 5.158,
+  "peak_vram_bytes": 4633856,
+  "peak_vram_mib": 4.419,
+  "vram_cap_mib": 256,
+  "ops_cubin": "/home/colum/tf-bench/pre-bench-20261121/p0231/bin/dsv41_ops.cubin",
+  "ops_cubin_sha256": "02cb1e260fa06be444964941d4a9440041a205729c7ecd553fc6764f56cd219e",
+  "torch_cubin": "/home/colum/tf-bench/pre-bench-20261121/p0231/bin/dsv41_torch.cubin",
+  "torch_cubin_sha256": "a55c9fee2d3bd3c380262bc97ab4fd9f92083fa154e7e56d491e221eea3b571c",
+  "kit_idx_fp4_store_hash": "34543814a21ab766f744ba6c83c13b2ef1917d1c66013bb490900951665b8e03",
+  "kit_lat_fp4_store_hash": "9cd357f1c8586168ef430112df7d213db67ae95e6b240d40422b67bfd7b8643a",
+  "resolved_kernels": {
+    "dsv41_ops.cubin:tf_ds_scatter_rows_kernel": {
+      "resolved": "tf_ds_scatter_rows_kernel",
+      "module_sha256": "02cb1e260fa06be444964941d4a9440041a205729c7ecd553fc6764f56cd219e"
+    },
+    "dsv41_torch.cubin:tf_ds_compress2_kernel": {
+      "resolved": "tf_ds_compress2_kernel",
+      "module_sha256": "a55c9fee2d3bd3c380262bc97ab4fd9f92083fa154e7e56d491e221eea3b571c"
+    },
+    "dsv41_torch.cubin:tf_ds_rms_norm_kernel": {
+      "resolved": "tf_ds_rms_norm_kernel",
+      "module_sha256": "a55c9fee2d3bd3c380262bc97ab4fd9f92083fa154e7e56d491e221eea3b571c"
+    },
+    "dsv41_torch.cubin:tf_ds_rope_kernel": {
+      "resolved": "tf_ds_rope_kernel",
+      "module_sha256": "a55c9fee2d3bd3c380262bc97ab4fd9f92083fa154e7e56d491e221eea3b571c"
+    },
+    "34543814a21ab766f744ba6c83c13b2ef1917d1c66013bb490900951665b8e03.cubin:_fp4_store": {
+      "resolved": "_fp4_store",
+      "module_sha256": "e751973d17f214e326ff808bc14da14835513d4df9ede89f0f5805bc68d40d62"
+    },
+    "dsv41_ops.cubin:tf_ds_copy_rows16_kernel": {
+      "resolved": "tf_ds_copy_rows16_kernel",
+      "module_sha256": "02cb1e260fa06be444964941d4a9440041a205729c7ecd553fc6764f56cd219e"
+    },
+    "9cd357f1c8586168ef430112df7d213db67ae95e6b240d40422b67bfd7b8643a.cubin:_fp4_store": {
+      "resolved": "_fp4_store",
+      "module_sha256": "9e156279b5463606a1cb3b43a76d6120f2ca549b65ddf3debf257c225aaf088b"
+    },
+    "dsv41_torch.cubin:tf_ds_compress2_norm_kernel": {
+      "resolved": "tf_ds_compress2_norm_kernel",
+      "module_sha256": "a55c9fee2d3bd3c380262bc97ab4fd9f92083fa154e7e56d491e221eea3b571c"
+    },
+    "dsv41_torch.cubin:tf_ds_fused_prompt_idx_key_kernel": {
+      "resolved": "tf_ds_fused_prompt_idx_key_kernel",
+      "module_sha256": "a55c9fee2d3bd3c380262bc97ab4fd9f92083fa154e7e56d491e221eea3b571c"
+    },
+    "dsv41_torch.cubin:tf_ds_fused_prompt_latent_kernel": {
+      "resolved": "tf_ds_fused_prompt_latent_kernel",
+      "module_sha256": "a55c9fee2d3bd3c380262bc97ab4fd9f92083fa154e7e56d491e221eea3b571c"
+    }
+  },
+  "total_failures": 0,
+  "pass": true,
+  "suites": [
+    {
+      "suite": "seed231_normal_pdl0",
+      "seed": 231,
+      "mode": "normal",
+      "pdl": false,
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "start": 0,
+          "n": 50,
+          "label": "even_initial",
+          "plan_unfused": {
+            "full": 25,
+            "keep": 50,
+            "raw_first": 0,
+            "raw_pos0": 0,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 25,
+            "keep": 50,
+            "raw_first": 0,
+            "raw_pos0": 0,
+            "grid_rows": 25,
+            "base_group": 0,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 25600,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "11da203fd61adaadad3a9301b9da0de3aa16dcdfdc501f6361b2278f8d330b9f",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "18bd5aaaee0bd410e66938ceccfe1763da40c21eae568c7db8f65840a42a0328",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "810c8797a23d6c38563ac10d7a04758663e37ac69f1c693ed24dc2e653eca9c0",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "389a6f8a87b5ca6d683fbc811c5082eb1d7a7cdfb1f8b83c0edd06a9b601f740",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "ce88e2d478c90fcdfde7ee8438c3be6cee2f0a07ca98eaf46fd63101d7e12249",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "c936aa66e7c6c44a92550ef8399ccdc20af9650c342d407ba5dd25b5de504da0",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "d087b86f4048ec7af498059e32c530e2d1328e1e49c8ae5beafb147c193ce00c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 1,
+          "start": 50,
+          "n": 1,
+          "label": "single_row_no_pair",
+          "plan_unfused": {
+            "full": 0,
+            "keep": 1,
+            "raw_first": 0,
+            "raw_pos0": 50,
+            "do_scatter_upload": true,
+            "stage_group_pos": false
+          },
+          "plan_fused": {
+            "full": 0,
+            "keep": 1,
+            "raw_first": 0,
+            "raw_pos0": 50,
+            "grid_rows": 1,
+            "base_group": 25,
+            "do_scatter_upload": true,
+            "compress_fused": false,
+            "idx_key_fused": false,
+            "lat_fused": false,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 0,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "d863495dbf490867072c575fc616a29a5de5dccf1386d748a7c0d4c5985fcde1",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "82f2d48e5c7ae8d587785cca384cc9dd9b83ab28d20cd36e08e8395d6958602c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "810c8797a23d6c38563ac10d7a04758663e37ac69f1c693ed24dc2e653eca9c0",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "389a6f8a87b5ca6d683fbc811c5082eb1d7a7cdfb1f8b83c0edd06a9b601f740",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "ce88e2d478c90fcdfde7ee8438c3be6cee2f0a07ca98eaf46fd63101d7e12249",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "c936aa66e7c6c44a92550ef8399ccdc20af9650c342d407ba5dd25b5de504da0",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "d087b86f4048ec7af498059e32c530e2d1328e1e49c8ae5beafb147c193ce00c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 2,
+          "start": 51,
+          "n": 19,
+          "label": "odd_wraps_64_multiwarp_norm",
+          "plan_unfused": {
+            "full": 9,
+            "keep": 19,
+            "raw_first": 0,
+            "raw_pos0": 51,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 9,
+            "keep": 19,
+            "raw_first": 0,
+            "raw_pos0": 51,
+            "grid_rows": 10,
+            "base_group": 25,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 9216,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "46163415fb04b2ebf5e7144d3452e38641c24b14051509d6e21cf6b5f1c4ecdb",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "5ebe6684aaba94211c7e4ee9a3c3b616deb085f2db0a8c9622675401de86eac5",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "72630eb76dba6bcd45e748c8dda384485106e9f347bec0186c1be6c12a60d42f",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "f5f2c7b409bfcb895e2b454a0708a87aca510b9b697383d45361d035f065aa21",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "4b31508e7d3be8d12bb6c0817706ea3c2a86a285defd5f74307fba7ce9a71374",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "91be9aa76f9b7cf6340874f730f275ed2d468cb46ee966db6d7c863c1eb97b07",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "8cb6358a2dc347f2708b69f4dd255c9b70c99ae6aa3cb35f29463b969ff6bc94",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 3,
+          "start": 70,
+          "n": 131,
+          "label": "odd_raw_first_67_gt0_wraps_64",
+          "plan_unfused": {
+            "full": 65,
+            "keep": 64,
+            "raw_first": 67,
+            "raw_pos0": 9,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 65,
+            "keep": 64,
+            "raw_first": 67,
+            "raw_pos0": 9,
+            "grid_rows": 66,
+            "base_group": 35,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 66560,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "7eaaccb6ec4341eb82236fea1a88c2af3610ee183666e1b143877d657ca8b5dd",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "ed270eaf7b5eda922c032e952db018d46d72e7d00bbfa53c35c10dd5ea9ab740",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "2aef2193f5db3156f98245b71ef25706f7bca57aab3719e3f3b7382d8359b8b3",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "799979c5ade9d613010c47488efeedbd0af2cf95d87bdb97721552b519613f7c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "5b71b1c2013e7b37241303294db499a2fbf8f4115ff869ac5f6286a9adeed57c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "315b13c733c7ca08ce32ceab113d0c0a340ad3d328f0dd5e760ac71b5baac477",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "038772b1cbd1496ced4a8333d229e6fdfb636713815f2a07f1f0893164f53117",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        }
+      ]
+    },
+    {
+      "suite": "seed231_normal_pdl1",
+      "seed": 231,
+      "mode": "normal",
+      "pdl": true,
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "start": 0,
+          "n": 50,
+          "label": "even_initial",
+          "plan_unfused": {
+            "full": 25,
+            "keep": 50,
+            "raw_first": 0,
+            "raw_pos0": 0,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 25,
+            "keep": 50,
+            "raw_first": 0,
+            "raw_pos0": 0,
+            "grid_rows": 25,
+            "base_group": 0,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 25600,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "11da203fd61adaadad3a9301b9da0de3aa16dcdfdc501f6361b2278f8d330b9f",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "18bd5aaaee0bd410e66938ceccfe1763da40c21eae568c7db8f65840a42a0328",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "810c8797a23d6c38563ac10d7a04758663e37ac69f1c693ed24dc2e653eca9c0",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "389a6f8a87b5ca6d683fbc811c5082eb1d7a7cdfb1f8b83c0edd06a9b601f740",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "ce88e2d478c90fcdfde7ee8438c3be6cee2f0a07ca98eaf46fd63101d7e12249",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "c936aa66e7c6c44a92550ef8399ccdc20af9650c342d407ba5dd25b5de504da0",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "d087b86f4048ec7af498059e32c530e2d1328e1e49c8ae5beafb147c193ce00c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 1,
+          "start": 50,
+          "n": 1,
+          "label": "single_row_no_pair",
+          "plan_unfused": {
+            "full": 0,
+            "keep": 1,
+            "raw_first": 0,
+            "raw_pos0": 50,
+            "do_scatter_upload": true,
+            "stage_group_pos": false
+          },
+          "plan_fused": {
+            "full": 0,
+            "keep": 1,
+            "raw_first": 0,
+            "raw_pos0": 50,
+            "grid_rows": 1,
+            "base_group": 25,
+            "do_scatter_upload": true,
+            "compress_fused": false,
+            "idx_key_fused": false,
+            "lat_fused": false,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 0,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "d863495dbf490867072c575fc616a29a5de5dccf1386d748a7c0d4c5985fcde1",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "82f2d48e5c7ae8d587785cca384cc9dd9b83ab28d20cd36e08e8395d6958602c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "810c8797a23d6c38563ac10d7a04758663e37ac69f1c693ed24dc2e653eca9c0",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "389a6f8a87b5ca6d683fbc811c5082eb1d7a7cdfb1f8b83c0edd06a9b601f740",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "ce88e2d478c90fcdfde7ee8438c3be6cee2f0a07ca98eaf46fd63101d7e12249",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "c936aa66e7c6c44a92550ef8399ccdc20af9650c342d407ba5dd25b5de504da0",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "d087b86f4048ec7af498059e32c530e2d1328e1e49c8ae5beafb147c193ce00c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 2,
+          "start": 51,
+          "n": 19,
+          "label": "odd_wraps_64_multiwarp_norm",
+          "plan_unfused": {
+            "full": 9,
+            "keep": 19,
+            "raw_first": 0,
+            "raw_pos0": 51,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 9,
+            "keep": 19,
+            "raw_first": 0,
+            "raw_pos0": 51,
+            "grid_rows": 10,
+            "base_group": 25,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 9216,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "46163415fb04b2ebf5e7144d3452e38641c24b14051509d6e21cf6b5f1c4ecdb",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "5ebe6684aaba94211c7e4ee9a3c3b616deb085f2db0a8c9622675401de86eac5",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "72630eb76dba6bcd45e748c8dda384485106e9f347bec0186c1be6c12a60d42f",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "f5f2c7b409bfcb895e2b454a0708a87aca510b9b697383d45361d035f065aa21",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "4b31508e7d3be8d12bb6c0817706ea3c2a86a285defd5f74307fba7ce9a71374",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "91be9aa76f9b7cf6340874f730f275ed2d468cb46ee966db6d7c863c1eb97b07",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "8cb6358a2dc347f2708b69f4dd255c9b70c99ae6aa3cb35f29463b969ff6bc94",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 3,
+          "start": 70,
+          "n": 131,
+          "label": "odd_raw_first_67_gt0_wraps_64",
+          "plan_unfused": {
+            "full": 65,
+            "keep": 64,
+            "raw_first": 67,
+            "raw_pos0": 9,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 65,
+            "keep": 64,
+            "raw_first": 67,
+            "raw_pos0": 9,
+            "grid_rows": 66,
+            "base_group": 35,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 66560,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "7eaaccb6ec4341eb82236fea1a88c2af3610ee183666e1b143877d657ca8b5dd",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "ed270eaf7b5eda922c032e952db018d46d72e7d00bbfa53c35c10dd5ea9ab740",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "2aef2193f5db3156f98245b71ef25706f7bca57aab3719e3f3b7382d8359b8b3",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "799979c5ade9d613010c47488efeedbd0af2cf95d87bdb97721552b519613f7c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "5b71b1c2013e7b37241303294db499a2fbf8f4115ff869ac5f6286a9adeed57c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "315b13c733c7ca08ce32ceab113d0c0a340ad3d328f0dd5e760ac71b5baac477",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "038772b1cbd1496ced4a8333d229e6fdfb636713815f2a07f1f0893164f53117",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        }
+      ]
+    },
+    {
+      "suite": "seed2026_wide_edge_pdl0",
+      "seed": 2026,
+      "mode": "wide_edge",
+      "pdl": false,
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "start": 0,
+          "n": 50,
+          "label": "even_initial",
+          "plan_unfused": {
+            "full": 25,
+            "keep": 50,
+            "raw_first": 0,
+            "raw_pos0": 0,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 25,
+            "keep": 50,
+            "raw_first": 0,
+            "raw_pos0": 0,
+            "grid_rows": 25,
+            "base_group": 0,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 25600,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "e9928a6496ba31fd798178e596a968d6718a4fbe2f6ceb7c0ef82c87bd6b7ba2",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "8c96943f7cc9ac3b3bcf343e6cfe7dfba69f416313b2561c897707b4548915d7",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "2d79dbf6c513edbf922fc28b51ae42ed48e5b397a3a37be7c9d3bdbe72ebfbdf",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "d718682095c6630ac8b637016d47587b0060f9eed97e457a0d1cd7477cb80f0d",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "b99ea49d68d1e4cb63fa283b466045a04c27defbdefede5a048559c580d784ad",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "2dcb08ffb71cf380fd730af6a4fc96e149522a0c4c69955e325e0424b0453085",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "19cb3ee31addb5519a65ab21c50a06e7910f708d613a179982add7ebe318d3fd",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 1,
+          "start": 50,
+          "n": 1,
+          "label": "single_row_no_pair",
+          "plan_unfused": {
+            "full": 0,
+            "keep": 1,
+            "raw_first": 0,
+            "raw_pos0": 50,
+            "do_scatter_upload": true,
+            "stage_group_pos": false
+          },
+          "plan_fused": {
+            "full": 0,
+            "keep": 1,
+            "raw_first": 0,
+            "raw_pos0": 50,
+            "grid_rows": 1,
+            "base_group": 25,
+            "do_scatter_upload": true,
+            "compress_fused": false,
+            "idx_key_fused": false,
+            "lat_fused": false,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 0,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "5a5970f45a7fc1b649610a2676b692c014b1a313ecd96ffe00ab394b9ff4cb1e",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "5e4ca18400a9a45acb881870304f53d5509fdb8131a89a84f85279acfff0fe3a",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "2d79dbf6c513edbf922fc28b51ae42ed48e5b397a3a37be7c9d3bdbe72ebfbdf",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "d718682095c6630ac8b637016d47587b0060f9eed97e457a0d1cd7477cb80f0d",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "b99ea49d68d1e4cb63fa283b466045a04c27defbdefede5a048559c580d784ad",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "2dcb08ffb71cf380fd730af6a4fc96e149522a0c4c69955e325e0424b0453085",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "19cb3ee31addb5519a65ab21c50a06e7910f708d613a179982add7ebe318d3fd",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 2,
+          "start": 51,
+          "n": 19,
+          "label": "odd_wraps_64_multiwarp_norm",
+          "plan_unfused": {
+            "full": 9,
+            "keep": 19,
+            "raw_first": 0,
+            "raw_pos0": 51,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 9,
+            "keep": 19,
+            "raw_first": 0,
+            "raw_pos0": 51,
+            "grid_rows": 10,
+            "base_group": 25,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 9216,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "05665a0ffda8ca01f11a01b894254ad31f0878cc194ddb438abb6653141419ee",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "abffebd0ab8c65ee697e19e8918bab5f2db01c24207c5d32f0809acd69480fac",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "3e9b74df881c4b126de0fe1daa7a2cfe95a118484cf217381cc77030c00bd586",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "ac02ab7dd5c933371d8cb9192e057257127d9914883afae59e1bc196fd095421",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "a6008cf7e1981e502aea247a1795c78efc32d41f3dd0be7e7d3378807fcac3ab",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "d2a19a05d4da3ffbab33ddcf03a1682c2f15054d7684390e318ea1c928ec7198",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "bd92096274319a93acd569ab563db8f0083469de707a949bb28bd6fc833bdaa7",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 3,
+          "start": 70,
+          "n": 131,
+          "label": "odd_raw_first_67_gt0_wraps_64",
+          "plan_unfused": {
+            "full": 65,
+            "keep": 64,
+            "raw_first": 67,
+            "raw_pos0": 9,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 65,
+            "keep": 64,
+            "raw_first": 67,
+            "raw_pos0": 9,
+            "grid_rows": 66,
+            "base_group": 35,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 66560,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "5a0ffcc94d57e7686fb2c2087b805685030b5f1fb4ebdda6baba375ebf763483",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "ab37f9be42c9ba926fed78e3d6cc8a4201bc5db2c66e86c8ed9543e04e29e791",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "6f875bb7726e0cf4de2c00c69f666a144ef0d3f5b9d12d7cf125907926f32f98",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "926bb4f0b8f8f282e72cb4d891d4465add4c98ca955f93b45ab238350391f151",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "43104b4345fd7dd3c47a770ab61fa3ee7ba7338efcbb13a48fb34317d568505c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "6f22804315712d302388c015dc91d3064b85a159341f3b78dbb93c3835f64ff9",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "4b807e3f0b5db1ff46b22ce526d85520445df83f67ca5e967d7134a2ad56ee7b",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        }
+      ]
+    },
+    {
+      "suite": "seed2026_wide_edge_pdl1",
+      "seed": 2026,
+      "mode": "wide_edge",
+      "pdl": true,
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "start": 0,
+          "n": 50,
+          "label": "even_initial",
+          "plan_unfused": {
+            "full": 25,
+            "keep": 50,
+            "raw_first": 0,
+            "raw_pos0": 0,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 25,
+            "keep": 50,
+            "raw_first": 0,
+            "raw_pos0": 0,
+            "grid_rows": 25,
+            "base_group": 0,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 25600,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "e9928a6496ba31fd798178e596a968d6718a4fbe2f6ceb7c0ef82c87bd6b7ba2",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "8c96943f7cc9ac3b3bcf343e6cfe7dfba69f416313b2561c897707b4548915d7",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "2d79dbf6c513edbf922fc28b51ae42ed48e5b397a3a37be7c9d3bdbe72ebfbdf",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "d718682095c6630ac8b637016d47587b0060f9eed97e457a0d1cd7477cb80f0d",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "b99ea49d68d1e4cb63fa283b466045a04c27defbdefede5a048559c580d784ad",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "2dcb08ffb71cf380fd730af6a4fc96e149522a0c4c69955e325e0424b0453085",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "19cb3ee31addb5519a65ab21c50a06e7910f708d613a179982add7ebe318d3fd",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 1,
+          "start": 50,
+          "n": 1,
+          "label": "single_row_no_pair",
+          "plan_unfused": {
+            "full": 0,
+            "keep": 1,
+            "raw_first": 0,
+            "raw_pos0": 50,
+            "do_scatter_upload": true,
+            "stage_group_pos": false
+          },
+          "plan_fused": {
+            "full": 0,
+            "keep": 1,
+            "raw_first": 0,
+            "raw_pos0": 50,
+            "grid_rows": 1,
+            "base_group": 25,
+            "do_scatter_upload": true,
+            "compress_fused": false,
+            "idx_key_fused": false,
+            "lat_fused": false,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 0,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "5a5970f45a7fc1b649610a2676b692c014b1a313ecd96ffe00ab394b9ff4cb1e",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "5e4ca18400a9a45acb881870304f53d5509fdb8131a89a84f85279acfff0fe3a",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "2d79dbf6c513edbf922fc28b51ae42ed48e5b397a3a37be7c9d3bdbe72ebfbdf",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "d718682095c6630ac8b637016d47587b0060f9eed97e457a0d1cd7477cb80f0d",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "b99ea49d68d1e4cb63fa283b466045a04c27defbdefede5a048559c580d784ad",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "2dcb08ffb71cf380fd730af6a4fc96e149522a0c4c69955e325e0424b0453085",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "19cb3ee31addb5519a65ab21c50a06e7910f708d613a179982add7ebe318d3fd",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 2,
+          "start": 51,
+          "n": 19,
+          "label": "odd_wraps_64_multiwarp_norm",
+          "plan_unfused": {
+            "full": 9,
+            "keep": 19,
+            "raw_first": 0,
+            "raw_pos0": 51,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 9,
+            "keep": 19,
+            "raw_first": 0,
+            "raw_pos0": 51,
+            "grid_rows": 10,
+            "base_group": 25,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 9216,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "05665a0ffda8ca01f11a01b894254ad31f0878cc194ddb438abb6653141419ee",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "abffebd0ab8c65ee697e19e8918bab5f2db01c24207c5d32f0809acd69480fac",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "3e9b74df881c4b126de0fe1daa7a2cfe95a118484cf217381cc77030c00bd586",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "ac02ab7dd5c933371d8cb9192e057257127d9914883afae59e1bc196fd095421",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "a6008cf7e1981e502aea247a1795c78efc32d41f3dd0be7e7d3378807fcac3ab",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "d2a19a05d4da3ffbab33ddcf03a1682c2f15054d7684390e318ea1c928ec7198",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "bd92096274319a93acd569ab563db8f0083469de707a949bb28bd6fc833bdaa7",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        },
+        {
+          "chunk_index": 3,
+          "start": 70,
+          "n": 131,
+          "label": "odd_raw_first_67_gt0_wraps_64",
+          "plan_unfused": {
+            "full": 65,
+            "keep": 64,
+            "raw_first": 67,
+            "raw_pos0": 9,
+            "do_scatter_upload": true,
+            "stage_group_pos": true
+          },
+          "plan_fused": {
+            "full": 65,
+            "keep": 64,
+            "raw_first": 67,
+            "raw_pos0": 9,
+            "grid_rows": 66,
+            "base_group": 35,
+            "do_scatter_upload": false,
+            "compress_fused": true,
+            "idx_key_fused": true,
+            "lat_fused": true,
+            "stage_group_pos": false
+          },
+          "lat_active_bytes": 66560,
+          "lat_active_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_kv_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "cpu_raw_score_diff": {
+            "diff_bytes": 0,
+            "first_offset": null
+          },
+          "buffers": {
+            "raw_kv": {
+              "nbytes": 131072,
+              "sha256": "5a0ffcc94d57e7686fb2c2087b805685030b5f1fb4ebdda6baba375ebf763483",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "raw_score": {
+              "nbytes": 131072,
+              "sha256": "ab37f9be42c9ba926fed78e3d6cc8a4201bc5db2c66e86c8ed9543e04e29e791",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "lat": {
+              "nbytes": 131072,
+              "sha256": "6f875bb7726e0cf4de2c00c69f666a144ef0d3f5b9d12d7cf125907926f32f98",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_codes": {
+              "nbytes": 8192,
+              "sha256": "926bb4f0b8f8f282e72cb4d891d4465add4c98ca955f93b45ab238350391f151",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "idx_scales": {
+              "nbytes": 512,
+              "sha256": "43104b4345fd7dd3c47a770ab61fa3ee7ba7338efcbb13a48fb34317d568505c",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_codes": {
+              "nbytes": 32768,
+              "sha256": "6f22804315712d302388c015dc91d3064b85a159341f3b78dbb93c3835f64ff9",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            },
+            "comp_scales": {
+              "nbytes": 4096,
+              "sha256": "4b807e3f0b5db1ff46b22ce526d85520445df83f67ca5e967d7134a2ad56ee7b",
+              "fused_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "comp_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              },
+              "rope_only_vs_unfused": {
+                "diff_bytes": 0,
+                "first_offset": null
+              }
+            }
+          },
+          "pass": true
+        }
+      ]
+    }
+  ]
+}
