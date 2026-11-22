@@ -9,11 +9,9 @@
   - About half the projection was realized. The likely reason is cross-rank wait that moves to the next collective. The next lever there is rank balance, not the exchange.
   - Source: branch `kv-fetch-reuse` `69335b8` in `~/Workspace/tfref-kvreuse`. **Not yet exported to `zig/patches/`.**
 - **Earlier today:** `84806bb` was deployed 05:58–06:01 UTC (image swap; [record](runs/deploy-fnext-20261122/)).
-- **Candidate 3 (prefill: score only pooled blocks at layers 24/28/32/36) is priced and has an exact route.** [Results](runs/prefill-pool-score-20261122/RESULTS.md)
-  - The kit's `_index_score_rows` is linear in width: 468 / 937 / 1,910 / 3,826 µs per 128-row block at 16K / 32K / 64K / 128K columns. At a 128K-deep row about 105 of 120 µs across the four layers is discarded by the pool mask, roughly 10% of long-context prefill (an estimate).
-  - The kit's pool-only scorer `_index_score_cand` takes 68 µs at any width but is **not bit-equal**: 60% of scores are 1–12 ULP off (a different reduction order). Columns and visibility are exact.
-  - **Compacted keys through `_index_score_rows` itself are bit-exact** (0 differences at three shapes). So: union of the row block's pools → gather keys → kit scorer → per-row mask → top-k mapped back.
-  - **Next:** measure the union size U on real prompts (a counter at the candidate source). The saving is `1 − 8U / width`.
+- **Candidate 3 closed (07:24–07:31 UTC): the pooled prompt indexer covers only each prompt's ≤128 bounded-replay rows.** A diagnostic image logged the pool at the candidate source on cold 24K–164K prompts. It fired on chunk pairs summing to exactly 128 rows (104 + 24, 91 + 37, 93 + 35). Bulk prefill rows take the keyed path, which has no pool. The saving would be about 15–20 ms of an 80.7 s 160K prefill (0.02%). The earlier "~10% of long prefill" estimate wrongly assumed every row was pooled. [Pool union](runs/pool-union-20261122/RESULTS.md) · [kernel pricing and the exact compact route](runs/prefill-pool-score-20261122/RESULTS.md)
+  - Kept as findings: the kit's `_index_score_rows` is linear in width (29 µs per 1,024 columns per 128 rows). Compacted keys through it are bit-exact. `_index_score_cand` is 60% 1–12 ULP off it. Adjacent rows' pools overlap little (a 128-row union is 57–100% of the width).
+  - Cold prefill on production: 1,984 / 2,066 / 2,040 / 2,031 tok/s at 24.6K / 49K / 98K / 164K.
 - The operator has authorized restarts and config changes for this testing (2026-11-22).
 - **Production runs the `fused-next` binary, while `zig/patches/` holds the rebased equivalent, which has never run on hardware.** Building and gating an image from the recipe (a full source build on the head) is still open. It does not block the image swap. Do not `just sync-head` or restart with changed `zig/patches` until that build has been run.
 
@@ -91,13 +89,13 @@ By estimate, the fused rounds so far worked inside roughly 8% of the decode roun
 
 No engine work past `0258` exists in any `tfref-*` checkout, so this is the next round. It follows the gate's lesson: price at the serving shape before building, and use `84806bb` as the control. Each item needs a standalone byte-parity check, then the 39-case exact suite, long-reply hashes and a graphs-on pair A/B.
 
-1. **Reuse fetched KV and renumbered picks between decode layers (sharded fetch mode).**
+1. **(DONE 2026-11-22: 0259, −1.7% decode rounds, in production.) Reuse fetched KV and renumbered picks between decode layers (sharded fetch mode).**
    - The served checkpoint has eight stretches of layers that share a KV source and pick set. 30 of 38 fetches are repeats, 29.53 MiB of logical payload per round at 7 rows / 512 picks.
    - It targets the largest repo-owned decode stage (`sh_rows` + `sh_fetch`: 3.7% head, 9.8% worker). `sh_rows` runs at 0.1–0.7 GB/s, so it is the exchange's wait time, not bytes. It is marked right after `fetchDecode`'s ring send (`round.zig:1420`). Price it by exchanges saved (30 of 38 per round), not by MiB.
    - Structure confirmed in the checkpoint config (2026-11-22): `kv_source_layer_ids [2, 8, 14, 20]` and `index_source_layer_ids [2, 8, 14, 20, 24, 28, 32, 36]`. So layers 2–39 form eight stretches (2–7, 8–13, 14–19, 20–23, 24–27, 28–31, 32–35, 36–39), each sharing one KV source and one pick set, and `fetchDecode` (`round.zig:1380`) runs once per compressed layer. Next, with no restart: size `sh_fetch`/`sh_rows` with graphs on, using the `84806bb` stage trace on the idle head.
    - Invalidate on a new round, a KV update or a pick update, and keep both ranks' ring schedules identical. (`round.zig:1329–1374`, `config.zig:287–290`)
 2. **Sampled verification: exchange rank-local top-k instead of full logits.** Clients run at T=1.0, so this is on every real decode round. Each rank's collective input drops from 258,560 to 448 bytes per row (`top_k` ≤ 56). The host check matched 96 cases. Benchmark selection + exchange + draw with graphs on. (`lanes.zig:1449–1523`, `round.zig:2009–2027`)
-3. **Prefill: score only retained blocks in later prompt indexers (layers 24/28/32/36).**
+3. **(CLOSED 2026-11-22: only the ≤128 replay rows take the pooled path, so it is worth about 0.02% of prefill; see runs/pool-union-20261122.) Prefill: score only retained blocks in later prompt indexers (layers 24/28/32/36).**
    - At 128 × 65,536 the current path materializes 33.5 MB of scores, of which at most a quarter of the columns per row survive. That makes 0254's top-k a prefill cost.
    - At 2,048 candidate blocks a row needs 16,384 or fewer scored columns.
    - Profile full-row scoring before building. (`prompt.zig:1435–1450`)
