@@ -1,0 +1,11 @@
+# kernel round 0269/0270/0271 on one stacked image (5c69584 = recipe-0264 27baa93 + 0269 + 0270 + 0271), production env + KEPT=2.
+# ctl arms all off (must equal production: REF/SREF are sched2 ctl1). 0269 decode (every verify round), 0270 prefill,
+# 0271 exact-resume prepend (the workload's cached-prefix requests). Banners prove engagement.
+ctl1|tensorfold-dsv41:bench-fused-next-5c69584|
+t269a|tensorfold-dsv41:bench-fused-next-5c69584|TF_DS_DRAFT_TAPS_DIRECT=1
+p270a|tensorfold-dsv41:bench-fused-next-5c69584|TF_DS_PROMPT_PICKS_ONCE=1
+r271a|tensorfold-dsv41:bench-fused-next-5c69584|TF_DS_RESUME_ASSEMBLE=1
+ctl2|tensorfold-dsv41:bench-fused-next-5c69584|
+r271b|tensorfold-dsv41:bench-fused-next-5c69584|TF_DS_RESUME_ASSEMBLE=1
+p270b|tensorfold-dsv41:bench-fused-next-5c69584|TF_DS_PROMPT_PICKS_ONCE=1
+t269b|tensorfold-dsv41:bench-fused-next-5c69584|TF_DS_DRAFT_TAPS_DIRECT=1
