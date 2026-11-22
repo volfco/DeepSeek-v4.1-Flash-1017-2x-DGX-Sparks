@@ -52,6 +52,8 @@ while IFS= read -r line <&3; do
     else python3 runs/overnight-20261122/sampled.py "$name" "$OUT/$name.sampled.json" --compare "$SREF" 2>&1 | tail -1 | sed 's/^/  /'; fi
   fi
   if (( WORKLOAD )); then python3 runs/kvreuse-size-20261122/workload.py "$name" "$OUT/$name.json" 2>&1 | tee "$OUT/$name.log" | sed 's/^/  /'; fi
+  curl -s -m 30 http://127.0.0.1:8000/metrics > /dev/null; sleep 1
+  docker logs --since 10s $C 2>&1 | grep -E '"rank": 0, "(profile|phases_ms|round_clock_us)"' | tail -3 > "$OUT/$name.profile.txt"
   for r in 0 1; do
     echo "  rank$r banners: $(insp $r "docker logs $C 2>&1 | grep -cE '$BANNERS'") errors: $(insp $r "docker logs $C 2>&1 | grep -ciE 'panic|error\\.|CudaFailed|segfault'")"
   done | tee "$OUT/$name.banner.txt"
