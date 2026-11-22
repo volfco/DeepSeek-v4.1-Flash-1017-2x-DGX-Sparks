@@ -1,0 +1,389 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit 236ce8264cb6)
+# 0257 dsv41: extract 0231 prompt source dispatch plan with multi-chunk tests and fix tile-prefix warp zeroing (review S9, S10, S12)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index a9cd50a814567b12ad2f1fed4ea3847627c82fb2..774e4220417cfc0338184c05df52bd38172670b9 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -1019,7 +1019,7 @@ __device__ __forceinline__ void tf_ds_pool_cut(const float* row, int n, unsigned
+ __device__ __forceinline__ int tf_ds_tile_prefix(bool flag, int* warp_end, int* total, int lane, int warp) {
+     const unsigned bits = __ballot_sync(0xffffffffu, flag);
+     if (lane == 0) warp_end[warp] = __popc(bits);
+-    if (threadIdx.x < 32 && threadIdx.x >= (blockDim.x >> 5)) warp_end[threadIdx.x] = 0;  // (a block below 1024)
++    if (threadIdx.x < 32 && threadIdx.x >= ((blockDim.x + 31) >> 5)) warp_end[threadIdx.x] = 0;  // (a block below 1024)
+     __syncthreads();
+     if (warp == 0) {
+         int t = warp_end[lane];
+diff --git a/zig/src/families/dsv41/compress2_norm.zig b/zig/src/families/dsv41/compress2_norm.zig
+index 56663a43683e40b0e55410be8e5f1560d1b4138d..63313d38d4bc7a88f696289fdeb814b3e1c9cd23 100644
+--- a/zig/src/families/dsv41/compress2_norm.zig
++++ b/zig/src/families/dsv41/compress2_norm.zig
+@@ -29,6 +29,12 @@ pub fn fuseOk(fused: bool, rows: usize, d: usize) bool {
+     return fused and rows > 0 and isPow2(d) and d >= 128 and d <= 2048;
+ }
+ 
++/// Prompt grid width (`grid.x`) for `n_rows` input rows: `n_rows / 2` pair blocks plus one trailing raw-ring block when
++/// `n_rows` is odd.
++pub fn gridRows(n_rows: usize) usize {
++    return (n_rows + 1) / 2;
++}
++
+ pub fn decodeOk(fused: bool, rows: usize, d: usize) bool {
+     return fused and rows > 0 and (d == 128 or d == 512);
+ }
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index ac10caab6c133025ba0df457730a9b9a7bde25e6..849b0fe2cb1c97ea146ec765a6b7b48af64e50ec 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -5,6 +5,7 @@
+ const std = @import("std");
+ const cuda = @import("cuda");
+ const ops = @import("ops.zig");
++const compress2_norm = @import("compress2_norm.zig");
+ const fused_trace = @import("fused_trace.zig");
+ const rope_store = @import("rope_store.zig");
+ 
+@@ -194,7 +195,7 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(raw_first)));
+         a.add(@as(c_int, @intCast(n_rows)));
+         if (fused_trace.enabled()) fused_trace.note(.compress2_norm, n_rows, d, e.pdl);
+-        try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast((n_rows + 1) / 2) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
++        try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast(compress2_norm.gridRows(n_rows)) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// TF_DS_FUSED_COMPRESS2_NORM, decode half: tf_ds_compress2x_norm{128,512}_kernel — the 0127 chain (scatter,
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 867d7fba82e9a1084383ef6c5d05451d6aeb85a5..216d54d62a8dce065ed53407467ba86d1d922835 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -50,9 +50,9 @@ pub const max_nbk = 16384;
+ /// from those global maxima in one CTA a row (tf_ds_idx_pick_kernel), because a single CTA a row leaves most of the GPU
+ /// idle at one to seven rows. Above it the one-launch fused form runs. Both produce the same block list.
+ pub const small_rows = 7;
+-/// The block count from which the small-row form pays: at the pool's 8192-block cap (65,536 columns) the 2D grid's
+-/// parallel score read wins at both one and seven rows (10.5 vs 12.1 µs, 11.8 vs 12.4 µs); at 2048 and 4096 blocks the
+-/// second launch and the selection's staging cost more than the parallel read saves (5.8 vs 5.6, 8.7 vs 8.5 µs).
++/// The block count from which the small-row form pays: at 8192 blocks (65,536 columns; `max_nbk` is 16,384) the 2D
++/// grid's parallel score read wins at both one and seven rows (10.5 vs 12.1 µs, 11.8 vs 12.4 µs); at 2048 and 4096
++/// blocks the second launch and the selection's staging cost more than the parallel read saves (5.8 vs 5.6, 8.7 vs 8.5 µs).
+ pub const small_nbk = 6144;
+ 
+ /// Whether the fused launch supports this configuration. The call sites fall back to the unfused sequence when it
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 83e823840c5b13318f83b5d3b96e74f5f2905547..f09a780d8ab8d23c771c18e935f8b02679d69f68 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1300,6 +1300,66 @@ fn unionOf(e: *const Engine, ch: *Chunk, kv: *shard_ops.KvShard, r0: usize, m: u
+     return @intCast(count);
+ }
+ 
++pub const max_kv_source_groups = 4096;
++
++/// Pure host dispatch plan for the ratio-2 prompt KV-source step (0231), shared by `kvSourceUpdate` and host tests.
++pub const KvSource2Plan = struct {
++    full: usize,
++    keep: usize,
++    raw_first: usize,
++    raw_pos0: usize,
++    do_scatter_upload: bool,
++    raw_idx: [raw_rows]i64,
++    do_compress: bool,
++    compress_fused: bool,
++    grid_rows: usize,
++    base_group: usize,
++    idx_key_fused: bool,
++    lat_fused: bool,
++    stage_group_pos: bool,
++};
++
++pub fn planKvSource2(
++    start: usize,
++    n: usize,
++    hd: usize,
++    id: ?usize,
++    rd: usize,
++    compress2_norm_on: bool,
++    rope_store_on: bool,
++) error{ChunkTooLong}!KvSource2Plan {
++    const full = n / 2;
++    if (full > max_kv_source_groups) return error.ChunkTooLong;
++    const keep: usize = @min(n, raw_rows);
++    const raw_first = n - keep;
++    const raw_pos0 = (start + raw_first) % raw_rows;
++    const compress_fused = fused_trace.compressArm(compress2_norm_on, true, full, hd) == .compress2_norm;
++    const do_scatter_upload = !compress_fused or full == 0;
++    var raw_idx: [raw_rows]i64 = @splat(0);
++    for (0..keep) |j| raw_idx[j] = @intCast((start + raw_first + j) % raw_rows);
++    const do_compress = full > 0;
++    const grid_rows = compress2_norm.gridRows(n);
++    const base_group = start / 2;
++    const idx_key_fused = if (id) |d| (fused_trace.keyArm(rope_store_on, full, d, rd, 1, true) == .prompt_key_fused) else true;
++    const lat_fused = fused_trace.latentArm(rope_store_on, full, hd, rd, true) == .prompt_latent_fused;
++    const stage_group_pos = do_compress and (!idx_key_fused or !lat_fused);
++    return .{
++        .full = full,
++        .keep = keep,
++        .raw_first = raw_first,
++        .raw_pos0 = raw_pos0,
++        .do_scatter_upload = do_scatter_upload,
++        .raw_idx = raw_idx,
++        .do_compress = do_compress,
++        .compress_fused = compress_fused,
++        .grid_rows = grid_rows,
++        .base_group = base_group,
++        .idx_key_fused = idx_key_fused,
++        .lat_fused = lat_fused,
++        .stage_group_pos = stage_group_pos,
++    };
++}
++
+ /// kv_source_update of a kv-source layer on the chunk (no earlier pending row: a chunk starting on a group boundary):
+ /// _compress's new latents (ratio 1: RMSNorm of the bf16 projection; ratio 2: of the pairs' softmax-weighted kv), its
+ /// positional store's last RAW rows, then the index keys (RMSNorm of idx_wk's projection, RoPE) and the RoPE'd latents
+@@ -1317,54 +1377,63 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+     // TF_DS_KV_SHARD: a sharded view ends at its part's end (an extent never crosses a part: refused, not written past)
+     if (cs.shard != null and start + n > cs.cap) return error.CrossesPart;
+     const full = n / r;
++    var base_group = start / r;
++    var idx_key_fused = if (lay.idx_wk) |_| (fused_trace.keyArm(e.ops.rope_store, full, c.index_head_dim, rd, 1, true) == .prompt_key_fused) else true;
++    var lat_fused = fused_trace.latentArm(e.ops.rope_store, full, hd, rd, true) == .prompt_latent_fused;
++    var stage_group_pos = !idx_key_fused or !lat_fused;
+     if (r == 1) {
++        if (full > max_kv_source_groups) return error.ChunkTooLong;
+         try mm(e, ch, cwkv, ch.x, c.hidden, ch.lat2, .bf16, hd);
+         try e.exact.rmsNorm(e.s, ch.lat2, hd, lay.comp_norm, ch.lat, hd, n, hd, c.eps);
+     } else {
+         if (r != 2) return notPorted(@src());
++        const plan = try planKvSource2(
++            start,
++            n,
++            hd,
++            if (lay.idx_wk != null) c.index_head_dim else null,
++            rd,
++            e.ops.compress2_norm,
++            e.ops.rope_store,
++        );
++        base_group = plan.base_group;
++        idx_key_fused = plan.idx_key_fused;
++        lat_fused = plan.lat_fused;
++        stage_group_pos = plan.stage_group_pos;
+         try mm(e, ch, cwkv, ch.x, c.hidden, ch.kvc, .fp32, hd);
+         try mm(e, ch, lay.comp_wgate.?, ch.x, c.hidden, ch.scc, .fp32, hd);
+         // rk[pw] = kv[-keep:], rs[pw] = score[-keep:]: pw = positions start + n - keep .. % RAW
+-        const keep: usize = @min(n, raw_rows);
+-        const raw_first = n - keep;
+-        const raw_pos0 = (start + raw_first) % raw_rows;
+-        const fused = fused_trace.compressArm(e.ops.compress2_norm, true, full, hd) == .compress2_norm;
+         // TF_DS_FUSED_COMPRESS2_NORM writes both raw tails itself (one block per pair, plus one for an odd trailing
+         // row), so the index upload and the two scatters run only when it is off or there is no pair to launch.
+-        if (!fused or full == 0) {
+-            var idx: [raw_rows]i64 = undefined;
+-            for (0..keep) |j| idx[j] = @intCast((start + raw_first + j) % raw_rows);
+-            try upload(e, ch.raw_idx, &idx, keep * 8);
+-            try e.ops.scatterRows(e.s, ch.kvc + raw_first * hd * 4, hd * 4, ch.raw_idx, cs.raw_kv[li], hd * 4, hd * 4, keep);
+-            try e.ops.scatterRows(e.s, ch.scc + raw_first * hd * 4, hd * 4, ch.raw_idx, cs.raw_score[li], hd * 4, hd * 4, keep);
++        if (plan.do_scatter_upload) {
++            try upload(e, ch.raw_idx, &plan.raw_idx, plan.keep * 8);
++            try e.ops.scatterRows(e.s, ch.kvc + plan.raw_first * hd * 4, hd * 4, ch.raw_idx, cs.raw_kv[li], hd * 4, hd * 4, plan.keep);
++            try e.ops.scatterRows(e.s, ch.scc + plan.raw_first * hd * 4, hd * 4, ch.raw_idx, cs.raw_score[li], hd * 4, hd * 4, plan.keep);
+         }
+-        if (full == 0) { // a one-row chunk (a prompt one past a chunk end): its row waits in the store, no new group
++        if (!plan.do_compress) { // a one-row chunk (a prompt one past a chunk end): its row waits in the store, no new group
+             sh.kv_layer = li;
+             return;
+         }
+-        if (fused) {
++        if (plan.compress_fused) {
+             // TF_DS_FUSED_COMPRESS2_NORM: compress2, the RMSNorm and the raw-ring tails in one launch
+             // (tf_ds_compress2_norm_kernel; torch's arithmetic both times, the norm's lane count the unfused launch
+             // would use, ring slots by modular position, the trailing row when the chunk has one)
+-            try e.exact.compress2Norm(e.s, ch.kvc, ch.scc, lay.comp_norm, ch.lat, hd, full, hd, c.eps,
+-                                      cs.raw_kv[li], cs.raw_score[li], raw_rows, raw_pos0, raw_first, n);
++            std.debug.assert(plan.grid_rows == compress2_norm.gridRows(n));
++            try e.exact.compress2Norm(e.s, ch.kvc, ch.scc, lay.comp_norm, ch.lat, hd, plan.full, hd, c.eps,
++                                      cs.raw_kv[li], cs.raw_score[li], raw_rows, plan.raw_pos0, plan.raw_first, n);
+         } else {
+-            if (fused_trace.enabled()) fused_trace.note(.compress_unfused, full, hd, e.ops.pdl);
+-            try e.exact.compress2(e.s, ch.kvc, ch.scc, ch.lat2, full, hd);
+-            try e.exact.rmsNorm(e.s, ch.lat2, hd, lay.comp_norm, ch.lat, hd, full, hd, c.eps);
++            if (fused_trace.enabled()) fused_trace.note(.compress_unfused, plan.full, hd, e.ops.pdl);
++            try e.exact.compress2(e.s, ch.kvc, ch.scc, ch.lat2, plan.full, hd);
++            try e.exact.rmsNorm(e.s, ch.lat2, hd, lay.comp_norm, ch.lat, hd, plan.full, hd, c.eps);
+         }
+     }
+     sh.kv_layer = li;
+     // The fused stores derive their group id and rotation position from the chunk (start/ratio + row, times ratio),
+     // so ch.groups/ch.gpos are staged only for a path that reads them: the unfused rope/fp4_store chains.
+     const rot = e.compressed;
+-    const base_group = start / r;
+-    const idx_key_fused = if (lay.idx_wk) |_| (fused_trace.keyArm(e.ops.rope_store, full, c.index_head_dim, rd, 1, true) == .prompt_key_fused) else true;
+-    const lat_fused = fused_trace.latentArm(e.ops.rope_store, full, hd, rd, true) == .prompt_latent_fused;
+-    if (!idx_key_fused or !lat_fused) {
+-        var g_host: [4096]i64 = undefined;
+-        var p_host: [4096]i64 = undefined;
+-        if (full > g_host.len) return error.ChunkTooLong;
++    if (stage_group_pos) {
++        var g_host: [max_kv_source_groups]i64 = undefined;
++        var p_host: [max_kv_source_groups]i64 = undefined;
+         for (0..full) |j| {
+             g_host[j] = @intCast(base_group + j);
+             p_host[j] = @intCast((base_group + j) * r);
+@@ -2719,3 +2788,158 @@ test "the indexer's row blocks are whole 16-row multiples, so every block's view
+     // a chunk that fits in one block is one block, whatever its size
+     try std.testing.expectEqual(@as(usize, 100), indexRowBlock(100, 10));
+ }
++
++test "0231 planKvSource2 matches unfused and fused multi-chunk ring and group progressions" {
++    const State = struct {
++        raw_kv: [raw_rows]i64 = @splat(-1),
++        raw_score: [raw_rows]i64 = @splat(-1),
++        idx_pos: [256]i64 = @splat(-1),
++        lat_pos: [256]i64 = @splat(-1),
++        lat_pair: [256]i64 = @splat(-1),
++
++        fn apply(st: *@This(), p: KvSource2Plan, start: usize, n: usize, tag_base: i64) !void {
++            if (p.do_scatter_upload) {
++                for (0..p.keep) |j| {
++                    const slot: usize = @intCast(p.raw_idx[j]);
++                    const tok = tag_base + @as(i64, @intCast(start + p.raw_first + j));
++                    st.raw_kv[slot] = tok;
++                    st.raw_score[slot] = tok + 10_000;
++                }
++            }
++            if (!p.do_compress) return;
++            if (p.compress_fused) {
++                // Simulate tf_ds_compress2_norm_kernel across all grid.x = p.grid_rows blocks.
++                for (0..p.grid_rows) |g| {
++                    if (2 * g + 1 >= n) {
++                        const j = 2 * g;
++                        if (j >= p.raw_first and j < n) {
++                            const slot = (p.raw_pos0 + (j - p.raw_first)) % raw_rows;
++                            const tok = tag_base + @as(i64, @intCast(start + j));
++                            st.raw_kv[slot] = tok;
++                            st.raw_score[slot] = tok + 10_000;
++                        }
++                        continue;
++                    }
++                    const j0 = 2 * g;
++                    const j1 = 2 * g + 1;
++                    if (j0 >= p.raw_first) {
++                        const s0 = (p.raw_pos0 + (j0 - p.raw_first)) % raw_rows;
++                        const tok0 = tag_base + @as(i64, @intCast(start + j0));
++                        st.raw_kv[s0] = tok0;
++                        st.raw_score[s0] = tok0 + 10_000;
++                    }
++                    if (j1 >= p.raw_first) {
++                        const s1 = (p.raw_pos0 + (j1 - p.raw_first)) % raw_rows;
++                        const tok1 = tag_base + @as(i64, @intCast(start + j1));
++                        st.raw_kv[s1] = tok1;
++                        st.raw_score[s1] = tok1 + 10_000;
++                    }
++                    st.lat_pair[p.base_group + g] = tag_base + @as(i64, @intCast(start + j0));
++                }
++            } else {
++                for (0..p.full) |g| {
++                    st.lat_pair[p.base_group + g] = tag_base + @as(i64, @intCast(start + 2 * g));
++                }
++            }
++            var g_host: [256]i64 = @splat(-1);
++            var p_host: [256]i64 = @splat(-1);
++            if (p.stage_group_pos) {
++                for (0..p.full) |j| {
++                    g_host[j] = @intCast(p.base_group + j);
++                    p_host[j] = @intCast((p.base_group + j) * 2);
++                }
++            }
++            for (0..p.full) |r| {
++                const ik_gid: usize = if (p.idx_key_fused) p.base_group + r else @intCast(g_host[r]);
++                const ik_pos: i64 = if (p.idx_key_fused) @intCast((p.base_group + r) * 2) else p_host[r];
++                st.idx_pos[ik_gid] = ik_pos;
++                const lt_gid: usize = if (p.lat_fused) p.base_group + r else @intCast(g_host[r]);
++                const lt_pos: i64 = if (p.lat_fused) @intCast((p.base_group + r) * 2) else p_host[r];
++                st.lat_pos[lt_gid] = lt_pos;
++            }
++        }
++    };
++
++    // Progression 1: matches the 4-chunk GPU parity script (including n=1 full==0, odd+wrap, raw_first>0+wrap)
++    const seq1 = [_][2]usize{ .{ 0, 50 }, .{ 50, 1 }, .{ 51, 19 }, .{ 70, 131 } };
++    var off1: State = .{};
++    var on1: State = .{};
++    for (seq1, 0..) |step, step_i| {
++        const p_off = try planKvSource2(step[0], step[1], 512, 128, 64, false, false);
++        const p_on = try planKvSource2(step[0], step[1], 512, 128, 64, true, true);
++        if (step[1] == 1) {
++            try std.testing.expectEqual(@as(usize, 0), p_on.full);
++            try std.testing.expect(!p_on.do_compress);
++            try std.testing.expect(!p_on.compress_fused);
++            try std.testing.expect(p_on.do_scatter_upload);
++            try std.testing.expect(!p_on.stage_group_pos);
++        } else {
++            try std.testing.expect(p_on.do_compress and p_on.compress_fused);
++            try std.testing.expect(!p_on.do_scatter_upload);
++            try std.testing.expect(p_off.do_scatter_upload and p_off.stage_group_pos);
++            try std.testing.expect(p_on.idx_key_fused and p_on.lat_fused and !p_on.stage_group_pos);
++        }
++        try std.testing.expectEqual((step[1] + 1) / 2, p_on.grid_rows);
++        try off1.apply(p_off, step[0], step[1], @intCast(step_i * 1000));
++        try on1.apply(p_on, step[0], step[1], @intCast(step_i * 1000));
++        try std.testing.expectEqualSlices(i64, &off1.raw_kv, &on1.raw_kv);
++        try std.testing.expectEqualSlices(i64, &off1.raw_score, &on1.raw_score);
++        try std.testing.expectEqualSlices(i64, &off1.idx_pos, &on1.idx_pos);
++        try std.testing.expectEqualSlices(i64, &off1.lat_pos, &on1.lat_pos);
++        try std.testing.expectEqualSlices(i64, &off1.lat_pair, &on1.lat_pair);
++    }
++
++    // Progression 2: group-aligned chunks covering n=1, odd chunks n=3, 65 (odd raw_first=1), 129 (odd raw_first=65), and wrap
++    const seq2 = [_][2]usize{ .{ 0, 3 }, .{ 4, 65 }, .{ 70, 1 }, .{ 70, 129 } };
++    var off2: State = .{};
++    var on2: State = .{};
++    var mix_c: State = .{}; // compress2_norm ON, rope_store OFF
++    var mix_r: State = .{}; // compress2_norm OFF, rope_store ON
++    for (seq2, 0..) |step, step_i| {
++        const p_off = try planKvSource2(step[0], step[1], 512, 128, 64, false, false);
++        const p_on = try planKvSource2(step[0], step[1], 512, 128, 64, true, true);
++        const p_c = try planKvSource2(step[0], step[1], 512, 128, 64, true, false);
++        const p_r = try planKvSource2(step[0], step[1], 512, 128, 64, false, true);
++        const bias: i64 = @intCast((step_i + 1) * 2000);
++        try off2.apply(p_off, step[0], step[1], bias);
++        try on2.apply(p_on, step[0], step[1], bias);
++        try mix_c.apply(p_c, step[0], step[1], bias);
++        try mix_r.apply(p_r, step[0], step[1], bias);
++        for ([_]*const State{ &on2, &mix_c, &mix_r }) |cand| {
++            try std.testing.expectEqualSlices(i64, &off2.raw_kv, &cand.raw_kv);
++            try std.testing.expectEqualSlices(i64, &off2.raw_score, &cand.raw_score);
++            try std.testing.expectEqualSlices(i64, &off2.idx_pos, &cand.idx_pos);
++            try std.testing.expectEqualSlices(i64, &off2.lat_pos, &cand.lat_pos);
++            try std.testing.expectEqualSlices(i64, &off2.lat_pair, &cand.lat_pair);
++        }
++    }
++    const p65 = try planKvSource2(4, 65, 512, 128, 64, true, true);
++    try std.testing.expectEqual(@as(usize, 64), p65.keep);
++    try std.testing.expectEqual(@as(usize, 1), p65.raw_first);
++    try std.testing.expectEqual(@as(usize, 5), p65.raw_pos0);
++    try std.testing.expectEqual(@as(usize, 33), p65.grid_rows);
++
++    const p129 = try planKvSource2(70, 129, 512, 128, 64, true, true);
++    try std.testing.expectEqual(@as(usize, 64), p129.keep);
++    try std.testing.expectEqual(@as(usize, 65), p129.raw_first);
++    try std.testing.expectEqual(@as(usize, (70 + 65) % raw_rows), p129.raw_pos0);
++    try std.testing.expectEqual(@as(usize, 65), p129.grid_rows);
++
++    // Partial-fusion fallbacks driven by shapes and optional idx_wk
++    const bad_id = try planKvSource2(0, 16, 512, 96, 64, true, true);
++    try std.testing.expect(bad_id.compress_fused and bad_id.lat_fused and !bad_id.idx_key_fused and bad_id.stage_group_pos);
++
++    const wide_hd = try planKvSource2(0, 16, 1024, 128, 64, true, true);
++    try std.testing.expect(wide_hd.compress_fused and wide_hd.idx_key_fused and !wide_hd.lat_fused and wide_hd.stage_group_pos);
++
++    const no_ik_off = try planKvSource2(0, 16, 512, null, 64, true, false);
++    try std.testing.expect(no_ik_off.idx_key_fused and !no_ik_off.lat_fused and no_ik_off.stage_group_pos);
++    const no_ik_on = try planKvSource2(0, 16, 512, null, 64, true, true);
++    try std.testing.expect(no_ik_on.idx_key_fused and no_ik_on.lat_fused and !no_ik_on.stage_group_pos);
++
++    // Consistent ChunkTooLong check whether fused or unfused
++    _ = try planKvSource2(0, max_kv_source_groups * 2 + 1, 512, 128, 64, true, true);
++    _ = try planKvSource2(0, max_kv_source_groups * 2 + 1, 512, 128, 64, false, false);
++    try std.testing.expectError(error.ChunkTooLong, planKvSource2(0, (max_kv_source_groups + 1) * 2, 512, 128, 64, true, true));
++    try std.testing.expectError(error.ChunkTooLong, planKvSource2(0, (max_kv_source_groups + 1) * 2, 512, 128, 64, false, false));
++}

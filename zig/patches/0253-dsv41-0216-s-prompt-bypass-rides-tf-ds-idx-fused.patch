@@ -1,0 +1,20 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit 10bb4dcbcd03)
+# 0253 dsv41: 0216's prompt bypass rides TF_DS_IDX_FUSED, skips the keyed layers and refuses a coexisting pool (review S1-S3)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index d789e5c947bc5ee5434b3fca84af2d516167bb15..3fbad06cc49e8ec892edac472fcbca7d407a8747 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1424,7 +1424,11 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+         return;
+     }
+     if (n_comp_end > ch.max_comp) return error.ChunkTooLong;
+-    if (n_comp_end <= c.index_topk) {
++    // 0252: the bypass rides TF_DS_IDX_FUSED, skips the keyed layers (their selection is the kit's _topk_sel, whose
++    // order at k == n is not byte-checked against iotaVis) and refuses a config whose pool could coexist with it.
++    const pre_keyed = li < c.candidate_source and n_comp_end & (n_comp_end - 1) == 0;
++    const pre_nbk = (n_comp_end + c.candidate_block - 1) / c.candidate_block;
++    if (e.ops.idx_fused and !pre_keyed and pre_nbk <= c.candidate_blocks and n_comp_end <= c.index_topk) {
+         // every compressed key fits in the pick budget: the selection is the visible ids themselves (the k best of
+         // n_comp_end keys is all of them, `vis` masking those past the row's count, and the engine's own topk_indices
+         // already writes them in ascending column order), so the query projection, its RoPE and quantization, the

@@ -1,7 +1,11 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit ddd2915f6181)
+# 0254 dsv41: stop score top-k at a complete radix bin under TF_DS_IDX_FUSED
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
 diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index ee00995480e7787cc0c1404720ff0d11d9ed40fd..da3eb887e830066630e63238832ca3903a5b7494 100644
 --- a/zig/kernels/cuda/dsv41_ops.cu
 +++ b/zig/kernels/cuda/dsv41_ops.cu
-@@ -141,35 +141,70 @@
+@@ -141,35 +141,70 @@ __device__ __forceinline__ unsigned long long tf_ds_score_key(float x, int j) {
  // kernels.topk_indices(score, k), then torch.where(top < vis, top, -1) (model.py attention_k, the candidate pool's
  // layers), a row a block (1024 threads): each score's int64 key (its bits, -0 as +0 (score + 0.0), ordered as signed
  // integers, above the inverted column: a total order, ties to the lower column), the k largest keys by a radix select
@@ -12,11 +16,10 @@ diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
 -extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(const float* score, long long ss, int n,
 -                                                                              int k, const long long* vis,
 -                                                                              long long* out, int pdl) {
--    pdl_enter(pdl);
 +template <bool EarlyCut>
 +__device__ __forceinline__ void tf_ds_topk_indices(const float* score, long long ss, int n, int k,
 +                                                   const long long* vis, long long* out, int pdl) {
-+    pdl_enter(pdl);
+     pdl_enter(pdl);
 +    if (EarlyCut && k == 0) return;
 +    if (EarlyCut && k == n) {
 +        const long long v = vis[blockIdx.x];
@@ -81,24 +84,21 @@ diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
              int want = want_s;
              int b = 255;
              for (; b > 0; --b) {
-@@ -181,8 +216,9 @@
+@@ -181,8 +216,9 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(con
              mask_s = mask | (0xffull << (8 * d));
          }
          __syncthreads();
--    }
--    const unsigned long long kth = prefix_s;   // the keys are unique: exactly k at or above it
 +        if (EarlyCut && want_s == 0) break;
-+    }
+     }
+-    const unsigned long long kth = prefix_s;   // the keys are unique: exactly k at or above it
 +    const unsigned long long kth = prefix_s;
      for (int i = threadIdx.x; i < n; i += blockDim.x) {
          if (tf_ds_score_key(row[i], i) >= kth) {
              const int at = atomicAdd(&count_s, 1);
-@@ -212,6 +248,16 @@
-     const long long v = vis[blockIdx.x];
-     long long* o = out + (long long)blockIdx.x * k;
+@@ -214,6 +250,16 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(con
      for (int i = threadIdx.x; i < k; i += blockDim.x) o[i] = cols[i] < v ? cols[i] : -1;
-+}
-+
+ }
+ 
 +extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_kernel(const float* score, long long ss,
 +        int n, int k, const long long* vis, long long* out, int pdl) {
 +    tf_ds_topk_indices<false>(score, ss, n, k, vis, out, pdl);
@@ -107,13 +107,16 @@ diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
 +extern "C" __global__ void __launch_bounds__(1024) tf_ds_topk_indices_cut_kernel(const float* score, long long ss,
 +        int n, int k, const long long* vis, long long* out, int pdl) {
 +    tf_ds_topk_indices<true>(score, ss, n, k, vis, out, pdl);
- }
- 
++}
++
  // TF_DS_TOPK_FAST (tf_ds_topk_indices_fast_kernel): the same selection in three reads of the row instead of ten. A
+ // systematic sample of the row (every `stride`-th column, ~4096 of them) is radix-selected to the sample's rank of k,
+ // which estimates the k-th largest key; one pass then compacts every key at or above that estimate into shared memory;
 diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 98cf89440963ab6a993bbfedd5dc64a1db0c50bd..3e18c291b5ba5e849e0a17e09f4c6354c39b5f25 100644
 --- a/zig/src/families/dsv41/ops.zig
 +++ b/zig/src/families/dsv41/ops.zig
-@@ -173,7 +173,7 @@
+@@ -175,7 +175,7 @@ pub const Ops = struct {
              .f16_to_f32 = try fm.function("tf_ds_f16_to_f32_kernel"),
              .add2_bf16 = try fm.function("tf_ds_add2_bf16_kernel"),
              .topk_i64 = try fm.function("tf_ds_topk_i64_kernel"),

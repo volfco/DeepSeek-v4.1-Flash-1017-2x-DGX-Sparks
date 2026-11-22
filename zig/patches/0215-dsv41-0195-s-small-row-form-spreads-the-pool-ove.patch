@@ -1,0 +1,170 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit 3c3dbdb7d3fa)
+# 0215 dsv41: 0195's small-row form spreads the pool over block_max's grid (small-row research item)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index 8b82c88749c3ae17aacdeb9898c4319f11633433..ee00995480e7787cc0c1404720ff0d11d9ed40fd 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -1006,24 +1006,11 @@ __device__ __forceinline__ void tf_ds_block_max_t(float* maxima, const float* ro
+     }
+ }
+ 
+-extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const float* score, long long ss, int width,
+-                                                                          int bsize, const long long* vis,
+-                                                                          const long long* every, int k,
+-                                                                          uint8_t* mask, long long ms, int* cblk,
+-                                                                          int pdl) {
+-    pdl_enter(pdl);
+-    const int r = blockIdx.x;
+-    const int nb = 1 + (width - 1) / bsize;
+-    extern __shared__ float maxima[];
+-    const float ninf = -__int_as_float(0x7f800000);
+-    const float* row = score + (long long)r * ss;
+-    // phase 1: the block maxima; the served block size with a 16-byte-aligned row stride takes the static, vectorized
+-    // form, anything else the runtime loop (the same arithmetic, so both are byte-identical)
+-    const long long visible = vis[r];
+-    const long long last = visible > 0 ? (visible - 1) / bsize : -1;
+-    if (bsize == 8 && (ss & 3) == 0) tf_ds_block_max_t<8>(maxima, row, width, nb, last);
+-    else tf_ds_block_max_t<0>(maxima, row, width, nb, last, bsize);
+-    __syncthreads();
++// The pool's selection and its two outputs: the cutoff on the score digits with the tied columns resolved during
++// compaction (tf_ds_pool_cut), then either the mask alone (the prompt arm: no ballot, prefix sum or compaction) or the
++// decode arm's ascending block list. `maxima` is on chip, one block a column, `limit` the row's `every`.
++__device__ __forceinline__ void tf_ds_idx_select(float* maxima, int nb, int k, uint8_t* mask, long long ms, int* cblk,
++                                                 int r, long long limit) {
+     __shared__ unsigned long long prefix_s, mask_s;
+     __shared__ int want_s;
+     __shared__ int warp_end[32];
+@@ -1039,7 +1026,7 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+     __syncthreads();
+     const unsigned long long prefix = prefix_s, cmask = mask_s;
+     const int want = want_s;
+-    const long long limit = every[r];
++    const float ninf = -__int_as_float(0x7f800000);
+     const int lane = threadIdx.x & 31;
+     const int warp = threadIdx.x >> 5;
+     if (cblk == nullptr) {
+@@ -1094,6 +1081,39 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+     }
+ }
+ 
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const float* score, long long ss, int width,
++                                                                          int bsize, const long long* vis,
++                                                                          const long long* every, int k,
++                                                                          uint8_t* mask, long long ms, int* cblk,
++                                                                          int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    const int nb = 1 + (width - 1) / bsize;
++    extern __shared__ float maxima[];
++    const float* row = score + (long long)r * ss;
++    // phase 1: the block maxima; the served block size with a 16-byte-aligned row stride takes the static, vectorized
++    // form, anything else the runtime loop (the same arithmetic, so both are byte-identical)
++    const long long visible = vis[r];
++    const long long last = visible > 0 ? (visible - 1) / bsize : -1;
++    if (bsize == 8 && (ss & 3) == 0) tf_ds_block_max_t<8>(maxima, row, width, nb, last);
++    else tf_ds_block_max_t<0>(maxima, row, width, nb, last, bsize);
++    __syncthreads();
++    tf_ds_idx_select(maxima, nb, k, mask, ms, cblk, r, every[r]);
++}
++
++// The same selection from the block maxima in global memory (block_max's output): the small-row form's second launch,
++// one CTA a row. The maxima are staged on chip once, so the radix passes and the compaction stay shared-memory work.
++extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_pick_kernel(const float* bmax, long long bs, int nbk, int k,
++                                                                        const long long* every, int* cblk, int pdl) {
++    pdl_enter(pdl);
++    const int r = blockIdx.x;
++    extern __shared__ float maxima[];
++    const float* src = bmax + (long long)r * bs;
++    for (int b = threadIdx.x; b < nbk; b += blockDim.x) maxima[b] = src[b];
++    __syncthreads();
++    tf_ds_idx_select(maxima, nbk, k, nullptr, 0, cblk, r, every[r]);
++}
++
+ // Rows of n16 16-byte words: dst row r = src row r (row strides in words). torch_ops' tf_strided_copy takes a block a
+ // row and a byte a thread; this one a word a thread over grid (ceil(n16 / blockDim), rows). Every pointer, stride and
+ // row length a multiple of 16 bytes (ops.copyRows checks).
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 2a89710409034cde8a5f877cb6bd60de83182049..04f9e6e3257a62f06dad07a443223248960db2e7 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -31,6 +31,15 @@ pub const max_k = 2048;
+ /// the served block size); past it the unfused sequence runs.
+ pub const max_nbk = 8192;
+ 
++/// Rows at or below this use the small-row form: the maxima over the pool's own 2D grid (block_max), then the selection
++/// from those global maxima in one CTA a row (tf_ds_idx_pick_kernel), because a single CTA a row leaves most of the GPU
++/// idle at one to seven rows. Above it the one-launch fused form runs. Both produce the same block list.
++pub const small_rows = 7;
++/// The block count from which the small-row form pays: at the pool's 8192-block cap (65,536 columns) the 2D grid's
++/// parallel score read wins at both one and seven rows (10.5 vs 12.1 µs, 11.8 vs 12.4 µs); at 2048 and 4096 blocks the
++/// second launch and the selection's staging cost more than the parallel read saves (5.8 vs 5.6, 8.7 vs 8.5 µs).
++pub const small_nbk = 6144;
++
+ /// Whether the fused launch supports this configuration. The call sites fall back to the unfused sequence when it
+ /// does not. k > nbk (the selection's own bound) and nbk <= 0 refuse; `width` must agree with `bsize`.
+ pub fn fuseOk(fused: bool, rows: usize, width: usize, bsize: usize, nbk: usize, k: usize) bool {
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 8a46d7084cf306b7ecee7d8765e0324aff006a77..c3feeff58d9bc0c4611d36e45b48d15d9c551d2e 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -131,6 +131,7 @@ pub const Ops = struct {
+     fused_route: bool = false, // TF_DS_FUSED_ROUTE combines pruning and dead-row masking
+     idx_fused: bool = false, // TF_DS_IDX_FUSED, read at load; off by default
+     idx_fused_fn: ?cuda.Function = null, // looked up only when the switch is on
++    idx_pick_fn: ?cuda.Function = null, // the small-row form's second launch (idx_fused's selection from global maxima)
+     compress2_norm: bool = false, // TF_DS_FUSED_COMPRESS2_NORM, read at load; off by default
+     rope_store: bool = false, // TF_DS_FUSED_ROPE_STORE, read at load; off by default
+     check_invalid: bool = false, // TF_DS_CHECK_INVALID, read at load; off by default (a diagnostic)
+@@ -197,6 +198,7 @@ pub const Ops = struct {
+             .prune_fn = if (prune != null) try fm.function("tf_ds_expert_prune_kernel") else null,
+             .idx_fused = idx_fused_on,
+             .idx_fused_fn = if (idx_fused_on) try fm.function("tf_ds_idx_fused_kernel") else null,
++            .idx_pick_fn = if (idx_fused_on) try fm.function("tf_ds_idx_pick_kernel") else null,
+             .compress2_norm = compress2_norm_on,
+             .rope_store = rope_store_on,
+             .check_invalid = check_invalid,
+@@ -501,6 +503,24 @@ pub const Ops = struct {
+         try cuda.launch.launch(o.idx_fused_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
+     }
+ 
++    /// TF_DS_IDX_FUSED's small-row form, second launch: tf_ds_idx_pick_kernel selects from block_max's maxima (bmax
++    /// [rows, nbk] fp32 at row stride bs) and writes the decode arm's block list, exactly as idxFused's decode arm does
++    /// (one CTA a row; the maxima are staged on chip). The call sites use it for rows <= idx_fused.small_rows.
++    pub fn idxPick(o: *const Ops, s: cuda.Stream, bmax: u64, bs: usize, nbk: usize, k: usize, every: u64, cblk: u64, rows: usize) !void {
++        if (rows == 0) return;
++        if (bmax == 0 or every == 0 or cblk == 0) return error.BadIdxFusedArgs;
++        if (nbk == 0 or nbk > idx_fused.max_nbk or bs < nbk or k < 1 or k > idx_fused.max_k or k > nbk) return error.BadIdxFusedArgs;
++        var a: cuda.Args = .{};
++        a.add(bmax);
++        a.add(@as(c_longlong, @intCast(bs)));
++        a.add(@as(c_int, @intCast(nbk)));
++        a.add(@as(c_int, @intCast(k)));
++        a.add(every);
++        a.add(cblk);
++        a.add(@as(c_int, @intFromBool(o.pdl)));
++        try cuda.launch.launch(o.idx_pick_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
++    }
++
+     /// model.py apply_candidates, in place: -inf at every column of score [rows, width] (row stride ss) whose block of
+     /// bsize the row's pool mask (u8, row stride ms) leaves out.
+     pub fn applyPool(o: *const Ops, s: cuda.Stream, score: u64, ss: usize, width: usize, bsize: usize, mask: u64, ms: usize, rows: usize) !void {
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 80a9de21152b144738334be041b98dd5f89853f2..c9aca6a0af7a6802e58b7838ba4cb1d6c957414b 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1293,7 +1293,13 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     // TF_DS_IDX_FUSED: the same three launches in one (off by default; the bounds keep the pool's
+                     // regime, past them the unfused sequence runs)
+                     if (idx_fused.fuseOk(e.ops.idx_fused, R, nb, cb, nbk, c.candidate_blocks)) {
+-                        try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
++                        if (R <= idx_fused.small_rows and nbk >= idx_fused.small_nbk) {
++                            // the small-row form: the maxima over the pool's own 2D grid, then the selection from them
++                            // (the same cutoff, tied columns and ascending list; a single CTA a row would leave most
++                            // of the GPU idle at one to seven rows)
++                            try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
++                            try e.ops.idxPick(e.s, rd.bmax, nbk, nbk, c.candidate_blocks, rd.pbufs.every, rd.cblk, R);
++                        } else try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
+                     } else {
+                         try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
+                         try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);

@@ -1,0 +1,328 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit d3841330d467)
+# 0231 dsv41: 0197's prompt source step folds the raw-ring tails and the position setup into the fused launches (item 5)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index 330f089a05f0362a1509de30ceed6cb6e22393a5..92b40b7cb5ad71e04eb2b4367271558f66050c5e 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -424,13 +424,20 @@ __device__ __forceinline__ float tf_ds_compress2_pair(float s0, float s1, float
+ // The pair pass over ITEMS channels a thread, keeping each channel's bf16 result: the norm's output is the same
+ // flattened `lane + i * threads` index, so the store reads the register value instead of shared srow (srow still feeds
+ // the reduction, whose four-channel mapping differs).
++// `raw_kv`/`raw_score` (null when the caller scatters them itself): this block's two raw rows go to the ring at
++// their modular positions, which is the scatter launch the prompt source step used to run for them. Only rows at or
++// past `raw_first` are written, the window the scatter covers (the last raw_rows rows of a chunk).
+ template<int ITEMS>
+ __device__ __forceinline__ void tf_ds_compress2_norm_items(const float* kv, const float* score, const __nv_bfloat16* w,
+                                                            __nv_bfloat16* out, __nv_bfloat16* srow, long long ldo,
+-                                                           int D, float factor, float eps) {
++                                                           int D, float factor, float eps, float* raw_kv,
++                                                           float* raw_score, int ring_len, long long raw_pos0,
++                                                           int raw_first) {
+     const long long g = blockIdx.x;
+     const int lane = threadIdx.x + blockDim.x * threadIdx.y;
+     const int threads = blockDim.x * blockDim.y;
++    const int slot0 = raw_kv && (2 * g) >= raw_first ? (int)((raw_pos0 + (2 * g - raw_first)) % ring_len) : -1;
++    const int slot1 = raw_kv && (2 * g + 1) >= raw_first ? (int)((raw_pos0 + (2 * g + 1 - raw_first)) % ring_len) : -1;
+     __nv_bfloat16 held[ITEMS];
+     #pragma unroll
+     for (int i = 0; i < ITEMS; ++i) {
+@@ -438,37 +445,74 @@ __device__ __forceinline__ void tf_ds_compress2_norm_items(const float* kv, cons
+         if (c < D) {
+             const float s0 = score[(g * 2) * D + c];
+             const float s1 = score[(g * 2 + 1) * D + c];
+-            held[i] = __float2bfloat16_rn(tf_ds_compress2_pair(s0, s1, kv[(g * 2) * D + c], kv[(g * 2 + 1) * D + c]));
++            const float k0 = kv[(g * 2) * D + c];
++            const float k1 = kv[(g * 2 + 1) * D + c];
++            held[i] = __float2bfloat16_rn(tf_ds_compress2_pair(s0, s1, k0, k1));
+             srow[c] = held[i];
++            if (slot0 >= 0) {
++                raw_kv[(long long)slot0 * D + c] = k0;
++                raw_score[(long long)slot0 * D + c] = s0;
++            }
++            if (slot1 >= 0) {
++                raw_kv[(long long)slot1 * D + c] = k1;
++                raw_score[(long long)slot1 * D + c] = s1;
++            }
+         }
+     }
+     __syncthreads();
+     tf_ds_torch_rmsnorm_row_held<ITEMS>(srow, w, out + g * ldo, D, factor, eps, held);
+ }
+ 
++// grid.x = G complete pairs plus (n_rows odd) one more block that writes only the trailing row's raw-ring slot: the
++// trailing row has no pair, so it produces no latent, and the source step needs its raw bytes in the ring.
+ extern "C" __global__ void tf_ds_compress2_norm_kernel(const float* kv, const float* score,
+                                                        const __nv_bfloat16* w, __nv_bfloat16* out,
+-                                                       long long ldo, int G, int D, float factor, float eps, int pdl) {
++                                                       long long ldo, int G, int D, float factor, float eps, int pdl,
++                                                       float* raw_kv, float* raw_score, int ring_len,
++                                                       long long raw_pos0, int raw_first, int n_rows) {
+     pdl_enter(pdl);
+-    const int g = blockIdx.x;
++    const long long g = blockIdx.x;
+     __shared__ __nv_bfloat16 srow[2048];   // D <= 2048
+     const int threads = blockDim.x * blockDim.y;
++    if (2 * g + 1 >= n_rows) {
++        const long long j = 2 * g;
++        if (raw_kv && j >= raw_first && j < n_rows) {
++            const int slot = (int)((raw_pos0 + (j - raw_first)) % ring_len);
++            for (int c = threadIdx.x + blockDim.x * threadIdx.y; c < D; c += threads) {
++                raw_kv[(long long)slot * D + c] = kv[j * D + c];
++                raw_score[(long long)slot * D + c] = score[j * D + c];
++            }
++        }
++        return;
++    }
+     // the launcher's block is min(D, target) lanes over a whole number of channels a thread: 1, 2, 4, 8 or 16 items
+     if (threads > 0 && threads <= D && (D % threads) == 0) {
+         switch (D / threads) {
+-            case 1: tf_ds_compress2_norm_items<1>(kv, score, w, out, srow, ldo, D, factor, eps); return;
+-            case 2: tf_ds_compress2_norm_items<2>(kv, score, w, out, srow, ldo, D, factor, eps); return;
+-            case 4: tf_ds_compress2_norm_items<4>(kv, score, w, out, srow, ldo, D, factor, eps); return;
+-            case 8: tf_ds_compress2_norm_items<8>(kv, score, w, out, srow, ldo, D, factor, eps); return;
+-            case 16: tf_ds_compress2_norm_items<16>(kv, score, w, out, srow, ldo, D, factor, eps); return;
++            case 1: tf_ds_compress2_norm_items<1>(kv, score, w, out, srow, ldo, D, factor, eps, raw_kv, raw_score, ring_len, raw_pos0, raw_first); return;
++            case 2: tf_ds_compress2_norm_items<2>(kv, score, w, out, srow, ldo, D, factor, eps, raw_kv, raw_score, ring_len, raw_pos0, raw_first); return;
++            case 4: tf_ds_compress2_norm_items<4>(kv, score, w, out, srow, ldo, D, factor, eps, raw_kv, raw_score, ring_len, raw_pos0, raw_first); return;
++            case 8: tf_ds_compress2_norm_items<8>(kv, score, w, out, srow, ldo, D, factor, eps, raw_kv, raw_score, ring_len, raw_pos0, raw_first); return;
++            case 16: tf_ds_compress2_norm_items<16>(kv, score, w, out, srow, ldo, D, factor, eps, raw_kv, raw_score, ring_len, raw_pos0, raw_first); return;
+             default: break;
+         }
+     }
+     // any other geometry: the pair pass, then the norm's own store over srow
++    const int slot0 = raw_kv && (2 * g) >= raw_first ? (int)((raw_pos0 + (2 * g - raw_first)) % ring_len) : -1;
++    const int slot1 = raw_kv && (2 * g + 1) >= raw_first ? (int)((raw_pos0 + (2 * g + 1 - raw_first)) % ring_len) : -1;
+     for (int c = threadIdx.x + blockDim.x * threadIdx.y; c < D; c += threads) {
+         const float s0 = score[((long long)g * 2) * D + c];
+         const float s1 = score[((long long)g * 2 + 1) * D + c];
+-        srow[c] = __float2bfloat16_rn(tf_ds_compress2_pair(s0, s1, kv[((long long)g * 2) * D + c], kv[((long long)g * 2 + 1) * D + c]));
++        const float k0 = kv[((long long)g * 2) * D + c];
++        const float k1 = kv[((long long)g * 2 + 1) * D + c];
++        srow[c] = __float2bfloat16_rn(tf_ds_compress2_pair(s0, s1, k0, k1));
++        if (slot0 >= 0) {
++            raw_kv[(long long)slot0 * D + c] = k0;
++            raw_score[(long long)slot0 * D + c] = s0;
++        }
++        if (slot1 >= 0) {
++            raw_kv[(long long)slot1 * D + c] = k1;
++            raw_score[(long long)slot1 * D + c] = s1;
++        }
+     }
+     __syncthreads();
+     tf_ds_torch_rmsnorm_row(srow, w, out + (long long)g * ldo, D, factor, eps);
+@@ -852,16 +896,19 @@ extern "C" __global__ void __launch_bounds__(128) tf_ds_fused_rope_qd_kernel(con
+ // shared memory (ch.ik's store had no reader).
+ extern "C" __global__ void tf_ds_fused_prompt_idx_key_kernel(const __nv_bfloat16* x, long long ldx,
+                                                              const __nv_bfloat16* w, float eps, float factor,
+-                                                             const float* cos, const float* sin, const long long* pos,
+-                                                             uint8_t* codes, uint8_t* scales, const long long* rows_idx,
++                                                             const float* cos, const float* sin, long long base_group,
++                                                             int ratio, uint8_t* codes, uint8_t* scales,
+                                                              int D, int RD, int pdl) {
+     pdl_enter(pdl);
+     const int r = blockIdx.x;
++    // The group id and the rotation position are derived (start/ratio + r, times ratio) instead of uploaded as
++    // arrays: the source step no longer stages ch.groups/ch.gpos for the fused path.
++    const long long gid = base_group + r;
+     __shared__ __nv_bfloat16 srow[512];   // D <= 512
+     tf_ds_torch_rmsnorm_row(x + (long long)r * ldx, w, srow, D, factor, eps);
+     __syncthreads();
+     // ops.rope_ (torch's contraction) and the kit's _fp4_store in one packed-column pass
+-    tf_ds_key_store_row<true>(srow, cos, sin, pos[r], codes, scales, rows_idx[r], D, RD);
++    tf_ds_key_store_row<true>(srow, cos, sin, gid * ratio, codes, scales, gid, D, RD);
+ }
+ 
+ // The prompt latent (prompt.zig's kv-source layers): ops.rope_ (tf_ds_rope_kernel's arithmetic) + the kit's
+@@ -870,11 +917,11 @@ extern "C" __global__ void tf_ds_fused_prompt_idx_key_kernel(const __nv_bfloat16
+ // min(D/2, 256), y = 1 }: blockDim.x already covers the packed half row, so no extra y lanes are passed.
+ extern "C" __global__ void __launch_bounds__(256) tf_ds_fused_prompt_latent_kernel(const __nv_bfloat16* x,
+                                                                                    const float* cos, const float* sin,
+-                                                                                   const long long* pos,
++                                                                                   long long base_group, int ratio,
+                                                                                    uint8_t* codes, uint8_t* scales,
+-                                                                                   const long long* rows_idx,
+                                                                                    int D, int RD, int pdl) {
+     pdl_enter(pdl);
+     const int r = blockIdx.x;
+-    tf_ds_latent_row<true>(x, cos, sin, pos[r], codes, scales, rows_idx[r], D, RD);
++    const long long gid = base_group + r;
++    tf_ds_latent_row<true>(x, cos, sin, gid * ratio, codes, scales, gid, D, RD);
+ }
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index 9bf0f834d6466a1fa12cd8f0a9cd0fc6cbef9dae..4b787047eb0ed3c80356945e24d67bcaf88797eb 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -156,9 +156,15 @@ pub const Exact = struct {
+     /// TF_DS_FUSED_COMPRESS2_NORM, prompt half: tf_ds_compress2_norm_kernel — Exact.compress2's pair sum and
+     /// Exact.rmsNorm's arithmetic in one launch (one block a row; block.x = rmsLanes(d, rows), the lane count the
+     /// unfused rmsNorm launch would use). `factor` is computed as rmsNorm does (rows/(rows*d) as f32).
+-    pub fn compress2Norm(e: *const Exact, s: cuda.Stream, kv: u64, score: u64, w: u64, out: u64, ldo: usize, rows: usize, d: usize, eps: f32) !void {
++    /// `raw_kv`/`raw_score` (0: the caller scatters them) are the raw-ring rows the source step used to write with a
++    /// scatter launch: the last `raw_keep` rows of the chunk (rows at or past `rows - raw_keep`) go to slots
++    /// `raw_pos0 + j - (rows - raw_keep)` modulo `raw_len`. The launch is one block past the pairs when the chunk has
++    /// an odd trailing row, which writes only that row's raw slot.
++    pub fn compress2Norm(e: *const Exact, s: cuda.Stream, kv: u64, score: u64, w: u64, out: u64, ldo: usize, rows: usize, d: usize, eps: f32, raw_kv: u64, raw_score: u64, raw_len: usize, raw_pos0: usize, raw_first: usize, n_rows: usize) !void {
+         if (rows == 0) return;
+         if (d % 4 != 0 or d < 128 or d > 2048 or (d & (d - 1)) != 0) return error.UnsupportedShape;
++        if (n_rows < rows * 2 or n_rows > rows * 2 + 1) return error.UnsupportedShape;
++        if (raw_kv != 0 and (raw_len == 0 or raw_first > n_rows)) return error.UnsupportedShape;
+         const lanes = rmsLanes(d, rows);
+         // GB10: wide CTAs shorten the small-row chain. At larger grids more resident CTAs win.
+         // The x dimension stays identical to rmsNorm so the sum's rounding order is invariant. The y dimension makes
+@@ -178,7 +184,13 @@ pub const Exact = struct {
+         a.add(factor);
+         a.add(eps);
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+-        try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
++        a.add(raw_kv);
++        a.add(raw_score);
++        a.add(@as(c_int, @intCast(raw_len)));
++        a.add(@as(c_longlong, @intCast(raw_pos0)));
++        a.add(@as(c_int, @intCast(raw_first)));
++        a.add(@as(c_int, @intCast(n_rows)));
++        try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast((n_rows + 1) / 2) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// TF_DS_FUSED_COMPRESS2_NORM, decode half: tf_ds_compress2x_norm{128,512}_kernel — the 0127 chain (scatter,
+@@ -281,7 +293,7 @@ pub const Exact = struct {
+     /// packed-column pass) + Exact.rope (tf_ds_rope_kernel's arithmetic) + the kit's `_fp4_store`
+     /// (BLOCK = 32, E4M3 = false) in one launch. `x` is ch.lat2; codes/scales go to row `rows_idx[r]` (the group's
+     /// slot) and the rotated row stays on chip (ch.ik's store has no reader).
+-    pub fn promptIdxKey(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, w: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize, eps: f32) !void {
++    pub fn promptIdxKey(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, w: u64, cos: u64, sin: u64, base_group: usize, ratio: usize, codes: u64, scales: u64, rows: usize, d: usize, rd: usize, eps: f32) !void {
+         if (rows == 0) return;
+         if (d < 128 or d > 512 or (d & (d - 1)) != 0 or d % 4 != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
+         const lanes = rmsLanes(d, rows);
+@@ -296,10 +308,10 @@ pub const Exact = struct {
+         a.add(factor);
+         a.add(cos);
+         a.add(sin);
+-        a.add(pos);
++        a.add(@as(c_longlong, @intCast(base_group)));
++        a.add(@as(c_int, @intCast(ratio)));
+         a.add(codes);
+         a.add(scales);
+-        a.add(rows_idx);
+         a.add(@as(c_int, @intCast(d)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+@@ -309,7 +321,7 @@ pub const Exact = struct {
+     /// TF_DS_FUSED_ROPE_STORE, prompt latent: Exact.rope + the kit's `_fp4_store` (D = head_dim, BLOCK = 16, E4M3 =
+     /// true) in one launch. Codes/scales to row `rows_idx[r]`; ch.lat is read only and the rotated row never reaches
+     /// ch.lat2 (nothing reads it there).
+-    pub fn promptLatent(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize) !void {
++    pub fn promptLatent(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, base_group: usize, ratio: usize, codes: u64, scales: u64, rows: usize, d: usize, rd: usize) !void {
+         if (rows == 0) return;
+         const block = @min(d / 2, 256);
+         if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d or !rope_store.warpShapesOk(d, rd, block)) return error.UnsupportedShape;
+@@ -317,10 +329,10 @@ pub const Exact = struct {
+         a.add(x);
+         a.add(cos);
+         a.add(sin);
+-        a.add(pos);
++        a.add(@as(c_longlong, @intCast(base_group)));
++        a.add(@as(c_int, @intCast(ratio)));
+         a.add(codes);
+         a.add(scales);
+-        a.add(rows_idx);
+         a.add(@as(c_int, @intCast(d)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 9a19c70ff83b98c33bf5e096bb63d38b2c19cdd4..2f9b09f187358b42e77732137a96f5f7a31ce425 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1325,43 +1325,58 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+         try mm(e, ch, lay.comp_wgate.?, ch.x, c.hidden, ch.scc, .fp32, hd);
+         // rk[pw] = kv[-keep:], rs[pw] = score[-keep:]: pw = positions start + n - keep .. % RAW
+         const keep: usize = @min(n, raw_rows);
+-        var idx: [raw_rows]i64 = undefined;
+-        for (0..keep) |j| idx[j] = @intCast((start + n - keep + j) % raw_rows);
+-        try upload(e, ch.raw_idx, &idx, keep * 8);
+-        try e.ops.scatterRows(e.s, ch.kvc + (n - keep) * hd * 4, hd * 4, ch.raw_idx, cs.raw_kv[li], hd * 4, hd * 4, keep);
+-        try e.ops.scatterRows(e.s, ch.scc + (n - keep) * hd * 4, hd * 4, ch.raw_idx, cs.raw_score[li], hd * 4, hd * 4, keep);
++        const raw_first = n - keep;
++        const raw_pos0 = (start + raw_first) % raw_rows;
++        const fused = e.ops.compress2_norm and compress2_norm.fuseOk(true, full, hd);
++        // TF_DS_FUSED_COMPRESS2_NORM writes both raw tails itself (one block per pair, plus one for an odd trailing
++        // row), so the index upload and the two scatters run only when it is off or there is no pair to launch.
++        if (!fused or full == 0) {
++            var idx: [raw_rows]i64 = undefined;
++            for (0..keep) |j| idx[j] = @intCast((start + raw_first + j) % raw_rows);
++            try upload(e, ch.raw_idx, &idx, keep * 8);
++            try e.ops.scatterRows(e.s, ch.kvc + raw_first * hd * 4, hd * 4, ch.raw_idx, cs.raw_kv[li], hd * 4, hd * 4, keep);
++            try e.ops.scatterRows(e.s, ch.scc + raw_first * hd * 4, hd * 4, ch.raw_idx, cs.raw_score[li], hd * 4, hd * 4, keep);
++        }
+         if (full == 0) { // a one-row chunk (a prompt one past a chunk end): its row waits in the store, no new group
+             sh.kv_layer = li;
+             return;
+         }
+-        if (e.ops.compress2_norm and compress2_norm.fuseOk(true, full, hd)) {
+-            // TF_DS_FUSED_COMPRESS2_NORM: compress2 and the RMSNorm in one launch (tf_ds_compress2_norm_kernel;
+-            // torch's arithmetic both times, the norm's lane count the unfused launch would use)
+-            try e.exact.compress2Norm(e.s, ch.kvc, ch.scc, lay.comp_norm, ch.lat, hd, full, hd, c.eps);
++        if (fused) {
++            // TF_DS_FUSED_COMPRESS2_NORM: compress2, the RMSNorm and the raw-ring tails in one launch
++            // (tf_ds_compress2_norm_kernel; torch's arithmetic both times, the norm's lane count the unfused launch
++            // would use, ring slots by modular position, the trailing row when the chunk has one)
++            try e.exact.compress2Norm(e.s, ch.kvc, ch.scc, lay.comp_norm, ch.lat, hd, full, hd, c.eps,
++                                      cs.raw_kv[li], cs.raw_score[li], raw_rows, raw_pos0, raw_first, n);
+         } else {
+             try e.exact.compress2(e.s, ch.kvc, ch.scc, ch.lat2, full, hd);
+             try e.exact.rmsNorm(e.s, ch.lat2, hd, lay.comp_norm, ch.lat, hd, full, hd, c.eps);
+         }
+     }
+     sh.kv_layer = li;
+-    // groups first // r .. and their positions group * r (the rotations _rot reads)
+-    var g_host: [4096]i64 = undefined;
+-    var p_host: [4096]i64 = undefined;
+-    if (full > g_host.len) return error.ChunkTooLong;
+-    for (0..full) |j| {
+-        g_host[j] = @intCast(start / r + j);
+-        p_host[j] = @intCast((start / r + j) * r);
+-    }
+-    try upload(e, ch.groups, &g_host, full * 8);
+-    try upload(e, ch.gpos, &p_host, full * 8);
++    // The fused stores derive their group id and rotation position from the chunk (start/ratio + row, times ratio),
++    // so ch.groups/ch.gpos are staged only for a path that reads them: the unfused rope/fp4_store chains.
+     const rot = e.compressed;
++    const base_group = start / r;
++    const idx_key_fused = if (lay.idx_wk) |_| (e.ops.rope_store and rope_store.fuseOk(true, full, c.index_head_dim, rd, 1)) else true;
++    const lat_fused = e.ops.rope_store and rope_store.fuseOk(true, full, hd, rd, 1);
++    if (!idx_key_fused or !lat_fused) {
++        var g_host: [4096]i64 = undefined;
++        var p_host: [4096]i64 = undefined;
++        if (full > g_host.len) return error.ChunkTooLong;
++        for (0..full) |j| {
++            g_host[j] = @intCast(base_group + j);
++            p_host[j] = @intCast((base_group + j) * r);
++        }
++        try upload(e, ch.groups, &g_host, full * 8);
++        try upload(e, ch.gpos, &p_host, full * 8);
++    }
+     if (lay.idx_wk) |iwk| {
+         const id = c.index_head_dim;
+         try mmRows(e, ch, full, iwk, ch.lat, hd, ch.lat2, .bf16, id);
+-        if (e.ops.rope_store and rope_store.fuseOk(true, full, id, rd, 1)) {
++        if (idx_key_fused) {
+             // TF_DS_FUSED_ROPE_STORE: rmsNorm + rope + fp4_store in one launch (torch's rms_norm/rope arithmetic,
+             // the kit's _fp4_store; the rotation stays on chip - nothing reads a rotated ch.ik)
+-            try e.exact.promptIdxKey(e.s, ch.lat2, id, lay.idx_k_norm, rot.cos, rot.sin, ch.gpos, cs.idx_codes[li], cs.idx_scales[li], ch.groups, full, id, rd, c.eps);
++            try e.exact.promptIdxKey(e.s, ch.lat2, id, lay.idx_k_norm, rot.cos, rot.sin, base_group, r, cs.idx_codes[li], cs.idx_scales[li], full, id, rd, c.eps);
+         } else {
+             try e.exact.rmsNorm(e.s, ch.lat2, id, lay.idx_k_norm, ch.ik, id, full, id, c.eps);
+             try e.exact.rope(e.s, ch.ik, id, id - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);
+@@ -1371,10 +1386,10 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+     }
+     // TF_DS_KV_SHARD: only the extent's owner holds (and stores) its compressed rows; the other rank's view has none
+     if (cs.own != null and !cs.own.?) return;
+-    if (e.ops.rope_store and rope_store.fuseOk(true, full, hd, rd, 1)) {
++    if (lat_fused) {
+         // TF_DS_FUSED_ROPE_STORE: rope + fp4_store in one launch (torch's rope arithmetic, the kit's _fp4_store;
+         // the rotation stays on chip - nothing reads a rotated ch.lat2)
+-        try e.exact.promptLatent(e.s, ch.lat, rot.cos, rot.sin, ch.gpos, cs.comp_codes[li], cs.comp_scales[li], ch.groups, full, hd, rd);
++        try e.exact.promptLatent(e.s, ch.lat, rot.cos, rot.sin, base_group, r, cs.comp_codes[li], cs.comp_scales[li], full, hd, rd);
+     } else {
+         try e.ops.copyRows(e.s, ch.lat, hd * 2, ch.lat2, hd * 2, hd * 2, full);
+         try e.exact.rope(e.s, ch.lat2, hd, hd - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);

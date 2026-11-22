@@ -1,0 +1,136 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit 7eb4a8410552)
+# 0241 dsv41: the decode query's geometry follows the row count - one element a thread below decode's largest window, a warp a head with the rotary pair inside one lane from it up (todo item: the R=32/48 geometry regression)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index 9a0b1a24a2e05d13f236766c06fecb6434ed0e7b..b478b67673d2f4f12a40016902d5a076b1439d3e 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -891,12 +891,18 @@ extern "C" __global__ void __launch_bounds__(256) tf_ds_fused_rope_store_kernel(
+ // `_fp4qd_p2` (32-element blocks, E2M1 codes with a pow2 scale, the dequantized bf16 written back out) in one launch.
+ // grid.x = rows * H, block = 128. out (rd.iq4) gets the dequantized values; the rotated value is a register input to
+ // its quantization (x is read only: the in-place rotation had no reader).
++//
++// Two geometries, picked by the host on the row count (the decode arm's low rows need blocks spread over the SMs, the
++// prompt arm's many rows want the work packed into few blocks): one element a thread, grid = (rows, H); or the pair
++// geometry below, grid = (rows, H / PAIR_WARPS), which is what the row counts from decode's largest window upward
++// measured fastest at. Both write the same bytes.
++
+ extern "C" __global__ void __launch_bounds__(128) tf_ds_fused_rope_qd_kernel(const __nv_bfloat16* x, __nv_bfloat16* out,
+                                                                              const float* cos, const float* sin,
+                                                                              const long long* pos,
+                                                                              int H, int HD, int RD, int pdl) {
+     pdl_enter(pdl);
+-    const int r = blockIdx.x / H, h = blockIdx.x % H;
++    const int r = blockIdx.x, h = blockIdx.y;
+     const long long base = ((long long)r * H + h) * HD;
+     const long long p = pos[r];
+     for (int i = threadIdx.x; i < HD; i += blockDim.x) {
+@@ -917,6 +923,53 @@ extern "C" __global__ void __launch_bounds__(128) tf_ds_fused_rope_qd_kernel(con
+     }
+ }
+ 
++// The pair geometry: a warp owns one head and walks it in 64-element chunks, and each lane holds the rotary pair
++// (2l, 2l + 1) of the chunk in one 4-byte load, so the partner is a register instead of a shuffle and the 32-element
++// scale groups are the two half-warps. Same arithmetic and same bytes as the one-element form above.
++constexpr int TF_DS_QD_PAIR_WARPS = 8;
++
++__device__ __forceinline__ void tf_ds_qd_pair_chunk(const __nv_bfloat16* x, __nv_bfloat16* out, const float* cos,
++                                                    const float* sin, long long base, long long p, int chunk, int lane,
++                                                    int HD, int RD) {
++    const int i0 = chunk + 2 * lane;
++    const uint32_t raw = *(const uint32_t*)(x + base + i0);
++    const __nv_bfloat162 pr = *(__nv_bfloat162*)&raw;
++    float v0 = __bfloat162float(pr.x), v1 = __bfloat162float(pr.y);
++    if (i0 >= HD - RD) {
++        const int j = (i0 - (HD - RD)) / 2;
++        const float cs = cos[p * (RD / 2) + j], sn = sin[p * (RD / 2) + j];
++        const float r0 = __fmaf_rn(v0, cs, -__fmul_rn(v1, sn));
++        const float r1 = __fmaf_rn(v1, cs, __fmul_rn(v0, sn));
++        v0 = __bfloat162float(__float2bfloat16_rn(r0));
++        v1 = __bfloat162float(__float2bfloat16_rn(r1));
++    }
++    // the two half-warps are the chunk's two 32-element scale groups
++    const unsigned amax = __reduce_max_sync((lane < 16) ? 0x0000ffffu : 0xffff0000u,
++                                            max(tf_ds_abs_bits(v0), tf_ds_abs_bits(v1)));
++    const unsigned byte = tf_ds_scale_byte_bits(amax);
++    const float scale = __uint_as_float(byte << 23);
++    const float recip = tf_ds_recip_bits(byte);
++    const float t0 = tf_ds_clamp6(__fmul_rn(v0, recip)), t1 = tf_ds_clamp6(__fmul_rn(v1, recip));
++    const float q0 = copysignf(tf_ds_e2m1_mag(tf_ds_e2m1_code(t0) & 7u), t0);
++    const float q1 = copysignf(tf_ds_e2m1_mag(tf_ds_e2m1_code(t1) & 7u), t1);
++    const __nv_bfloat162 o = {__float2bfloat16_rn(__fmul_rn(q0, scale)),
++                              __float2bfloat16_rn(__fmul_rn(q1, scale))};
++    *(uint32_t*)(out + base + i0) = *(const uint32_t*)&o;
++}
++
++extern "C" __global__ void __launch_bounds__(32 * TF_DS_QD_PAIR_WARPS)
++    tf_ds_fused_rope_qd_pair_kernel(const __nv_bfloat16* x, __nv_bfloat16* out, const float* cos, const float* sin,
++                                    const long long* pos, int H, int HD, int RD, int pdl) {
++    pdl_enter(pdl);
++    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
++    const int r = blockIdx.x, h = blockIdx.y * TF_DS_QD_PAIR_WARPS + warp;
++    if (h >= H) return;
++    const long long base = ((long long)r * H + h) * HD;
++    const long long p = pos[r];
++    for (int chunk = 0; chunk < HD; chunk += 64)
++        tf_ds_qd_pair_chunk(x, out, cos, sin, base, p, chunk, lane, HD, RD);
++}
++
+ // The prompt indexer key (prompt.zig's kv-source layers): torch's ops.rms_norm (the Exact kernel's arithmetic) +
+ // ops.rope_ (tf_ds_rope_kernel's arithmetic) + the kit's `_fp4_store` (D=128, BLOCK=32, E4M3=false) in one launch.
+ // grid.x = rows, block = { x = rmsLanes(D, rows), y = packLanes } (the x lane count the unfused rmsNorm launch uses,
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index 4b787047eb0ed3c80356945e24d67bcaf88797eb..7102d70ed910e1753980fc403a028b2b40fc4428 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -53,6 +53,7 @@ pub const Exact = struct {
+     k_fused_idx_key: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rmsnorm + _rope_heads + _fp4_store (decode indexer key)
+     k_fused_rope_store: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4_store (decode latent)
+     k_fused_rope_qd: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 (decode indexer query)
++    k_fused_rope_qd_pair: cuda.Function, // the same chain in the pair geometry (the larger row counts)
+     k_fused_prompt_idx_key: cuda.Function, // TF_DS_FUSED_ROPE_STORE: Exact.rmsNorm + Exact.rope + _fp4_store (prompt indexer key)
+     k_fused_prompt_latent: cuda.Function, // TF_DS_FUSED_ROPE_STORE: Exact.rope + _fp4_store (prompt latent)
+     pdl: bool = false, // TF_DS_PDL (ops.pdl_env)
+@@ -77,6 +78,7 @@ pub const Exact = struct {
+             .k_fused_idx_key = try m.function("tf_ds_fused_idx_key_kernel"),
+             .k_fused_rope_store = try m.function("tf_ds_fused_rope_store_kernel"),
+             .k_fused_rope_qd = try m.function("tf_ds_fused_rope_qd_kernel"),
++            .k_fused_rope_qd_pair = try m.function("tf_ds_fused_rope_qd_pair_kernel"),
+             .k_fused_prompt_idx_key = try m.function("tf_ds_fused_prompt_idx_key_kernel"),
+             .k_fused_prompt_latent = try m.function("tf_ds_fused_prompt_latent_kernel"),
+         };
+@@ -270,11 +272,19 @@ pub const Exact = struct {
+     }
+ 
+     /// TF_DS_FUSED_ROPE_STORE, decode indexer query: `_rope_heads` (RD = rope_dim, H = heads, forward) + `_fp4qd_p2`
+-    /// (32-element blocks, pow2 scale, dequantized bf16 out) in one launch. Grid = rows * heads; `out` is rd.iq4 and
+-    /// rd.iq is read only (the in-place rotation has no reader).
++    /// (32-element blocks, pow2 scale, dequantized bf16 out) in one launch. `out` is rd.iq4 and rd.iq is read only
++    /// (the in-place rotation has no reader). Two geometries, chosen on the row count: the pair form (a warp a head, the
++    /// rotary pair inside one lane, grid = (rows, heads / 8)) from decode's largest window upward, and one element a
++    /// thread (grid = (rows, heads)) below it. Both write the same bytes; the threshold is where the measurements cross
++    /// (R=32: 2.55 us pair against 2.85 one-element; R=7: 1.46 against 1.32), and `heads % 8` or a head dim that is not
++    /// a multiple of 64 keeps the one-element form.
++    pub const pair_rows: usize = 32;
++    pub const pair_warps: usize = 8;
++
+     pub fn ropeQd(e: *const Exact, s: cuda.Stream, x: u64, out: u64, cos: u64, sin: u64, pos: u64, rows: usize, heads: usize, hd: usize, rd: usize) !void {
+         if (rows == 0 or heads == 0) return;
+         if (hd < 32 or hd > 512 or (hd & (hd - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > hd or hd % 32 != 0 or !rope_store.warpShapesOk(hd, rd, 128)) return error.UnsupportedShape;
++        const pair = rows >= pair_rows and heads % pair_warps == 0 and hd % 64 == 0;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(out);
+@@ -285,7 +295,11 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(hd)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+-        try cuda.launch.launch(e.k_fused_rope_qd, .{ .grid = .{ .x = @intCast(rows * heads) }, .block = .{ .x = 128 }, .pdl = e.pdl }, s, &a);
++        if (pair) {
++            try cuda.launch.launch(e.k_fused_rope_qd_pair, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(heads / pair_warps) }, .block = .{ .x = 32 * pair_warps }, .pdl = e.pdl }, s, &a);
++        } else {
++            try cuda.launch.launch(e.k_fused_rope_qd, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(heads) }, .block = .{ .x = 128 }, .pdl = e.pdl }, s, &a);
++        }
+     }
+ 
+     /// TF_DS_FUSED_ROPE_STORE, prompt indexer key: Exact.rmsNorm (torch's arithmetic; block.x = rmsLanes(d, rows), the

@@ -1,0 +1,400 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit da1424228796)
+# 0251 dsv41: an opt-in fused-arm trace at the launches, with the served matrix as a host test (todo item: prove engagement)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index 7102d70ed910e1753980fc403a028b2b40fc4428..72e4bf0eece8095b7234735da46238c6f1df4ebd 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -5,6 +5,7 @@
+ const std = @import("std");
+ const cuda = @import("cuda");
+ const ops = @import("ops.zig");
++const fused_trace = @import("fused_trace.zig");
+ const rope_store = @import("rope_store.zig");
+ 
+ /// launch_shape.h's tf_launch_blocks: a block a `threads` elements, at most 65535.
+@@ -192,6 +193,7 @@ pub const Exact = struct {
+         a.add(@as(c_longlong, @intCast(raw_pos0)));
+         a.add(@as(c_int, @intCast(raw_first)));
+         a.add(@as(c_int, @intCast(n_rows)));
++        if (fused_trace.enabled()) fused_trace.note(.compress2_norm, n_rows, d, e.pdl);
+         try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast((n_rows + 1) / 2) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+@@ -222,6 +224,7 @@ pub const Exact = struct {
+         a.add(eps);
+         a.add(invalid);
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.compress2x_norm, g, d, e.pdl);
+         const kernel = if (d == 128) e.k_compress2x_norm128 else e.k_compress2x_norm512;
+         try cuda.launch.launch(kernel, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = @intCast(d) }, .pdl = e.pdl }, s, &a);
+     }
+@@ -247,6 +250,7 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(eps);
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.key_fused, rows, d, e.pdl);
+         try cuda.launch.launch(e.k_fused_idx_key, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 128 }, .pdl = e.pdl }, s, &a);
+     }
+ 
+@@ -268,6 +272,7 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(d)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.latent_fused, rows, d, e.pdl);
+         try cuda.launch.launch(e.k_fused_rope_store, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(@min(d / 2, 256)) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+@@ -295,6 +300,7 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(hd)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(if (pair) .query_pair else .query_fused, rows, hd, e.pdl);
+         if (pair) {
+             try cuda.launch.launch(e.k_fused_rope_qd_pair, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(heads / pair_warps) }, .block = .{ .x = 32 * pair_warps }, .pdl = e.pdl }, s, &a);
+         } else {
+@@ -329,6 +335,7 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(d)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.prompt_key_fused, rows, d, e.pdl);
+         try cuda.launch.launch(e.k_fused_prompt_idx_key, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(lanes), .y = @intCast(y) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+@@ -350,6 +357,7 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(d)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.prompt_latent_fused, rows, d, e.pdl);
+         try cuda.launch.launch(e.k_fused_prompt_latent, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(@min(d / 2, 256)) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+diff --git a/zig/src/families/dsv41/fused_trace.zig b/zig/src/families/dsv41/fused_trace.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..d405742c3c935e6890a7d42feeeb19cce6d96d69
+--- /dev/null
++++ b/zig/src/families/dsv41/fused_trace.zig
+@@ -0,0 +1,183 @@
++//! TF_DS_FUSED_TRACE (off by default): an opt-in, once-per-distinct-tuple record of which fused arm the call sites
++//! select, so a run can show which kernel ran at each row count, width and PDL setting. Host-side only: the call sites
++//! hand over what they already decided (the same gate functions and bounds the launchers use), nothing is read back
++//! from the device, no bytes change, and no fingerprint bit moves. The record is bounded: past `capacity` distinct
++//! tuples further ones are not printed (a round's matrix is far below it).
++const std = @import("std");
++
++pub const env_name: [:0]const u8 = "TF_DS_FUSED_TRACE";
++
++/// The arm a call site runs. `width` in the record is the shape the arm was chosen for (the compressor's channel
++/// count, the indexer's column width, the rope kernel's head dim), so one entry identifies the exact kernel and shape.
++pub const Arm = enum {
++    idx_fused,
++    idx_small,
++    idx_unfused,
++    compress2x_norm,
++    compress2_norm,
++    compress_unfused,
++    key_fused,
++    key_unfused,
++    latent_fused,
++    latent_unfused,
++    query_fused,
++    query_pair,
++    query_unfused,
++    prompt_key_fused,
++    prompt_key_unfused,
++    prompt_latent_fused,
++    prompt_latent_unfused,
++    prune_six,
++    prune_unfused,
++};
++
++pub const Entry = struct {
++    arm: Arm,
++    rows: usize,
++    width: usize,
++    pdl: bool,
++};
++
++pub const capacity = 128;
++
++var seen: [capacity]Entry = undefined;
++var count: usize = 0;
++var enabled_cache: ?bool = null;
++
++/// TF_DS_FUSED_TRACE: unset, "" or "0" off; anything else on.
++pub fn enabled() bool {
++    if (enabled_cache) |on| return on;
++    const text = std.c.getenv(env_name);
++    const on = if (text) |t| std.mem.span(t).len != 0 and !std.mem.eql(u8, std.mem.span(t), "0") else false;
++    enabled_cache = on;
++    return on;
++}
++
++/// Record one arm selection. Called from the call sites behind `enabled()`, and directly by the test below.
++pub fn note(arm: Arm, rows: usize, width: usize, pdl: bool) void {
++    for (seen[0..count]) |e| {
++        if (e.arm == arm and e.rows == rows and e.width == width and e.pdl == pdl) return;
++    }
++    if (count == capacity) return;
++    seen[count] = .{ .arm = arm, .rows = rows, .width = width, .pdl = pdl };
++    count += 1;
++    std.debug.print("dsv41 fused trace: {s} rows={d} width={d} pdl={d}\n", .{ @tagName(arm), rows, width, @intFromBool(pdl) });
++}
++
++pub fn entries() []const Entry {
++    return seen[0..count];
++}
++
++pub fn reset() void {
++    count = 0;
++    enabled_cache = null;
++}
++
++// -- the served matrix the call sites run ----------------------------------------------------------------------------
++
++const idx_fused = @import("idx_fused.zig");
++const compress2_norm = @import("compress2_norm.zig");
++const rope_store = @import("rope_store.zig");
++
++/// The indexer's arm for a decode row count and bucket width (round.zig's candidate-source arm, prompt.zig's pooled
++/// source layer): the fused launch, its small-row form, or the unfused block_max/pool_pick sequence.
++pub fn idxArm(fused: bool, rows: usize, width: usize, bsize: usize, nbk: usize, k: usize) Arm {
++    if (!idx_fused.fuseOk(fused, rows, width, bsize, nbk, k)) return .idx_unfused;
++    return if (rows <= idx_fused.small_rows and nbk >= idx_fused.small_nbk) .idx_small else .idx_fused;
++}
++
++/// The compressor's arm (round.zig's decode ratio-2 chain, prompt.zig's chunk path).
++pub fn compressArm(fused: bool, prompt: bool, rows: usize, d: usize) Arm {
++    if (prompt) return if (compress2_norm.fuseOk(fused, rows, d)) .compress2_norm else .compress_unfused;
++    return if (compress2_norm.decodeOk(fused, rows, d)) .compress2x_norm else .compress_unfused;
++}
++
++/// The 0198 arms (round.zig's key / latent / query launches, prompt.zig's stores).
++pub fn keyArm(fused: bool, rows: usize, d: usize, rd: usize, heads: usize, prompt: bool) Arm {
++    if (!prompt and rope_store.keyFuseOk(fused, rows, d, rd, heads)) return .key_fused;
++    if (prompt and rope_store.fuseOk(fused, rows, d, rd, heads)) return .prompt_key_fused;
++    return if (prompt) .prompt_key_unfused else .key_unfused;
++}
++
++pub fn latentArm(fused: bool, rows: usize, d: usize, rd: usize, prompt: bool) Arm {
++    if (prompt) return if (rope_store.fuseOk(fused, rows, d, rd, 1)) .prompt_latent_fused else .prompt_latent_unfused;
++    return if (rope_store.fuseOk(fused, rows, d, rd, 1)) .latent_fused else .latent_unfused;
++}
++
++pub fn queryArm(fused: bool, rows: usize, d: usize, rd: usize, heads: usize) Arm {
++    if (!rope_store.fuseOk(fused, rows, d, rd, heads)) return .query_unfused;
++    return if (rows >= 32) .query_pair else .query_fused;   // the per-row-count geometry (0241)
++}
++
++// -- tests -----------------------------------------------------------------------------------------------------------
++
++const expectEqual = std.testing.expectEqual;
++
++test "the trace is off unless TF_DS_FUSED_TRACE is set" {
++    reset();
++    try expectEqual(false, enabled());   // the test harness runs without the variable
++}
++
++test "the served matrix selects the recorded arms, once per tuple" {
++    reset();
++    const rows_list = [_]usize{ 1, 7, 32, 48, 128, 1024 };
++    for (rows_list) |rows| {
++        for ([_]bool{ false, true }) |pdl| {
++            // decode: bucket 8 (the small pool) and 8192 (the 65,536-column window); k = candidate_blocks
++            for ([_]usize{ 8, 8192 }) |nb| {
++                const width = 8 * nb - 3;
++                const nbk = 1 + (width - 1) / 8;
++                note(idxArm(true, rows, width, 8, nbk, @min(2048, nbk)), rows, width, pdl);
++            }
++            for ([_]usize{ 128, 512 }) |d| note(compressArm(true, false, rows, d), rows, d, pdl);
++            note(keyArm(true, rows, 128, 64, 1, false), rows, 128, pdl);
++            note(latentArm(true, rows, 512, 64, false), rows, 512, pdl);
++            note(queryArm(true, rows, 128, 64, 32), rows, 128, pdl);
++            note(.prune_six, rows, 7, pdl);
++        }
++    }
++    // the arms the call sites take at the served decode shapes, as a table
++    const table = [_]Entry{
++        .{ .arm = .idx_fused, .rows = 1, .width = 61, .pdl = false },
++        .{ .arm = .idx_small, .rows = 1, .width = 65533, .pdl = false },
++        .{ .arm = .idx_small, .rows = 7, .width = 65533, .pdl = false },
++        .{ .arm = .idx_fused, .rows = 32, .width = 65533, .pdl = false },
++        .{ .arm = .compress2x_norm, .rows = 1, .width = 128, .pdl = false },
++        .{ .arm = .compress2x_norm, .rows = 1, .width = 512, .pdl = false },
++        .{ .arm = .key_fused, .rows = 1, .width = 128, .pdl = false },
++        .{ .arm = .latent_fused, .rows = 1, .width = 512, .pdl = false },
++        .{ .arm = .query_fused, .rows = 1, .width = 128, .pdl = false },
++        .{ .arm = .query_pair, .rows = 32, .width = 128, .pdl = false },
++        .{ .arm = .prune_six, .rows = 1, .width = 7, .pdl = false },
++    };
++    for (table) |want| {
++        var found = false;
++        for (entries()) |e| {
++            if (std.meta.eql(e, want)) found = true;
++        }
++        if (!found) std.debug.print("missing {s} rows={d} width={d} pdl={d}\n", .{ @tagName(want.arm), want.rows, want.width, @intFromBool(want.pdl) });
++        try std.testing.expect(found);
++    }
++    // pdl is part of the key, and a repeated tuple is recorded once (rows 3 is not in the matrix above)
++    const before = count;
++    note(.idx_fused, 3, 61, true);
++    try expectEqual(before + 1, count);
++    note(.idx_fused, 3, 61, true);
++    try expectEqual(before + 1, count);
++    note(.idx_fused, 3, 61, false);
++    try expectEqual(before + 2, count);
++    try std.testing.expect(count <= capacity);
++}
++
++test "the arms switch off with the switches" {
++    reset();
++    try expectEqual(.idx_unfused, idxArm(false, 7, 65533, 8, 8192, 2048));
++    try expectEqual(.compress_unfused, compressArm(false, false, 7, 512));
++    try expectEqual(.key_unfused, keyArm(false, 7, 128, 64, 1, false));
++    try expectEqual(.latent_unfused, latentArm(false, 7, 512, 64, false));
++    try expectEqual(.query_unfused, queryArm(false, 32, 128, 64, 32));
++    // and past the fused bounds the unfused sequence runs, as the call sites fall back
++    try expectEqual(.idx_unfused, idxArm(true, 7, 8 * 16385 - 3, 8, 16385, 2048));
++    try expectEqual(.compress_unfused, compressArm(true, false, 7, 256));   // decodeOk takes 128 and 512 only
++    try expectEqual(.compress2_norm, compressArm(true, true, 128, 2048));   // the prompt half takes pow2 to 2048
++}
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 8225bd666a061a3ceed77c6e344581f1d75fc9b5..98cf89440963ab6a993bbfedd5dc64a1db0c50bd 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -8,6 +8,7 @@ const std = @import("std");
+ const cuda = @import("cuda");
+ const expert_prune = @import("expert_prune.zig");
+ const idx_fused = @import("idx_fused.zig");
++const fused_trace = @import("fused_trace.zig");
+ const compress2_norm = @import("compress2_norm.zig");
+ const rope_store = @import("rope_store.zig");
+ 
+@@ -404,6 +405,7 @@ pub const Ops = struct {
+         const six = if (useSixSlotPrune(m, rows, topk, slots)) o.prune_six_fn else null;
+         const kernel = six orelse o.prune_fn orelse return error.ExpertPruneOff;
+         const threads: u32 = if (six != null and rows <= 32) 32 else expert_prune.max_rows;
++        if (fused_trace.enabled()) fused_trace.note(if (six != null) .prune_six else .prune_unfused, rows, slots, o.pdl);
+         try cuda.launch.launch(kernel, .{ .grid = .{ .x = 1 }, .block = .{ .x = threads }, .pdl = o.pdl }, s, &a);
+     }
+ 
+@@ -504,6 +506,7 @@ pub const Ops = struct {
+         a.add(@as(c_longlong, @intCast(ms)));
+         a.add(cblk);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.idx_fused, rows, width, o.pdl);
+         try cuda.launch.launch(o.idx_fused_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
+     }
+ 
+@@ -522,6 +525,7 @@ pub const Ops = struct {
+         a.add(every);
+         a.add(cblk);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(.idx_small, rows, nbk, o.pdl);
+         try cuda.launch.launch(o.idx_pick_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
+     }
+ 
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 2f9b09f187358b42e77732137a96f5f7a31ce425..d789e5c947bc5ee5434b3fca84af2d516167bb15 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -40,6 +40,7 @@ const shard_ops = @import("shard_ops.zig");
+ const prompt_rows = @import("prompt_rows.zig");
+ const prefill_prof = @import("prefill_prof.zig");
+ const idx_fused = @import("idx_fused.zig");
++const fused_trace = @import("fused_trace.zig");
+ const compress2_norm = @import("compress2_norm.zig");
+ const rope_store = @import("rope_store.zig");
+ 
+@@ -1348,6 +1349,7 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+             try e.exact.compress2Norm(e.s, ch.kvc, ch.scc, lay.comp_norm, ch.lat, hd, full, hd, c.eps,
+                                       cs.raw_kv[li], cs.raw_score[li], raw_rows, raw_pos0, raw_first, n);
+         } else {
++            if (fused_trace.enabled()) fused_trace.note(.compress_unfused, full, hd, e.ops.pdl);
+             try e.exact.compress2(e.s, ch.kvc, ch.scc, ch.lat2, full, hd);
+             try e.exact.rmsNorm(e.s, ch.lat2, hd, lay.comp_norm, ch.lat, hd, full, hd, c.eps);
+         }
+@@ -1378,6 +1380,7 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+             // the kit's _fp4_store; the rotation stays on chip - nothing reads a rotated ch.ik)
+             try e.exact.promptIdxKey(e.s, ch.lat2, id, lay.idx_k_norm, rot.cos, rot.sin, base_group, r, cs.idx_codes[li], cs.idx_scales[li], full, id, rd, c.eps);
+         } else {
++            if (fused_trace.enabled()) fused_trace.note(.prompt_key_unfused, full, id, e.ops.pdl);
+             try e.exact.rmsNorm(e.s, ch.lat2, id, lay.idx_k_norm, ch.ik, id, full, id, c.eps);
+             try e.exact.rope(e.s, ch.ik, id, id - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);
+             // switch "comp": the packed cache's rows in one launch (fp4_store: store_rows' bytes)
+@@ -1391,6 +1394,7 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+         // the rotation stays on chip - nothing reads a rotated ch.lat2)
+         try e.exact.promptLatent(e.s, ch.lat, rot.cos, rot.sin, base_group, r, cs.comp_codes[li], cs.comp_scales[li], full, hd, rd);
+     } else {
++        if (fused_trace.enabled()) fused_trace.note(.prompt_latent_unfused, full, hd, e.ops.pdl);
+         try e.ops.copyRows(e.s, ch.lat, hd * 2, ch.lat2, hd * 2, hd * 2, full);
+         try e.exact.rope(e.s, ch.lat2, hd, hd - rd, rot.cos, rot.sin, ch.gpos, full, rd / 2, false);
+         try tri_attn.fp4Store(e.t, ch.lat2, hd, cs.comp_codes[li], cs.comp_scales[li], ch.groups, full, hd, 16, true);
+@@ -1437,6 +1441,7 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+         // arithmetic over the same [rows, heads, head_dim] layout, with the prompt's own positions, ch.pos)
+         try e.exact.ropeQd(e.t.stream, ch.iq, ch.iq4, rope.cos, rope.sin, ch.pos, n, ih, id, c.rope_dim);
+     } else {
++        if (fused_trace.enabled()) fused_trace.note(.query_unfused, n, id, e.ops.pdl);
+         try tri_norm.ropeHeads(e.t, ch.iq, rope.cos, rope.sin, ch.pos, c.rope_dim, false, n, ih, id);
+         // switch "idx": fp4_qd's bytes in one launch
+         try tri_attn.fp4QdP2(e.t, ch.iq, ch.iq4, n * ih * id);
+@@ -1501,6 +1506,7 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+                 if (idx_fused.fuseOk(e.ops.idx_fused, m, n_comp_end, cb, nbk, pk)) {
+                     try e.ops.idxFused(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.every, pk, mrows, ch.pool_ms, 0, m);
+                 } else {
++                    if (fused_trace.enabled()) fused_trace.note(.idx_unfused, m, n_comp_end, e.ops.pdl);
+                     try e.ops.blockMax(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.bmax, nbk, m);
+                     try e.ops.topkIndices(e.s, ch.bmax, nbk, m, nbk, pk, ch.every, ch.pidx);
+                     try e.ops.poolPick(e.s, ch.bmax, nbk, nbk, ch.pidx, pk, mrows, ch.pool_ms, 0, m);
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index c9aca6a0af7a6802e58b7838ba4cb1d6c957414b..34eaab04995baf6a16d759baa2eb67e5ef7b52d9 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -35,6 +35,7 @@ const expert_prune = @import("expert_prune.zig");
+ const idx_fused = @import("idx_fused.zig");
+ const compress2_norm = @import("compress2_norm.zig");
+ const rope_store = @import("rope_store.zig");
++const fused_trace = @import("fused_trace.zig");
+ 
+ const Engine = prompt.Engine;
+ const Chunk = prompt.Chunk;
+@@ -1062,6 +1063,7 @@ fn compressorChain(e: *const Engine, rd: *const Round, ch: *const Chunk, t: tri.
+             try checkInvalid(e, ch, li);
+             return;
+         }
++        if (fused_trace.enabled()) fused_trace.note(.compress_unfused, R, hd, e.ops.pdl);
+         if (rd.fused_compress2) {
+             // TF_DS_FUSED_COMPRESS2: the scatter of the rows into the raw slots, the pair's rows back and compress2's
+             // weighted sum in one launch (LDs in elements of the buffer's dtype; the memset stays out — ch.invalid's
+@@ -1223,6 +1225,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     // width gate: its norm is the 128-wide kit specialization)
+                     try e.exact.idxKeyFused(t.stream, rd.ikp, id, lay.idx_k_norm, rope.cos, rope.sin, gpos, cs.idx_codes[li], cs.idx_scales[li], ctarget, R, id, rd_dim, c.eps);
+                 } else {
++                    if (fused_trace.enabled()) fused_trace.note(.key_unfused, R, id, e.ops.pdl);
+                     try tri_basic.rmsnorm(t, rd.ikp, id, lay.idx_k_norm, rd.ik, id, c.eps, R, id);
+                     try tri_norm.ropeHeads(t, rd.ik, rope.cos, rope.sin, gpos, rd_dim, false, R, 1, id);
+                     try tri_attn.fp4Store(t, rd.ik, id, cs.idx_codes[li], cs.idx_scales[li], ctarget, R, id, 32, false);
+@@ -1235,6 +1238,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                 // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4_store in one launch (rd.lat read only)
+                 try e.exact.ropeStore(t.stream, rd.lat, rope.cos, rope.sin, gpos, cs.comp_codes[li], cs.comp_scales[li], ltarget, R, hd, rd_dim);
+             } else {
++                if (fused_trace.enabled()) fused_trace.note(.latent_unfused, R, hd, e.ops.pdl);
+                 try tri_norm.ropeHeads(t, rd.lat, rope.cos, rope.sin, gpos, rd_dim, false, R, 1, hd);
+                 try tri_attn.fp4Store(t, rd.lat, hd, cs.comp_codes[li], cs.comp_scales[li], ltarget, R, hd, 16, true);
+             }
+@@ -1255,6 +1259,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                 // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 in one launch (rd.iq read only)
+                 try e.exact.ropeQd(t.stream, rd.iq, rd.iq4, rope.cos, rope.sin, pos, R, ih, id, rd_dim);
+             } else {
++                if (fused_trace.enabled()) fused_trace.note(.query_unfused, R, id, e.ops.pdl);
+                 try tri_norm.ropeHeads(t, rd.iq, rope.cos, rope.sin, pos, rd_dim, false, R, ih, id);
+                 try tri_attn.fp4QdP2(t, rd.iq, rd.iq4, R * ih * id);
+             }
+@@ -1301,6 +1306,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                             try e.ops.idxPick(e.s, rd.bmax, nbk, nbk, c.candidate_blocks, rd.pbufs.every, rd.cblk, R);
+                         } else try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
+                     } else {
++                        if (fused_trace.enabled()) fused_trace.note(.idx_unfused, R, nb, e.ops.pdl);
+                         try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
+                         try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
+                         try e.ops.poolPick(e.s, rd.bmax, nbk, nbk, rd.pidx, c.candidate_blocks, 0, 0, rd.cblk, R);

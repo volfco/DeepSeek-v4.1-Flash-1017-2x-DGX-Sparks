@@ -1,0 +1,48 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit 8d838ccfd490)
+# 0258 dsv41: align fused_trace compress2_norm row units and topk_fast precedence (review P2)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index 849b0fe2cb1c97ea146ec765a6b7b48af64e50ec..60e420756c24f087b5963ec98c3266f4aa507d22 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -194,7 +194,7 @@ pub const Exact = struct {
+         a.add(@as(c_longlong, @intCast(raw_pos0)));
+         a.add(@as(c_int, @intCast(raw_first)));
+         a.add(@as(c_int, @intCast(n_rows)));
+-        if (fused_trace.enabled()) fused_trace.note(.compress2_norm, n_rows, d, e.pdl);
++        if (fused_trace.enabled()) fused_trace.note(.compress2_norm, rows, d, e.pdl);
+         try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast(compress2_norm.gridRows(n_rows)) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+diff --git a/zig/src/families/dsv41/fused_trace.zig b/zig/src/families/dsv41/fused_trace.zig
+index 5b63c8fdee57a0a71bc7f11eb63d983370996d7e..38f2a28173adb0275f58ad8c47480f6c20021dd9 100644
+--- a/zig/src/families/dsv41/fused_trace.zig
++++ b/zig/src/families/dsv41/fused_trace.zig
+@@ -119,11 +119,11 @@ pub fn idxArm(fused: bool, allow_small: bool, rows: usize, width: usize, bsize:
+     return if (allow_small and rows <= idx_fused.small_rows and nbk >= idx_fused.small_nbk) .idx_small else .idx_fused;
+ }
+ 
+-/// 0254 score top-k arm (ops.zig's topkIndices): TF_DS_IDX_FUSED's early-cut radix select takes precedence over
+-/// TF_DS_TOPK_FAST's sampled threshold, else the eight-pass select runs.
++/// 0254 score top-k arm (ops.zig's topkIndices): the recipe's TF_DS_TOPK_FAST keeps precedence when enabled,
++/// else TF_DS_IDX_FUSED selects the early-cut radix select, else the eight-pass select runs.
+ pub fn topkIndicesArm(idx_fused_on: bool, topk_fast: bool) Arm {
+-    if (idx_fused_on) return .topk_indices_cut;
+-    return if (topk_fast) .topk_indices_fast else .topk_indices;
++    if (topk_fast) return .topk_indices_fast;
++    return if (idx_fused_on) .topk_indices_cut else .topk_indices;
+ }
+ 
+ /// 0255 candidate-mask arm (ops.zig's candFast): vectorized eight-score loads when TF_DS_IDX_FUSED is on and every row
+@@ -262,9 +262,9 @@ test "queryArm, idxArm, candFastArm, and topkIndicesArm match the launcher gates
+     try expectEqual(.cand_fast, candFastArm(true, 0x1000, 2050, 8));
+     try expectEqual(.cand_fast, candFastArm(true, 0x1000, 2048, 4));
+ 
+-    // 0254 topk_indices_cut takes precedence over topk_indices_fast when TF_DS_IDX_FUSED is on
++    // 0254: TF_DS_TOPK_FAST keeps precedence when enabled; otherwise TF_DS_IDX_FUSED selects topk_indices_cut
+     try expectEqual(.topk_indices_cut, topkIndicesArm(true, false));
+-    try expectEqual(.topk_indices_cut, topkIndicesArm(true, true));
++    try expectEqual(.topk_indices_fast, topkIndicesArm(true, true));
+     try expectEqual(.topk_indices_fast, topkIndicesArm(false, true));
+     try expectEqual(.topk_indices, topkIndicesArm(false, false));
+ }

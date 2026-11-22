@@ -1,0 +1,170 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit cfdd25f80309)
+# 0230 dsv41: 0197's decode compressor is one kernel per served width, with the partner slots read ahead of the current row (item 1)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index d520ca21ab66e78e0cd6b9626abaca5528ea0367..330f089a05f0362a1509de30ceed6cb6e22393a5 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -522,28 +522,33 @@ __device__ __forceinline__ void tf_ds_compress2_decode(float value, const __nv_b
+     dst[tid] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[tid]), y));
+ }
+ 
+-// Decode ratio-2 scatter, pair compression and kit RMSNorm. Launch exactly D threads per row.
+-extern "C" __global__ void __launch_bounds__(512) tf_ds_compress2x_norm_kernel(const float* ckv, long long ckv_ld,
+-                                                                               const float* cgate, long long cgate_ld,
+-                                                                               const long long* rslot,
+-                                                                               float* ring_kv,
+-                                                                               float* ring_score,
+-                                                                               const long long* gi, long long src_rows,
+-                                                                               const __nv_bfloat16* w,
+-                                                                               __nv_bfloat16* out, long long ldo,
+-                                                                               int G, int D, float eps,
+-                                                                               unsigned* invalid, int pdl) {
+-    pdl_enter(pdl);
++// Decode ratio-2 scatter, pair compression and kit RMSNorm. Launch exactly D threads per row, one channel a thread.
++// The width is a compile-time parameter with one kernel exported per served width (decodeOk: 128 or 512), so neither
++// kernel carries the other's code or its static shared allocation: at the served decode rows a dedicated 128-wide
++// kernel measures 1.30/1.54/1.54/1.78 us (R = 1/7/32/48) against 1.50/1.73/1.73/1.95 for the shared one, and the
++// 512-wide form 1.69/1.92/1.95/2.20 against 1.73/1.95/1.99/2.22. The 128-wide block is exactly the reduction's 128
++// lanes, so it needs no `tid < 128` guard (that guard alone costs ~0.12 us: it puts the warp-sum store and the
++// shuffles behind a runtime branch ptxas cannot fold away) and no shared `row`.
++template<int D>
++__device__ __forceinline__ void tf_ds_compress2x_norm_body(const float* ckv, long long ckv_ld,
++                                                          const float* cgate, long long cgate_ld,
++                                                          const long long* rslot, float* ring_kv,
++                                                          float* ring_score, const long long* gi, long long src_rows,
++                                                          const __nv_bfloat16* w, __nv_bfloat16* out, long long ldo,
++                                                          int G, float eps, unsigned* invalid) {
+     const int g = blockIdx.x;
++    const int tid = threadIdx.x;
+     const long long own = rslot[g];
+-    const int c = threadIdx.x;
+-    const float own_kv = ckv[g * ckv_ld + c], own_score = cgate[g * cgate_ld + c];
+-    ring_kv[own * D + c] = own_kv;
+-    ring_score[own * D + c] = own_score;
++    // The partner slots are read before the current row: ptxas then issues both 64-bit slot loads ahead of the pair
++    // loads, which hides their latency behind the scatter and the ballot scan (the other order measures 1.46 against
++    // 1.32 us at R = 1, width 128, with otherwise identical SASS).
+     const long long q0 = gi[2 * g], q1 = gi[2 * g + 1];
++    const float own_kv = ckv[g * ckv_ld + tid], own_score = cgate[g * cgate_ld + tid];
++    ring_kv[own * D + tid] = own_kv;
++    ring_score[own * D + tid] = own_score;
+     const int2 pr = tf_ds_compress2_partners(rslot, G, own, q0, q1);
+     const bool ok0 = q0 >= 0 && q0 < src_rows, ok1 = q1 >= 0 && q1 < src_rows;
+-    if ((!ok0 || !ok1) && threadIdx.x == 0 && invalid) atomicExch(invalid, 1u);
++    if ((!ok0 || !ok1) && tid == 0 && invalid) atomicExch(invalid, 1u);
+     float kv[2], score[2];
+     #pragma unroll
+     for (int i = 0; i < 2; ++i) {
+@@ -556,17 +561,54 @@ extern "C" __global__ void __launch_bounds__(512) tf_ds_compress2x_norm_kernel(c
+             kv[i] = own_kv;
+             score[i] = own_score;
+         } else if (row >= 0) {
+-            kv[i] = ckv[row * ckv_ld + c];
+-            score[i] = cgate[row * cgate_ld + c];
++            kv[i] = ckv[row * ckv_ld + tid];
++            score[i] = cgate[row * cgate_ld + tid];
+         } else {
+-            kv[i] = ring_kv[q * D + c];
+-            score[i] = ring_score[q * D + c];
++            kv[i] = ring_kv[q * D + tid];
++            score[i] = ring_score[q * D + tid];
+         }
+     }
+     const float value = tf_ds_compress2_pair(score[0], score[1], kv[0], kv[1]);
+-    if (D == 512) tf_ds_compress2_decode<512>(value, w, out + g * ldo, eps);
+-    else tf_ds_compress2_decode<128>(value, w, out + g * ldo, eps);
+-}
++    const float x = __bfloat162float(__float2bfloat16_rn(value));
++    // At width 512 the kit first reduces four adjacent channels per logical lane, so the block stages the rounded row.
++    __shared__ float row[D == 512 ? 512 : 1];
++    if (D == 512) {
++        row[tid] = x;
++        __syncthreads();
++    }
++    __shared__ float warp_sum[4];
++    if (D == 512) {
++        if (tid < 128) {
++            const int base = tid * 4;
++            float sum = tf_ds_kit_squares4(row[base], row[base + 1], row[base + 2], row[base + 3]);
++            sum = tf_ds_kit_warp_sum(sum);
++            if ((tid & 31) == 0) warp_sum[tid >> 5] = sum;
++        }
++    } else {
++        float sum = __fmul_rn(x, x);
++        sum = tf_ds_kit_warp_sum(sum);
++        if ((tid & 31) == 0) warp_sum[tid >> 5] = sum;
++    }
++    __syncthreads();
++    const float total = __fadd_rn(__fadd_rn(warp_sum[0], warp_sum[2]), __fadd_rn(warp_sum[1], warp_sum[3]));
++    const float inv = tf_ds_kit_inverse_rms<D>(total, eps);
++    const float y = __fmul_rn(x, inv);
++    out[g * ldo + tid] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[tid]), y));
++}
++
++#define TF_DS_COMPRESS2X_NORM_KERNEL(name, D)                                                                          \
++    extern "C" __global__ void __launch_bounds__(D) name(const float* ckv, long long ckv_ld, const float* cgate,        \
++        long long cgate_ld, const long long* rslot, float* ring_kv, float* ring_score, const long long* gi,             \
++        long long src_rows, const __nv_bfloat16* w, __nv_bfloat16* out, long long ldo, int G, int D_, float eps,         \
++        unsigned* invalid, int pdl) {                                                                                   \
++        pdl_enter(pdl);                                                                                                 \
++        (void)D_;                                                                                                       \
++        tf_ds_compress2x_norm_body<D>(ckv, ckv_ld, cgate, cgate_ld, rslot, ring_kv, ring_score, gi, src_rows, w, out,    \
++                                      ldo, G, eps, invalid);                                                            \
++    }
++
++TF_DS_COMPRESS2X_NORM_KERNEL(tf_ds_compress2x_norm128_kernel, 128)
++TF_DS_COMPRESS2X_NORM_KERNEL(tf_ds_compress2x_norm512_kernel, 512)
+ 
+ // ===================================================================================================================
+ // TF_DS_FUSED_ROPE_STORE (0198, off by default).
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index 111557184cacaf200017fd701758abb2929f8607..9bf0f834d6466a1fa12cd8f0a9cd0fc6cbef9dae 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -48,7 +48,8 @@ pub const Exact = struct {
+     k_bf16_scale: cuda.Function,
+     k_hc_mean4: cuda.Function,
+     k_compress2_norm: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (prompt half): compress2 + rmsNorm, one launch
+-    k_compress2x_norm: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half): the 0127 chain + the kit's _rmsnorm
++    k_compress2x_norm128: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half, d = 128): the 0127 chain + the kit's _rmsnorm
++    k_compress2x_norm512: cuda.Function, // TF_DS_FUSED_COMPRESS2_NORM (decode half, d = 512)
+     k_fused_idx_key: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rmsnorm + _rope_heads + _fp4_store (decode indexer key)
+     k_fused_rope_store: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4_store (decode latent)
+     k_fused_rope_qd: cuda.Function, // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 (decode indexer query)
+@@ -71,7 +72,8 @@ pub const Exact = struct {
+             .k_bf16_scale = try m.function("tf_ds_bf16_scale_kernel"),
+             .k_hc_mean4 = try m.function("tf_ds_hc_mean4_kernel"),
+             .k_compress2_norm = try m.function("tf_ds_compress2_norm_kernel"),
+-            .k_compress2x_norm = try m.function("tf_ds_compress2x_norm_kernel"),
++            .k_compress2x_norm128 = try m.function("tf_ds_compress2x_norm128_kernel"),
++            .k_compress2x_norm512 = try m.function("tf_ds_compress2x_norm512_kernel"),
+             .k_fused_idx_key = try m.function("tf_ds_fused_idx_key_kernel"),
+             .k_fused_rope_store = try m.function("tf_ds_fused_rope_store_kernel"),
+             .k_fused_rope_qd = try m.function("tf_ds_fused_rope_qd_kernel"),
+@@ -179,9 +181,12 @@ pub const Exact = struct {
+         try cuda.launch.launch(e.k_compress2_norm, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = @intCast(lanes), .y = @intCast(groups) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+-    /// TF_DS_FUSED_COMPRESS2_NORM, decode half: tf_ds_compress2x_norm_kernel — the 0127 chain (scatter, resolve,
+-    /// pair sum) and the kit's `_rmsnorm` in one launch. `w` is the comp_norm weight; `out` is rd.lat (the unfused
+-    /// path's lat2 intermediate is not written). Grid = g blocks of d threads, one per channel.
++    /// TF_DS_FUSED_COMPRESS2_NORM, decode half: tf_ds_compress2x_norm{128,512}_kernel — the 0127 chain (scatter,
++    /// resolve, pair sum) and the kit's `_rmsnorm` in one launch, one kernel per served width (the width is
++    /// compile-time in each: the 128-wide one is 128 threads with no shared row and no lane guard, measured 11-13%
++    /// faster than the shared two-width kernel at the served decode rows, the 512-wide one 1-2%). `w` is the comp_norm
++    /// weight; `out` is rd.lat (the unfused path's lat2 intermediate is not written). Grid = g blocks of d threads,
++    /// one per channel.
+     pub fn compress2xNorm(e: *const Exact, s: cuda.Stream, ckv: u64, ckv_ld: usize, cgate: u64, cgate_ld: usize, rslot: u64, ring_kv: u64, ring_score: u64, gi: u64, src_rows: usize, w: u64, out: u64, ldo: usize, g: usize, d: usize, eps: f32, invalid: u64) !void {
+         if (g == 0) return;
+         if (d != 128 and d != 512) return error.UnsupportedShape;
+@@ -203,7 +208,8 @@ pub const Exact = struct {
+         a.add(eps);
+         a.add(invalid);
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+-        try cuda.launch.launch(e.k_compress2x_norm, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = @intCast(d) }, .pdl = e.pdl }, s, &a);
++        const kernel = if (d == 128) e.k_compress2x_norm128 else e.k_compress2x_norm512;
++        try cuda.launch.launch(kernel, .{ .grid = .{ .x = @intCast(g) }, .block = .{ .x = @intCast(d) }, .pdl = e.pdl }, s, &a);
+     }
+ 
+     /// TF_DS_FUSED_ROPE_STORE, decode indexer key: the kit's `_rmsnorm` (D = 128) + `_rope_heads`

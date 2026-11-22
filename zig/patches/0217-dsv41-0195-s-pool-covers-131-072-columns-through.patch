@@ -1,0 +1,59 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit 922a85fe73dc)
+# 0217 dsv41: 0195's pool covers 131,072 columns through the opt-in dynamic shared limit (item 7)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 04f9e6e3257a62f06dad07a443223248960db2e7..cef7bf42fa8fc734d4ec1f98544d293c8724be72 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -27,9 +27,12 @@ pub fn fromText(text: ?[]const u8) error{BadIdxFused}!bool {
+ /// The selection's k bound (the pool's top blocks: candidate_blocks at both call sites, 2048 on this checkpoint).
+ pub const max_k = 2048;
+ /// The maxima's block count past which the fused launch keeps one block a row for work the unfused launches spread
+-/// over a 2D grid: the fused path covers the pool's regime (nbk > candidate_blocks) up to 8192 blocks (64K keys at
+-/// the served block size); past it the unfused sequence runs.
+-pub const max_nbk = 8192;
++/// over a 2D grid: the fused path covers the pool's regime (nbk > candidate_blocks) up to 16384 blocks (131,072
++/// columns at the served block size, a 262,144-token bucket at ratio 2); past it the unfused sequence runs. The bound
++/// is the GPU's opt-in dynamic shared memory (101,376 bytes here: 25,344 blocks of one fp32 maximum) rounded down to
++/// the served power of two, not the radix shortcut: that one skips the columns' two constant high bytes and would
++/// still hold to 65,536 blocks, where a column's inverted id leaves 0xFFFE in them.
++pub const max_nbk = 16384;
+ 
+ /// Rows at or below this use the small-row form: the maxima over the pool's own 2D grid (block_max), then the selection
+ /// from those global maxima in one CTA a row (tf_ds_idx_pick_kernel), because a single CTA a row leaves most of the GPU
+@@ -146,8 +149,9 @@ test "the switch parses its forms and nothing else" {
+ test "fuseOk takes the pool's bounds" {
+     try std.testing.expect(fuseOk(true, 16, 16392, 8, 2049, 2048)); // the smallest pooled case
+     try std.testing.expect(fuseOk(true, 1, 64, 8, 8, 4));
+-    try std.testing.expect(fuseOk(true, 2048, 65536, 8, 8192, 2048)); // the nbk cap, inclusive
+-    try std.testing.expect(!fuseOk(true, 16, 65544, 8, 8193, 2048)); // past the cap
++    try std.testing.expect(fuseOk(true, 2048, 131072, 8, 16384, 2048)); // the nbk cap, inclusive
++    try std.testing.expect(!fuseOk(true, 16, 131080, 8, 16385, 2048)); // past the cap
++    try std.testing.expect(fuseOk(true, 2048, 65536, 8, 8192, 2048)); // the old cap is inside the new one
+     try std.testing.expect(!fuseOk(false, 16, 16392, 8, 2049, 2048));
+     try std.testing.expect(!fuseOk(true, 0, 16392, 8, 2049, 2048));
+     try std.testing.expect(!fuseOk(true, 16, 16392, 8, 2050, 2048)); // nbk disagrees with width/bsize
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index c3feeff58d9bc0c4611d36e45b48d15d9c551d2e..8225bd666a061a3ceed77c6e344581f1d75fc9b5 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -166,7 +166,7 @@ pub const Ops = struct {
+         const rope_store_on = try rope_store.fromText(envSpan(rope_store.env_name));
+         const pdl = onValue(envSpan(pdl_env));
+         const topk_fast = onValue(envSpan(topk_fast_env));
+-        return .{
++        const o: Ops = .{
+             .pointwise = pw,
+             .movement = mv,
+             .family = fm,
+@@ -213,6 +213,10 @@ pub const Ops = struct {
+             .draw_rows = if (envOn(draw_env)) try fm.function("tf_ds_draw_rows_kernel") else null,
+             .lora_add = if (loraOn()) try fm.function("tf_ds_add_bf16_kernel") else null,
+         };
++        // the fused pool's maxima are dynamic shared memory: past 48 KiB each kernel opts in (max_nbk blocks of fp32)
++        if (o.idx_fused_fn) |f| try f.allowDynamicShared(@intCast(idx_fused.max_nbk * @sizeOf(f32)));
++        if (o.idx_pick_fn) |f| try f.allowDynamicShared(@intCast(idx_fused.max_nbk * @sizeOf(f32)));
++        return o;
+     }
+ 
+     pub fn unload(o: *Ops) void {

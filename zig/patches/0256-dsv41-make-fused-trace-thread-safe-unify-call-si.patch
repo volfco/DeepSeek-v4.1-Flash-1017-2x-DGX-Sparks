@@ -1,0 +1,665 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit 4285fec05c91)
+# 0256 dsv41: make fused_trace thread-safe, unify call-site arm dispatch and cover 0254/0255 (review S1, S4, S5)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/src/families/dsv41/dsv41.zig b/zig/src/families/dsv41/dsv41.zig
+index fe9dc5313a7c8fe5604cf56cd8f2304ee1c5f103..836d832ad6ab04f55ed5ee54e8d54ab5180b26a9 100644
+--- a/zig/src/families/dsv41/dsv41.zig
++++ b/zig/src/families/dsv41/dsv41.zig
+@@ -56,6 +56,7 @@ pub const expert_prune = @import("expert_prune.zig");
+ pub const idx_fused = @import("idx_fused.zig");
+ pub const compress2_norm = @import("compress2_norm.zig");
+ pub const rope_store = @import("rope_store.zig");
++pub const fused_trace = @import("fused_trace.zig");
+ pub const lanes = @import("lanes.zig");
+ pub const pool = @import("pool.zig");
+ pub const spill_state = @import("spill_state.zig");
+@@ -119,6 +120,7 @@ test {
+     refAll(idx_fused);
+     refAll(compress2_norm);
+     refAll(rope_store);
++    refAll(fused_trace);
+     refAll(lanes);
+     refAll(pool);
+     refAll(spill_state);
+diff --git a/zig/src/families/dsv41/exact.zig b/zig/src/families/dsv41/exact.zig
+index 72e4bf0eece8095b7234735da46238c6f1df4ebd..ac10caab6c133025ba0df457730a9b9a7bde25e6 100644
+--- a/zig/src/families/dsv41/exact.zig
++++ b/zig/src/families/dsv41/exact.zig
+@@ -165,7 +165,7 @@ pub const Exact = struct {
+     /// an odd trailing row, which writes only that row's raw slot.
+     pub fn compress2Norm(e: *const Exact, s: cuda.Stream, kv: u64, score: u64, w: u64, out: u64, ldo: usize, rows: usize, d: usize, eps: f32, raw_kv: u64, raw_score: u64, raw_len: usize, raw_pos0: usize, raw_first: usize, n_rows: usize) !void {
+         if (rows == 0) return;
+-        if (d % 4 != 0 or d < 128 or d > 2048 or (d & (d - 1)) != 0) return error.UnsupportedShape;
++        if (fused_trace.compressArm(true, true, rows, d) != .compress2_norm) return error.UnsupportedShape;
+         if (n_rows < rows * 2 or n_rows > rows * 2 + 1) return error.UnsupportedShape;
+         if (raw_kv != 0 and (raw_len == 0 or raw_first > n_rows)) return error.UnsupportedShape;
+         const lanes = rmsLanes(d, rows);
+@@ -205,7 +205,7 @@ pub const Exact = struct {
+     /// one per channel.
+     pub fn compress2xNorm(e: *const Exact, s: cuda.Stream, ckv: u64, ckv_ld: usize, cgate: u64, cgate_ld: usize, rslot: u64, ring_kv: u64, ring_score: u64, gi: u64, src_rows: usize, w: u64, out: u64, ldo: usize, g: usize, d: usize, eps: f32, invalid: u64) !void {
+         if (g == 0) return;
+-        if (d != 128 and d != 512) return error.UnsupportedShape;
++        if (fused_trace.compressArm(true, false, g, d) != .compress2x_norm) return error.UnsupportedShape;
+         var a: cuda.Args = .{};
+         a.add(ckv);
+         a.add(@as(c_longlong, @intCast(ckv_ld)));
+@@ -235,7 +235,7 @@ pub const Exact = struct {
+     /// rotated row stays on chip (rd.ik's store has no reader). Grid = rows, block = 128 (the num_warps=4 layout).
+     pub fn idxKeyFused(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, w: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize, eps: f32) !void {
+         if (rows == 0) return;
+-        if (d != 128 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d or !rope_store.warpShapesOk(d, rd, 128)) return error.UnsupportedShape;
++        if (fused_trace.keyArm(true, rows, d, rd, 1, false) != .key_fused) return error.UnsupportedShape;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(@as(c_longlong, @intCast(ldx)));
+@@ -259,8 +259,7 @@ pub const Exact = struct {
+     /// read only (the in-place rotation has no reader after the pack).
+     pub fn ropeStore(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, pos: u64, codes: u64, scales: u64, rows_idx: u64, rows: usize, d: usize, rd: usize) !void {
+         if (rows == 0) return;
+-        const block = @min(d / 2, 256);
+-        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d or !rope_store.warpShapesOk(d, rd, block)) return error.UnsupportedShape;
++        if (fused_trace.latentArm(true, rows, d, rd, false) != .latent_fused) return error.UnsupportedShape;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(cos);
+@@ -283,13 +282,14 @@ pub const Exact = struct {
+     /// thread (grid = (rows, heads)) below it. Both write the same bytes; the threshold is where the measurements cross
+     /// (R=32: 2.55 us pair against 2.85 one-element; R=7: 1.46 against 1.32), and `heads % 8` or a head dim that is not
+     /// a multiple of 64 keeps the one-element form.
+-    pub const pair_rows: usize = 32;
+-    pub const pair_warps: usize = 8;
++    pub const pair_rows: usize = fused_trace.query_pair_rows;
++    pub const pair_warps: usize = fused_trace.query_pair_warps;
+ 
+     pub fn ropeQd(e: *const Exact, s: cuda.Stream, x: u64, out: u64, cos: u64, sin: u64, pos: u64, rows: usize, heads: usize, hd: usize, rd: usize) !void {
+         if (rows == 0 or heads == 0) return;
+-        if (hd < 32 or hd > 512 or (hd & (hd - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > hd or hd % 32 != 0 or !rope_store.warpShapesOk(hd, rd, 128)) return error.UnsupportedShape;
+-        const pair = rows >= pair_rows and heads % pair_warps == 0 and hd % 64 == 0;
++        const arm = fused_trace.queryArm(true, rows, hd, rd, heads);
++        if (arm == .query_unfused) return error.UnsupportedShape;
++        const pair = arm == .query_pair;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(out);
+@@ -300,7 +300,7 @@ pub const Exact = struct {
+         a.add(@as(c_int, @intCast(hd)));
+         a.add(@as(c_int, @intCast(rd)));
+         a.add(@as(c_int, @intFromBool(e.pdl)));
+-        if (fused_trace.enabled()) fused_trace.note(if (pair) .query_pair else .query_fused, rows, hd, e.pdl);
++        if (fused_trace.enabled()) fused_trace.note(arm, rows, hd, e.pdl);
+         if (pair) {
+             try cuda.launch.launch(e.k_fused_rope_qd_pair, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(heads / pair_warps) }, .block = .{ .x = 32 * pair_warps }, .pdl = e.pdl }, s, &a);
+         } else {
+@@ -315,7 +315,7 @@ pub const Exact = struct {
+     /// slot) and the rotated row stays on chip (ch.ik's store has no reader).
+     pub fn promptIdxKey(e: *const Exact, s: cuda.Stream, x: u64, ldx: usize, w: u64, cos: u64, sin: u64, base_group: usize, ratio: usize, codes: u64, scales: u64, rows: usize, d: usize, rd: usize, eps: f32) !void {
+         if (rows == 0) return;
+-        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or d % 4 != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d) return error.UnsupportedShape;
++        if (fused_trace.keyArm(true, rows, d, rd, 1, true) != .prompt_key_fused) return error.UnsupportedShape;
+         const lanes = rmsLanes(d, rows);
+         const y = packLanes(lanes, d / 2);
+         if (!rope_store.warpShapesOk(d, rd, lanes * y)) return error.UnsupportedShape;
+@@ -344,8 +344,7 @@ pub const Exact = struct {
+     /// ch.lat2 (nothing reads it there).
+     pub fn promptLatent(e: *const Exact, s: cuda.Stream, x: u64, cos: u64, sin: u64, base_group: usize, ratio: usize, codes: u64, scales: u64, rows: usize, d: usize, rd: usize) !void {
+         if (rows == 0) return;
+-        const block = @min(d / 2, 256);
+-        if (d < 128 or d > 512 or (d & (d - 1)) != 0 or rd < 2 or (rd & (rd - 1)) != 0 or rd > d or !rope_store.warpShapesOk(d, rd, block)) return error.UnsupportedShape;
++        if (fused_trace.latentArm(true, rows, d, rd, true) != .prompt_latent_fused) return error.UnsupportedShape;
+         var a: cuda.Args = .{};
+         a.add(x);
+         a.add(cos);
+diff --git a/zig/src/families/dsv41/fused_trace.zig b/zig/src/families/dsv41/fused_trace.zig
+index d405742c3c935e6890a7d42feeeb19cce6d96d69..5b63c8fdee57a0a71bc7f11eb63d983370996d7e 100644
+--- a/zig/src/families/dsv41/fused_trace.zig
++++ b/zig/src/families/dsv41/fused_trace.zig
+@@ -1,18 +1,23 @@
+ //! TF_DS_FUSED_TRACE (off by default): an opt-in, once-per-distinct-tuple record of which fused arm the call sites
+ //! select, so a run can show which kernel ran at each row count, width and PDL setting. Host-side only: the call sites
+-//! hand over what they already decided (the same gate functions and bounds the launchers use), nothing is read back
+-//! from the device, no bytes change, and no fingerprint bit moves. The record is bounded: past `capacity` distinct
+-//! tuples further ones are not printed (a round's matrix is far below it).
++//! and launchers call the single-source `*Arm` helpers below, nothing is read back from the device, no bytes change,
++//! and no fingerprint bit moves. Thread-safe and bounded: past `capacity` distinct tuples further ones are ignored.
+ const std = @import("std");
+ 
+ pub const env_name: [:0]const u8 = "TF_DS_FUSED_TRACE";
+ 
+ /// The arm a call site runs. `width` in the record is the shape the arm was chosen for (the compressor's channel
+-/// count, the indexer's column width, the rope kernel's head dim), so one entry identifies the exact kernel and shape.
++/// count, the indexer's column width, the rope kernel's head dim, the router's slot count), so one entry identifies
++/// the exact kernel and shape.
+ pub const Arm = enum {
+     idx_fused,
+     idx_small,
+     idx_unfused,
++    topk_indices_cut,
++    topk_indices,
++    topk_indices_fast,
++    cand_fast8,
++    cand_fast,
+     compress2x_norm,
+     compress2_norm,
+     compress_unfused,
+@@ -40,50 +45,91 @@ pub const Entry = struct {
+ 
+ pub const capacity = 128;
+ 
++var mutex: std.atomic.Mutex = .unlocked;
+ var seen: [capacity]Entry = undefined;
+-var count: usize = 0;
+-var enabled_cache: ?bool = null;
++var count: std.atomic.Value(usize) = .init(0);
++// 0: uncached, 1: off, 2: on
++var enabled_cache: std.atomic.Value(u8) = .init(0);
++
++fn lock() void {
++    while (!mutex.tryLock()) std.Thread.yield() catch {};
++}
+ 
+ /// TF_DS_FUSED_TRACE: unset, "" or "0" off; anything else on.
+ pub fn enabled() bool {
+-    if (enabled_cache) |on| return on;
++    const cached = enabled_cache.load(.acquire);
++    if (cached != 0) return cached == 2;
++    lock();
++    defer mutex.unlock();
++    const again = enabled_cache.load(.monotonic);
++    if (again != 0) return again == 2;
+     const text = std.c.getenv(env_name);
+     const on = if (text) |t| std.mem.span(t).len != 0 and !std.mem.eql(u8, std.mem.span(t), "0") else false;
+-    enabled_cache = on;
++    enabled_cache.store(if (on) 2 else 1, .release);
+     return on;
+ }
+ 
+-/// Record one arm selection. Called from the call sites behind `enabled()`, and directly by the test below.
++/// Record one arm selection. Called from the call sites behind `enabled()`, and directly by the tests below.
+ pub fn note(arm: Arm, rows: usize, width: usize, pdl: bool) void {
+-    for (seen[0..count]) |e| {
+-        if (e.arm == arm and e.rows == rows and e.width == width and e.pdl == pdl) return;
++    const inserted = blk: {
++        lock();
++        defer mutex.unlock();
++        const n = count.load(.monotonic);
++        for (seen[0..n]) |e| {
++            if (e.arm == arm and e.rows == rows and e.width == width and e.pdl == pdl) break :blk false;
++        }
++        if (n >= capacity) break :blk false;
++        seen[n] = .{ .arm = arm, .rows = rows, .width = width, .pdl = pdl };
++        count.store(n + 1, .release);
++        break :blk true;
++    };
++    if (inserted) {
++        std.debug.print("dsv41 fused trace: {s} rows={d} width={d} pdl={d}\n", .{ @tagName(arm), rows, width, @intFromBool(pdl) });
+     }
+-    if (count == capacity) return;
+-    seen[count] = .{ .arm = arm, .rows = rows, .width = width, .pdl = pdl };
+-    count += 1;
+-    std.debug.print("dsv41 fused trace: {s} rows={d} width={d} pdl={d}\n", .{ @tagName(arm), rows, width, @intFromBool(pdl) });
+ }
+ 
+ pub fn entries() []const Entry {
+-    return seen[0..count];
++    lock();
++    defer mutex.unlock();
++    return seen[0..count.load(.monotonic)];
+ }
+ 
+ pub fn reset() void {
+-    count = 0;
+-    enabled_cache = null;
++    lock();
++    defer mutex.unlock();
++    count.store(0, .release);
++    enabled_cache.store(0, .release);
+ }
+ 
+-// -- the served matrix the call sites run ----------------------------------------------------------------------------
++// -- single-source arm selection shared by the call sites and launchers ----------------------------------------------
+ 
+ const idx_fused = @import("idx_fused.zig");
+ const compress2_norm = @import("compress2_norm.zig");
+ const rope_store = @import("rope_store.zig");
++const expert_prune = @import("expert_prune.zig");
++
++pub const query_pair_rows: usize = 32;
++pub const query_pair_warps: usize = 8;
+ 
+-/// The indexer's arm for a decode row count and bucket width (round.zig's candidate-source arm, prompt.zig's pooled
+-/// source layer): the fused launch, its small-row form, or the unfused block_max/pool_pick sequence.
+-pub fn idxArm(fused: bool, rows: usize, width: usize, bsize: usize, nbk: usize, k: usize) Arm {
++/// The indexer's pool arm: decode (`allow_small = true`, writing `cblk`) takes `idx_small` at `rows <= small_rows` and
++/// `nbk >= small_nbk`; prompt (`allow_small = false`, writing the `mask`) never takes `idx_small` because `idxPick`
++/// writes only decode's block list.
++pub fn idxArm(fused: bool, allow_small: bool, rows: usize, width: usize, bsize: usize, nbk: usize, k: usize) Arm {
+     if (!idx_fused.fuseOk(fused, rows, width, bsize, nbk, k)) return .idx_unfused;
+-    return if (rows <= idx_fused.small_rows and nbk >= idx_fused.small_nbk) .idx_small else .idx_fused;
++    return if (allow_small and rows <= idx_fused.small_rows and nbk >= idx_fused.small_nbk) .idx_small else .idx_fused;
++}
++
++/// 0254 score top-k arm (ops.zig's topkIndices): TF_DS_IDX_FUSED's early-cut radix select takes precedence over
++/// TF_DS_TOPK_FAST's sampled threshold, else the eight-pass select runs.
++pub fn topkIndicesArm(idx_fused_on: bool, topk_fast: bool) Arm {
++    if (idx_fused_on) return .topk_indices_cut;
++    return if (topk_fast) .topk_indices_fast else .topk_indices;
++}
++
++/// 0255 candidate-mask arm (ops.zig's candFast): vectorized eight-score loads when TF_DS_IDX_FUSED is on and every row
++/// is 16-byte aligned at bsize 8, else the scalar loop.
++pub fn candFastArm(idx_fused_on: bool, score: u64, stride: usize, bsize: usize) Arm {
++    return if (idx_fused_on and idx_fused.candMask8Ok(score, stride, bsize)) .cand_fast8 else .cand_fast;
+ }
+ 
+ /// The compressor's arm (round.zig's decode ratio-2 chain, prompt.zig's chunk path).
+@@ -92,21 +138,33 @@ pub fn compressArm(fused: bool, prompt: bool, rows: usize, d: usize) Arm {
+     return if (compress2_norm.decodeOk(fused, rows, d)) .compress2x_norm else .compress_unfused;
+ }
+ 
+-/// The 0198 arms (round.zig's key / latent / query launches, prompt.zig's stores).
++/// The 0198 key arm (round.zig's decode key launch, prompt.zig's prompt key store).
+ pub fn keyArm(fused: bool, rows: usize, d: usize, rd: usize, heads: usize, prompt: bool) Arm {
+-    if (!prompt and rope_store.keyFuseOk(fused, rows, d, rd, heads)) return .key_fused;
+-    if (prompt and rope_store.fuseOk(fused, rows, d, rd, heads)) return .prompt_key_fused;
+-    return if (prompt) .prompt_key_unfused else .key_unfused;
++    if (!prompt) {
++        return if (rope_store.keyFuseOk(fused, rows, d, rd, heads) and rope_store.warpShapesOk(d, rd, 128)) .key_fused else .key_unfused;
++    }
++    return if (rope_store.fuseOk(fused, rows, d, rd, heads) and rope_store.warpShapesOk(d, rd, 32)) .prompt_key_fused else .prompt_key_unfused;
+ }
+ 
++/// The 0198 latent arm (round.zig's decode latent launch, prompt.zig's prompt latent store).
+ pub fn latentArm(fused: bool, rows: usize, d: usize, rd: usize, prompt: bool) Arm {
+-    if (prompt) return if (rope_store.fuseOk(fused, rows, d, rd, 1)) .prompt_latent_fused else .prompt_latent_unfused;
+-    return if (rope_store.fuseOk(fused, rows, d, rd, 1)) .latent_fused else .latent_unfused;
++    const ok = rope_store.fuseOk(fused, rows, d, rd, 1) and rope_store.warpShapesOk(d, rd, @min(d / 2, 256));
++    if (prompt) return if (ok) .prompt_latent_fused else .prompt_latent_unfused;
++    return if (ok) .latent_fused else .latent_unfused;
+ }
+ 
+-pub fn queryArm(fused: bool, rows: usize, d: usize, rd: usize, heads: usize) Arm {
+-    if (!rope_store.fuseOk(fused, rows, d, rd, heads)) return .query_unfused;
+-    return if (rows >= 32) .query_pair else .query_fused;   // the per-row-count geometry (0241)
++/// The 0198/0241 query arm (exact.zig's ropeQd, round.zig and prompt.zig): the pair geometry requires `rows >= 32`,
++/// `heads % 8 == 0`, and `hd % 64 == 0`.
++pub fn queryArm(fused: bool, rows: usize, hd: usize, rd: usize, heads: usize) Arm {
++    if (!rope_store.fuseOk(fused, rows, hd, rd, heads) or !rope_store.warpShapesOk(hd, rd, 128)) return .query_unfused;
++    return if (rows >= query_pair_rows and heads % query_pair_warps == 0 and hd % 64 == 0) .query_pair else .query_fused;
++}
++
++/// The 0199 routed-expert prune arm (ops.zig's expertPruneDead).
++pub fn pruneArm(fused_route: bool, m: expert_prune.Mode, rows: usize, topk: usize, slots: usize) Arm {
++    const ok = fused_route and topk == 6 and slots == 7 and rows > 0 and rows <= 64 and m.cap == null and m.apply and
++        m.rule.topp == 0.85 and m.rule.min_k == 3 and m.rule.renorm == .kept;
++    return if (ok) .prune_six else .prune_unfused;
+ }
+ 
+ // -- tests -----------------------------------------------------------------------------------------------------------
+@@ -115,11 +173,12 @@ const expectEqual = std.testing.expectEqual;
+ 
+ test "the trace is off unless TF_DS_FUSED_TRACE is set" {
+     reset();
+-    try expectEqual(false, enabled());   // the test harness runs without the variable
++    try expectEqual(false, enabled()); // the test harness runs without the variable
+ }
+ 
+ test "the served matrix selects the recorded arms, once per tuple" {
+     reset();
++    const prune_mode: expert_prune.Mode = .{ .rule = expert_prune.default_rule, .apply = true };
+     const rows_list = [_]usize{ 1, 7, 32, 48, 128, 1024 };
+     for (rows_list) |rows| {
+         for ([_]bool{ false, true }) |pdl| {
+@@ -127,13 +186,13 @@ test "the served matrix selects the recorded arms, once per tuple" {
+             for ([_]usize{ 8, 8192 }) |nb| {
+                 const width = 8 * nb - 3;
+                 const nbk = 1 + (width - 1) / 8;
+-                note(idxArm(true, rows, width, 8, nbk, @min(2048, nbk)), rows, width, pdl);
++                note(idxArm(true, true, rows, width, 8, nbk, @min(2048, nbk)), rows, width, pdl);
+             }
+             for ([_]usize{ 128, 512 }) |d| note(compressArm(true, false, rows, d), rows, d, pdl);
+             note(keyArm(true, rows, 128, 64, 1, false), rows, 128, pdl);
+             note(latentArm(true, rows, 512, 64, false), rows, 512, pdl);
+             note(queryArm(true, rows, 128, 64, 32), rows, 128, pdl);
+-            note(.prune_six, rows, 7, pdl);
++            note(pruneArm(true, prune_mode, rows, 6, 7), rows, 7, pdl);
+         }
+     }
+     // the arms the call sites take at the served decode shapes, as a table
+@@ -149,6 +208,7 @@ test "the served matrix selects the recorded arms, once per tuple" {
+         .{ .arm = .query_fused, .rows = 1, .width = 128, .pdl = false },
+         .{ .arm = .query_pair, .rows = 32, .width = 128, .pdl = false },
+         .{ .arm = .prune_six, .rows = 1, .width = 7, .pdl = false },
++        .{ .arm = .prune_unfused, .rows = 128, .width = 7, .pdl = false },
+     };
+     for (table) |want| {
+         var found = false;
+@@ -159,25 +219,121 @@ test "the served matrix selects the recorded arms, once per tuple" {
+         try std.testing.expect(found);
+     }
+     // pdl is part of the key, and a repeated tuple is recorded once (rows 3 is not in the matrix above)
+-    const before = count;
++    const before = entries().len;
+     note(.idx_fused, 3, 61, true);
+-    try expectEqual(before + 1, count);
++    try expectEqual(before + 1, entries().len);
+     note(.idx_fused, 3, 61, true);
+-    try expectEqual(before + 1, count);
++    try expectEqual(before + 1, entries().len);
+     note(.idx_fused, 3, 61, false);
+-    try expectEqual(before + 2, count);
+-    try std.testing.expect(count <= capacity);
++    try expectEqual(before + 2, entries().len);
++    try std.testing.expect(entries().len <= capacity);
+ }
+ 
+ test "the arms switch off with the switches" {
+     reset();
+-    try expectEqual(.idx_unfused, idxArm(false, 7, 65533, 8, 8192, 2048));
++    try expectEqual(.idx_unfused, idxArm(false, true, 7, 65533, 8, 8192, 2048));
+     try expectEqual(.compress_unfused, compressArm(false, false, 7, 512));
+     try expectEqual(.key_unfused, keyArm(false, 7, 128, 64, 1, false));
+     try expectEqual(.latent_unfused, latentArm(false, 7, 512, 64, false));
+     try expectEqual(.query_unfused, queryArm(false, 32, 128, 64, 32));
+     // and past the fused bounds the unfused sequence runs, as the call sites fall back
+-    try expectEqual(.idx_unfused, idxArm(true, 7, 8 * 16385 - 3, 8, 16385, 2048));
+-    try expectEqual(.compress_unfused, compressArm(true, false, 7, 256));   // decodeOk takes 128 and 512 only
+-    try expectEqual(.compress2_norm, compressArm(true, true, 128, 2048));   // the prompt half takes pow2 to 2048
++    try expectEqual(.idx_unfused, idxArm(true, true, 7, 8 * 16385 - 3, 8, 16385, 2048));
++    try expectEqual(.compress_unfused, compressArm(true, false, 7, 256)); // decodeOk takes 128 and 512 only
++    try expectEqual(.compress2_norm, compressArm(true, true, 128, 2048)); // the prompt half takes pow2 to 2048
++}
++
++test "queryArm, idxArm, candFastArm, and topkIndicesArm match the launcher gates" {
++    // heads=12 at rows=32 is not a multiple of 8 warps: exact.ropeQd keeps the one-element form (.query_fused)
++    try expectEqual(.query_fused, queryArm(true, 32, 128, 64, 12));
++    try expectEqual(.query_pair, queryArm(true, 32, 128, 64, 16));
++    try expectEqual(.query_fused, queryArm(true, 31, 128, 64, 32));
++
++    // prompt pooled (allow_small=false) at m <= 7, nbk >= 6144 stays .idx_fused; decode (allow_small=true) takes .idx_small
++    try expectEqual(.idx_fused, idxArm(true, false, 7, 6144 * 8, 8, 6144, 2048));
++    try expectEqual(.idx_fused, idxArm(true, false, 1, 65533, 8, 8192, 2048));
++    try expectEqual(.idx_small, idxArm(true, true, 7, 6144 * 8, 8, 6144, 2048));
++    try expectEqual(.idx_small, idxArm(true, true, 1, 65533, 8, 8192, 2048));
++    try expectEqual(.idx_fused, idxArm(true, true, 7, 6143 * 8, 8, 6143, 2048));
++
++    // 0255 cand_fast8 alignment and bsize=8 gate
++    try expectEqual(.cand_fast8, candFastArm(true, 0x1000, 2048, 8));
++    try expectEqual(.cand_fast, candFastArm(false, 0x1000, 2048, 8));
++    try expectEqual(.cand_fast, candFastArm(true, 0x1008, 2048, 8));
++    try expectEqual(.cand_fast, candFastArm(true, 0x1000, 2050, 8));
++    try expectEqual(.cand_fast, candFastArm(true, 0x1000, 2048, 4));
++
++    // 0254 topk_indices_cut takes precedence over topk_indices_fast when TF_DS_IDX_FUSED is on
++    try expectEqual(.topk_indices_cut, topkIndicesArm(true, false));
++    try expectEqual(.topk_indices_cut, topkIndicesArm(true, true));
++    try expectEqual(.topk_indices_fast, topkIndicesArm(false, true));
++    try expectEqual(.topk_indices, topkIndicesArm(false, false));
++}
++
++test "capacity clamp stops at 128 distinct entries" {
++    reset();
++    for (0..capacity + 40) |i| {
++        note(.topk_indices_cut, i + 1, 4096, false);
++    }
++    const snap = entries();
++    try expectEqual(@as(usize, capacity), snap.len);
++    for (0..capacity) |i| {
++        try expectEqual(Entry{ .arm = .topk_indices_cut, .rows = i + 1, .width = 4096, .pdl = false }, snap[i]);
++    }
++    // existing entries still deduplicate and nothing pushes count past capacity
++    note(.topk_indices_cut, 1, 4096, false);
++    try expectEqual(@as(usize, capacity), entries().len);
++}
++
++test "concurrent note() and enabled() calls race safely across the count == 127 boundary" {
++    reset();
++    // Pre-fill 127 distinct entries so 8 threads race directly for the final slot (index 127).
++    for (0..capacity - 1) |i| {
++        note(.cand_fast8, i + 1, 1024, false);
++    }
++    try expectEqual(@as(usize, capacity - 1), entries().len);
++
++    const Worker = struct {
++        fn runAtBoundary(go: *const std.atomic.Value(bool), tid: usize) void {
++            while (!go.load(.acquire)) std.atomic.spinLoopHint();
++            _ = enabled();
++            for (0..16) |k| {
++                note(.cand_fast8, 1000 + tid * 32 + k, 1024, (k & 1) != 0);
++                note(.cand_fast8, 1, 1024, false); // duplicate of an existing entry
++            }
++        }
++
++        fn runFromZero(go: *const std.atomic.Value(bool), tid: usize) void {
++            while (!go.load(.acquire)) std.atomic.spinLoopHint();
++            for (0..48) |k| {
++                _ = enabled();
++                note(.idx_fused, (tid * 17 + k) % 160 + 1, 65536, (k & 1) != 0);
++            }
++        }
++    };
++
++    var go: std.atomic.Value(bool) = .init(false);
++    var threads: [8]std.Thread = undefined;
++    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Worker.runAtBoundary, .{ &go, i });
++    go.store(true, .release);
++    for (threads) |t| t.join();
++
++    const snap1 = entries();
++    try expectEqual(@as(usize, capacity), snap1.len);
++    try std.testing.expect(snap1[capacity - 1].rows >= 1000);
++
++    // Also race from zero across overlapping and excess distinct tuples: capacity holds and no duplicate slips in.
++    reset();
++    var go2: std.atomic.Value(bool) = .init(false);
++    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Worker.runFromZero, .{ &go2, i });
++    go2.store(true, .release);
++    for (threads) |t| t.join();
++
++    const snap2 = entries();
++    try expectEqual(@as(usize, capacity), snap2.len);
++    for (snap2, 0..) |a, i| {
++        for (snap2[i + 1 ..]) |b| {
++            try std.testing.expect(!std.meta.eql(a, b));
++        }
++    }
++    reset();
+ }
+diff --git a/zig/src/families/dsv41/ops.zig b/zig/src/families/dsv41/ops.zig
+index 464e23cc1b8202994556eac0571b5d399ee0604d..eb02b838a29b82dc75e90ad2724462050379d49b 100644
+--- a/zig/src/families/dsv41/ops.zig
++++ b/zig/src/families/dsv41/ops.zig
+@@ -176,8 +176,13 @@ pub const Ops = struct {
+             .f16_to_f32 = try fm.function("tf_ds_f16_to_f32_kernel"),
+             .add2_bf16 = try fm.function("tf_ds_add2_bf16_kernel"),
+             .topk_i64 = try fm.function("tf_ds_topk_i64_kernel"),
+-            .topk_indices = try fm.function(if (idx_fused_on) "tf_ds_topk_indices_cut_kernel" else "tf_ds_topk_indices_kernel"),
+-            .topk_indices_fast = try fm.function("tf_ds_topk_indices_fast_kernel"),
++            .topk_indices = try fm.function(switch (fused_trace.topkIndicesArm(idx_fused_on, false)) {
++                .topk_indices_cut => "tf_ds_topk_indices_cut_kernel",
++                .topk_indices => "tf_ds_topk_indices_kernel",
++                .topk_indices_fast => "tf_ds_topk_indices_fast_kernel",
++                else => unreachable,
++            }),
++            .topk_indices_fast = try fm.function("tf_ds_topk_indices_fast_kernel"), // TF_DS_TOPK_FAST (0182): launched only under it
+             .scatter = try fm.function("tf_ds_scatter_rows_kernel"),
+             .cand_fast = try fm.function("tf_ds_cand_fast_kernel"),
+             .cand_fast8 = if (idx_fused_on) try fm.function("tf_ds_cand_fast8_kernel") else null,
+@@ -337,6 +342,7 @@ pub const Ops = struct {
+         a.add(vis);
+         a.add(out);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
++        if (fused_trace.enabled()) fused_trace.note(fused_trace.topkIndicesArm(o.idx_fused, o.topk_fast), rows, n, o.pdl);
+         const f = if (o.topk_fast) o.topk_indices_fast else o.topk_indices; // TF_DS_TOPK_FAST: same k, same order
+         try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .pdl = o.pdl }, s, &a);
+     }
+@@ -370,7 +376,9 @@ pub const Ops = struct {
+         a.add(out);
+         a.add(@as(c_longlong, @intCast(os)));
+         a.add(@as(c_int, @intFromBool(o.pdl)));
+-        const f = if (idx_fused.candMask8Ok(score, ss, bsize)) o.cand_fast8 orelse o.cand_fast else o.cand_fast;
++        const arm = fused_trace.candFastArm(o.cand_fast8 != null, score, ss, bsize);
++        const f = if (arm == .cand_fast8) o.cand_fast8.? else o.cand_fast;
++        if (fused_trace.enabled()) fused_trace.note(arm, rows, nb * bsize, o.pdl);
+         try cuda.launch.launch(f, .{ .grid = .{ .x = blocks(nb, 256), .y = @intCast(rows) }, .block = .{ .x = 256 }, .pdl = o.pdl }, s, &a);
+     }
+ 
+@@ -405,10 +413,11 @@ pub const Ops = struct {
+         a.add(stats);
+         a.add(dead);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
+-        const six = if (useSixSlotPrune(m, rows, topk, slots)) o.prune_six_fn else null;
++        const arm = fused_trace.pruneArm(o.prune_six_fn != null, m, rows, topk, slots);
++        const six = if (arm == .prune_six) o.prune_six_fn else null;
+         const kernel = six orelse o.prune_fn orelse return error.ExpertPruneOff;
+         const threads: u32 = if (six != null and rows <= 32) 32 else expert_prune.max_rows;
+-        if (fused_trace.enabled()) fused_trace.note(if (six != null) .prune_six else .prune_unfused, rows, slots, o.pdl);
++        if (fused_trace.enabled()) fused_trace.note(arm, rows, slots, o.pdl);
+         try cuda.launch.launch(kernel, .{ .grid = .{ .x = 1 }, .block = .{ .x = threads }, .pdl = o.pdl }, s, &a);
+     }
+ 
+@@ -516,10 +525,10 @@ pub const Ops = struct {
+     /// TF_DS_IDX_FUSED's small-row form, second launch: tf_ds_idx_pick_kernel selects from block_max's maxima (bmax
+     /// [rows, nbk] fp32 at row stride bs) and writes the decode arm's block list, exactly as idxFused's decode arm does
+     /// (one CTA a row; the maxima are staged on chip). The call sites use it for rows <= idx_fused.small_rows.
+-    pub fn idxPick(o: *const Ops, s: cuda.Stream, bmax: u64, bs: usize, nbk: usize, k: usize, every: u64, cblk: u64, rows: usize) !void {
++    pub fn idxPick(o: *const Ops, s: cuda.Stream, bmax: u64, bs: usize, width: usize, nbk: usize, k: usize, every: u64, cblk: u64, rows: usize) !void {
+         if (rows == 0) return;
+         if (bmax == 0 or every == 0 or cblk == 0) return error.BadIdxFusedArgs;
+-        if (nbk == 0 or nbk > idx_fused.max_nbk or bs < nbk or k < 1 or k > idx_fused.max_k or k > nbk) return error.BadIdxFusedArgs;
++        if (width == 0 or width > std.math.maxInt(c_int) or nbk == 0 or nbk > width or nbk > idx_fused.max_nbk or bs < nbk or k < 1 or k > idx_fused.max_k or k > nbk) return error.BadIdxFusedArgs;
+         var a: cuda.Args = .{};
+         a.add(bmax);
+         a.add(@as(c_longlong, @intCast(bs)));
+@@ -528,7 +537,7 @@ pub const Ops = struct {
+         a.add(every);
+         a.add(cblk);
+         a.add(@as(c_int, @intFromBool(o.pdl)));
+-        if (fused_trace.enabled()) fused_trace.note(.idx_small, rows, nbk, o.pdl);
++        if (fused_trace.enabled()) fused_trace.note(.idx_small, rows, width, o.pdl);
+         try cuda.launch.launch(o.idx_pick_fn orelse return error.IdxFusedOff, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 }, .shared = @intCast(nbk * @sizeOf(f32)), .pdl = o.pdl }, s, &a);
+     }
+ 
+@@ -807,8 +816,7 @@ test "TF_DS_CHECK_INVALID parses like the series' switches: 1 or on, anything el
+ }
+ 
+ fn useSixSlotPrune(m: expert_prune.Mode, rows: usize, topk: usize, slots: usize) bool {
+-    return topk == 6 and slots == 7 and rows > 0 and rows <= 64 and m.cap == null and m.apply and
+-        m.rule.topp == 0.85 and m.rule.min_k == 3 and m.rule.renorm == .kept;
++    return fused_trace.pruneArm(true, m, rows, topk, slots) == .prune_six;
+ }
+ 
+ test "six-slot prune dispatch requires the implemented rule and row layout" {
+diff --git a/zig/src/families/dsv41/prompt.zig b/zig/src/families/dsv41/prompt.zig
+index 3fbad06cc49e8ec892edac472fcbca7d407a8747..83e823840c5b13318f83b5d3b96e74f5f2905547 100644
+--- a/zig/src/families/dsv41/prompt.zig
++++ b/zig/src/families/dsv41/prompt.zig
+@@ -1328,7 +1328,7 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+         const keep: usize = @min(n, raw_rows);
+         const raw_first = n - keep;
+         const raw_pos0 = (start + raw_first) % raw_rows;
+-        const fused = e.ops.compress2_norm and compress2_norm.fuseOk(true, full, hd);
++        const fused = fused_trace.compressArm(e.ops.compress2_norm, true, full, hd) == .compress2_norm;
+         // TF_DS_FUSED_COMPRESS2_NORM writes both raw tails itself (one block per pair, plus one for an odd trailing
+         // row), so the index upload and the two scatters run only when it is off or there is no pair to launch.
+         if (!fused or full == 0) {
+@@ -1359,8 +1359,8 @@ fn kvSourceUpdate(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared,
+     // so ch.groups/ch.gpos are staged only for a path that reads them: the unfused rope/fp4_store chains.
+     const rot = e.compressed;
+     const base_group = start / r;
+-    const idx_key_fused = if (lay.idx_wk) |_| (e.ops.rope_store and rope_store.fuseOk(true, full, c.index_head_dim, rd, 1)) else true;
+-    const lat_fused = e.ops.rope_store and rope_store.fuseOk(true, full, hd, rd, 1);
++    const idx_key_fused = if (lay.idx_wk) |_| (fused_trace.keyArm(e.ops.rope_store, full, c.index_head_dim, rd, 1, true) == .prompt_key_fused) else true;
++    const lat_fused = fused_trace.latentArm(e.ops.rope_store, full, hd, rd, true) == .prompt_latent_fused;
+     if (!idx_key_fused or !lat_fused) {
+         var g_host: [4096]i64 = undefined;
+         var p_host: [4096]i64 = undefined;
+@@ -1440,7 +1440,7 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+         return;
+     }
+     try mm(e, ch, wqb, ch.qr, lay.wq_a.n, ch.iq, .bf16, ih * id);
+-    if (e.ops.rope_store and rope_store.fuseOk(true, n, id, c.rope_dim, ih)) {
++    if (fused_trace.queryArm(e.ops.rope_store, n, id, c.rope_dim, ih) != .query_unfused) {
+         // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 in one launch (the decode arm's kernel: the same Triton
+         // arithmetic over the same [rows, heads, head_dim] layout, with the prompt's own positions, ch.pos)
+         try e.exact.ropeQd(e.t.stream, ch.iq, ch.iq4, rope.cos, rope.sin, ch.pos, n, ih, id, c.rope_dim);
+@@ -1507,7 +1507,7 @@ fn indexer(e: *const Engine, ch: *Chunk, cs: *const Caches, sh: *Shared, li: usi
+             const mrows = ch.pool + r0 * ch.pool_ms;
+             if (pooled and li == c.candidate_source) {
+                 // TF_DS_IDX_FUSED: the same three launches in one (off by default); the mask keeps its offset (mrows)
+-                if (idx_fused.fuseOk(e.ops.idx_fused, m, n_comp_end, cb, nbk, pk)) {
++                if (fused_trace.idxArm(e.ops.idx_fused, false, m, n_comp_end, cb, nbk, pk) == .idx_fused) {
+                     try e.ops.idxFused(e.s, ch.score, n_comp_end, n_comp_end, cb, vr, ch.every, pk, mrows, ch.pool_ms, 0, m);
+                 } else {
+                     if (fused_trace.enabled()) fused_trace.note(.idx_unfused, m, n_comp_end, e.ops.pdl);
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index 34eaab04995baf6a16d759baa2eb67e5ef7b52d9..ef6c78f8b18ea19a3dbd3203bac7f406011dd13c 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -1057,7 +1057,7 @@ fn compressorChain(e: *const Engine, rd: *const Round, ch: *const Chunk, t: tri.
+         return;
+     }
+     if (ratio == 2) {
+-        if (compress2_norm.decodeOk(e.ops.compress2_norm, R, hd)) {
++        if (fused_trace.compressArm(e.ops.compress2_norm, false, R, hd) == .compress2x_norm) {
+             // Same stream and ring writes as compress2x. Stage the bf16 pair sum on chip for the kit norm.
+             try e.exact.compress2xNorm(s, rd.ckv, hd, rd.cgate, hd, rd.g(.rslot), caches.raw_kv[li], caches.raw_score[li], rd.g(.gi), caches.slots * raw_rows, lay.comp_norm, rd.lat, hd, R, hd, c.eps, ch.invalid);
+             try checkInvalid(e, ch, li);
+@@ -1220,7 +1220,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+             if (lay.idx_wk) |iwk| {
+                 const id = c.index_head_dim;
+                 try prompt.grouped(e, ch, R, &.{iwk}, &.{rd.lat}, &.{hd}, &.{rd.ikp}, &.{id}, &.{.bf16});
+-                if (rope_store.keyFuseOk(e.ops.rope_store, R, id, rd_dim, 1)) {
++                if (fused_trace.keyArm(e.ops.rope_store, R, id, rd_dim, 1, false) == .key_fused) {
+                     // TF_DS_FUSED_ROPE_STORE: _rmsnorm + _rope_heads + _fp4_store in one launch (the key kernel's own
+                     // width gate: its norm is the 128-wide kit specialization)
+                     try e.exact.idxKeyFused(t.stream, rd.ikp, id, lay.idx_k_norm, rope.cos, rope.sin, gpos, cs.idx_codes[li], cs.idx_scales[li], ctarget, R, id, rd_dim, c.eps);
+@@ -1234,7 +1234,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+             // the latent rotated in place (it is not read again), then stored (TF_DS_KV_SHARD: into this rank's plane,
+             // the owner's row or the round row's trash row)
+             const ltarget = if (e.kv != null) rd.sgl(if (ratio == 1) .ltarget1 else .ltarget2) else ctarget;
+-            if (e.ops.rope_store and rope_store.fuseOk(true, R, hd, rd_dim, 1)) {
++            if (fused_trace.latentArm(e.ops.rope_store, R, hd, rd_dim, false) == .latent_fused) {
+                 // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4_store in one launch (rd.lat read only)
+                 try e.exact.ropeStore(t.stream, rd.lat, rope.cos, rope.sin, gpos, cs.comp_codes[li], cs.comp_scales[li], ltarget, R, hd, rd_dim);
+             } else {
+@@ -1255,7 +1255,7 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+             const ih = c.index_heads;
+             const id = c.index_head_dim;
+             const k: tri_index.IndexK = .{ .fp4 = .{ .codes = cs.idx_codes[src], .scales = cs.idx_scales[src] } };
+-            if (e.ops.rope_store and rope_store.fuseOk(true, R, id, rd_dim, ih)) {
++            if (fused_trace.queryArm(e.ops.rope_store, R, id, rd_dim, ih) != .query_unfused) {
+                 // TF_DS_FUSED_ROPE_STORE: _rope_heads + _fp4qd_p2 in one launch (rd.iq read only)
+                 try e.exact.ropeQd(t.stream, rd.iq, rd.iq4, rope.cos, rope.sin, pos, R, ih, id, rd_dim);
+             } else {
+@@ -1297,19 +1297,22 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     const nbk = (nb + cb - 1) / cb;
+                     // TF_DS_IDX_FUSED: the same three launches in one (off by default; the bounds keep the pool's
+                     // regime, past them the unfused sequence runs)
+-                    if (idx_fused.fuseOk(e.ops.idx_fused, R, nb, cb, nbk, c.candidate_blocks)) {
+-                        if (R <= idx_fused.small_rows and nbk >= idx_fused.small_nbk) {
++                    switch (fused_trace.idxArm(e.ops.idx_fused, true, R, nb, cb, nbk, c.candidate_blocks)) {
++                        .idx_small => {
+                             // the small-row form: the maxima over the pool's own 2D grid, then the selection from them
+                             // (the same cutoff, tied columns and ascending list; a single CTA a row would leave most
+                             // of the GPU idle at one to seven rows)
+                             try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
+-                            try e.ops.idxPick(e.s, rd.bmax, nbk, nbk, c.candidate_blocks, rd.pbufs.every, rd.cblk, R);
+-                        } else try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R);
+-                    } else {
+-                        if (fused_trace.enabled()) fused_trace.note(.idx_unfused, R, nb, e.ops.pdl);
+-                        try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
+-                        try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
+-                        try e.ops.poolPick(e.s, rd.bmax, nbk, nbk, rd.pidx, c.candidate_blocks, 0, 0, rd.cblk, R);
++                            try e.ops.idxPick(e.s, rd.bmax, nbk, nb, nbk, c.candidate_blocks, rd.pbufs.every, rd.cblk, R);
++                        },
++                        .idx_fused => try e.ops.idxFused(e.s, rd.score, nb, nb, cb, vis, rd.pbufs.every, c.candidate_blocks, 0, 0, rd.cblk, R),
++                        .idx_unfused => {
++                            if (fused_trace.enabled()) fused_trace.note(.idx_unfused, R, nb, e.ops.pdl);
++                            try e.ops.blockMax(e.s, rd.score, nb, nb, cb, vis, rd.bmax, nbk, R);
++                            try e.ops.topkIndices(e.s, rd.bmax, nbk, R, nbk, c.candidate_blocks, rd.pbufs.every, rd.pidx);
++                            try e.ops.poolPick(e.s, rd.bmax, nbk, nbk, rd.pidx, c.candidate_blocks, 0, 0, rd.cblk, R);
++                        },
++                        else => unreachable,
+                     }
+                     rd.has_cblk = true;
+                 } else {

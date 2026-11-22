@@ -1,0 +1,76 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit a0e2232bca9d)
+# 0213 dsv41: 0195's served block size takes a static, vectorized phase 1 (items 4-5)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_ops.cu b/zig/kernels/cuda/dsv41_ops.cu
+index d603e38a3164d6a43df493a940e577489639951a..526b9d89be80313ed9be68bde19ef8f797beb78e 100644
+--- a/zig/kernels/cuda/dsv41_ops.cu
++++ b/zig/kernels/cuda/dsv41_ops.cu
+@@ -956,6 +956,41 @@ __device__ __forceinline__ unsigned long long tf_ds_pool_kth(const float* row, i
+ // Compact selected columns in input order so neither the mask nor the list needs a sort. The maxima and the selection
+ // live only on chip: the call sites read the mask (the prompt arm) or the block list (decode), never bmax/pidx, so the
+ // fused launch writes neither (the unfused blockMax/topkIndices/poolPick sequence still does).
++// The block maxima (tf_ds_block_max_kernel's rule) for every block this thread owns, on chip. BS == 8 is the served
++// block size, instantiated with the trip count static: two aligned 16-byte loads a block, then the same comparison order
++// as the scalar loop (a NaN wins; otherwise a greater score replaces the maximum), and a guarded scalar tail for the
++// row's last partial block. BS == 0 keeps the runtime size (every other `bsize` and every unfused-shape fallback).
++template <int BS>
++__device__ __forceinline__ void tf_ds_block_max_t(float* maxima, const float* row, int width, int nb, long long last,
++                                                  int bsize = 0) {
++    const float ninf = -__int_as_float(0x7f800000);
++    const int bs = BS ? BS : bsize;
++    for (int b = threadIdx.x; b < nb; b += blockDim.x) {
++        const float* s = row + (long long)b * bs;
++        float m = ninf;
++        bool nan = false;
++        if (BS == 8 && b * 8 + 8 <= width) {
++            const float4 lo = *reinterpret_cast<const float4*>(s);
++            const float4 hi = *reinterpret_cast<const float4*>(s + 4);
++            const float x[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
++            #pragma unroll
++            for (int j = 0; j < 8; ++j) {
++                if (x[j] != x[j]) nan = true;
++                else if (x[j] > m) m = x[j];
++            }
++        } else {
++            for (int j = 0; j < bs && b * bs + j < width; ++j) {
++                const float x = s[j];
++                if (x != x) nan = true;
++                else if (x > m) m = x;
++            }
++        }
++        float v = nan ? __int_as_float(0x7fc00000) : m;
++        if (b == last) v = __int_as_float(0x7f800000);
++        maxima[b] = v;
++    }
++}
++
+ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const float* score, long long ss, int width,
+                                                                           int bsize, const long long* vis,
+                                                                           const long long* every, int k,
+@@ -967,22 +1002,12 @@ extern "C" __global__ void __launch_bounds__(1024) tf_ds_idx_fused_kernel(const
+     extern __shared__ float maxima[];
+     const float ninf = -__int_as_float(0x7f800000);
+     const float* row = score + (long long)r * ss;
+-    // phase 1: the block maxima (tf_ds_block_max_kernel's rule, one thread a block)
++    // phase 1: the block maxima; the served block size with a 16-byte-aligned row stride takes the static, vectorized
++    // form, anything else the runtime loop (the same arithmetic, so both are byte-identical)
+     const long long visible = vis[r];
+     const long long last = visible > 0 ? (visible - 1) / bsize : -1;
+-    for (int b = threadIdx.x; b < nb; b += blockDim.x) {
+-        const float* s = row + (long long)b * bsize;
+-        float m = ninf;
+-        bool nan = false;
+-        for (int j = 0; j < bsize && b * bsize + j < width; ++j) {
+-            const float x = s[j];
+-            if (x != x) nan = true;
+-            else if (x > m) m = x;
+-        }
+-        float v = nan ? __int_as_float(0x7fc00000) : m;
+-        if (b == last) v = __int_as_float(0x7f800000);
+-        maxima[b] = v;
+-    }
++    if (bsize == 8 && (ss & 3) == 0) tf_ds_block_max_t<8>(maxima, row, width, nb, last);
++    else tf_ds_block_max_t<0>(maxima, row, width, nb, last, bsize);
+     __syncthreads();
+     const unsigned long long kth = k == nb ? 0 : tf_ds_pool_kth(maxima, nb, k);
+     const long long limit = every[r];

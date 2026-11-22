@@ -1,0 +1,49 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit 32f75dafc8ec)
+# 0242 dsv41: 0198's latent chain skips the rotary partner exchange on wholly unrotated warps (todo item: skip RoPE partner shuffles on unrotated warps)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index b478b67673d2f4f12a40016902d5a076b1439d3e..4cac9f1fc8b47ce25a2e8eb96022fe79d41fdcf3 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -757,9 +757,13 @@ __device__ __forceinline__ float tf_ds_recip_bits(unsigned byte) {
+ // is rounded to bf16 once. PROMPT takes torch's odd-element contraction (re = fma(xe, cs, -(xo*sn)), im = fma(xo, cs,
+ // xe*sn)); otherwise the kit's Triton form (im = fma(xe, sn, xo*cs)). `i < start` (the unrotated prefix) passes the
+ // value through, and a caller outside the row passes start = D.
++// `rot` is warp-uniform: false only when every element the warp holds is in the unrotated prefix, so the partner's
++// value is never read and the exchange is skipped. A mixed warp keeps the full-mask shuffle (its lanes must all take
++// part), which is why the test that used to follow the shuffle stays where it is.
+ template<bool PROMPT>
+ __device__ __forceinline__ __nv_bfloat16 tf_ds_latent_element(__nv_bfloat16 x, int i, int start,
+-                                                             const float* cs, const float* sn) {
++                                                             const float* cs, const float* sn, bool rot) {
++    if (!rot) return x;
+     const float v = __bfloat162float(x);
+     const float other = __shfl_xor_sync(0xffffffffu, v, 1);
+     if (i < start) return x;
+@@ -795,9 +799,10 @@ __device__ __forceinline__ void tf_ds_key_store_row(const __nv_bfloat16* srow, c
+     for (int first = 0; first < half; first += threads) {
+         const int i = first + lane;
+         const bool live = i < half;
+-        // dead lanes read nothing and rotate nothing (start = D keeps the helper off the rope table)
+-        const float x = __bfloat162float(tf_ds_latent_element<PROMPT>(live ? srow[i] : zero, i, live ? start : D, cos, sin));
+-        const float y = __bfloat162float(tf_ds_latent_element<PROMPT>(live ? srow[i + half] : zero, i + half, live ? start : D, cos, sin));
++        // dead lanes read nothing and rotate nothing (start = D keeps the helper off the rope table); the key keeps the
++        // unconditional exchange - the warp guard measured 0.06 us slower here (1.62 -> 1.69 us at R=1)
++        const float x = __bfloat162float(tf_ds_latent_element<PROMPT>(live ? srow[i] : zero, i, live ? start : D, cos, sin, true));
++        const float y = __bfloat162float(tf_ds_latent_element<PROMPT>(live ? srow[i + half] : zero, i + half, live ? start : D, cos, sin, true));
+         const unsigned ax = tf_ds_fp4_amax_bits(x);
+         const unsigned ay = tf_ds_fp4_amax_bits(y);
+         if (!live) continue;
+@@ -864,8 +869,10 @@ __device__ __forceinline__ void tf_ds_latent_row(const __nv_bfloat16* src, const
+     sin += pos * (RD / 2);
+     scales += row * (D / 16);
+     for (int i = lane; i < half; i += threads) {
+-        const auto lo = tf_ds_latent_element<PROMPT>(src[base+i], i, start, cos, sin);
+-        const auto hi = tf_ds_latent_element<PROMPT>(src[base+i+half], i+half, start, cos, sin);
++        // the warp's last element index decides whether its exchange is needed at all (warp-uniform)
++        const int wlast = (i & ~31) + 31;
++        const auto lo = tf_ds_latent_element<PROMPT>(src[base+i], i, start, cos, sin, wlast >= start);
++        const auto hi = tf_ds_latent_element<PROMPT>(src[base+i+half], i+half, start, cos, sin, wlast + half >= start);
+         const unsigned l = tf_ds_latent_code(lo, scales, i);
+         const unsigned h = tf_ds_latent_code(hi, scales, i+half);
+         codes[row * half + i] = (uint8_t)(l | (h << 4));

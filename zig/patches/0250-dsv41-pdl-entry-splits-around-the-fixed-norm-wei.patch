@@ -1,0 +1,121 @@
+# export-fnext-series.sh: 8d838cc @ 8d838ccfd490 over c3b3859 @ c3b3859952fd (commit bcf1feb1bb7d)
+# 0250 dsv41: PDL entry splits around the fixed norm weights in the decode compressor and the indexer key (todo item: split PDL entry around proven independent work)
+# Applied by zig/Dockerfile with git apply in filename order; regenerate with scripts/export-fnext-series.sh, do not edit.
+diff --git a/zig/kernels/cuda/dsv41_torch.cu b/zig/kernels/cuda/dsv41_torch.cu
+index 4cac9f1fc8b47ce25a2e8eb96022fe79d41fdcf3..2158d37607b2ac05608a8fd84bee2c0c0d903134 100644
+--- a/zig/kernels/cuda/dsv41_torch.cu
++++ b/zig/kernels/cuda/dsv41_torch.cu
+@@ -11,15 +11,29 @@
+ // TF_DS_PDL: wait for the kernel this one follows (its memory flushed), then let the next one launch (programmatic
+ // dependent launches, sm_90+). Every kernel in this file takes `pdl` as its last argument (0: same instruction stream as
+ // before).
+-__device__ __forceinline__ void pdl_enter(int pdl) {
++//
++// A kernel with fixed model weights to read (the norm weights) splits the two: `pdl_launch` first so the successor may
++// be scheduled while this kernel still runs, the weight prefetch while this kernel's predecessor is still finishing,
++// then `pdl_wait` before the first byte the predecessor wrote. Every other kernel keeps the back-to-back form: the
++// launch-first order alone measured slower in the decode chain (wp4 chain, +0.6 us at R=48 nb=8192) because a
++// successor scheduled with nothing to do pre-wait only takes slots from the running kernel.
++__device__ __forceinline__ void pdl_launch(int pdl) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+-    if (pdl) {
+-        asm volatile("griddepcontrol.wait;" ::: "memory");
+-        asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+-    }
++    if (pdl) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++#endif
++}
++
++__device__ __forceinline__ void pdl_wait(int pdl) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
++    if (pdl) asm volatile("griddepcontrol.wait;" ::: "memory");
+ #endif
+ }
+ 
++__device__ __forceinline__ void pdl_enter(int pdl) {
++    pdl_wait(pdl);
++    pdl_launch(pdl);
++}
++
+ #define TF_FULL_MASK 0xffffffffu
+ 
+ // ops.rms_norm(x, w, eps) of rows of D bf16 values (D a multiple of 4, at least 128): out = bf16(w * (x * r)),
+@@ -288,9 +302,10 @@ __device__ __forceinline__ float tf_ds_kit_inverse_rms(float sum, float eps) {
+ // Decode RMSNorm, specialized to the two matching _rmsnorm cubins in kit abe07c7d.
+ // Each of the 128 threads loads one contiguous group. The 512-wide cubin starts with
+ // lane element 1 squared, then contracts elements 0, 2 and 3 into that sum.
+-template<int D>
++// PRELOAD: the caller read its weight element before griddepcontrol.wait (fixed model weights only).
++template<int D, bool PRELOAD = false>
+ __device__ __forceinline__ void tf_ds_triton_rmsnorm_row(const __nv_bfloat16* src, const __nv_bfloat16* w,
+-                                                         __nv_bfloat16* dst, float eps) {
++                                                         __nv_bfloat16* dst, float eps, __nv_bfloat16 wv = 0) {
+     static_assert(D == 128 || D == 512, "missing kit specialization");
+     constexpr int items = D / 128;
+     const int tid = threadIdx.x;
+@@ -316,7 +331,7 @@ __device__ __forceinline__ void tf_ds_triton_rmsnorm_row(const __nv_bfloat16* sr
+     #pragma unroll
+     for (int j = 0; j < items; ++j) {
+         const float y = __fmul_rn(x[j], inv);
+-        dst[base + j] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[base + j]), y));
++        dst[base + j] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(PRELOAD ? wv : w[base + j]), y));
+     }
+ }
+ 
+@@ -578,7 +593,7 @@ __device__ __forceinline__ void tf_ds_compress2x_norm_body(const float* ckv, lon
+                                                           const float* cgate, long long cgate_ld,
+                                                           const long long* rslot, float* ring_kv,
+                                                           float* ring_score, const long long* gi, long long src_rows,
+-                                                          const __nv_bfloat16* w, __nv_bfloat16* out, long long ldo,
++                                                          __nv_bfloat16 wv, __nv_bfloat16* out, long long ldo,
+                                                           int G, float eps, unsigned* invalid) {
+     const int g = blockIdx.x;
+     const int tid = threadIdx.x;
+@@ -637,7 +652,7 @@ __device__ __forceinline__ void tf_ds_compress2x_norm_body(const float* ckv, lon
+     const float total = __fadd_rn(__fadd_rn(warp_sum[0], warp_sum[2]), __fadd_rn(warp_sum[1], warp_sum[3]));
+     const float inv = tf_ds_kit_inverse_rms<D>(total, eps);
+     const float y = __fmul_rn(x, inv);
+-    out[g * ldo + tid] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(w[tid]), y));
++    out[g * ldo + tid] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(wv), y));
+ }
+ 
+ #define TF_DS_COMPRESS2X_NORM_KERNEL(name, D)                                                                          \
+@@ -645,10 +660,19 @@ __device__ __forceinline__ void tf_ds_compress2x_norm_body(const float* ckv, lon
+         long long cgate_ld, const long long* rslot, float* ring_kv, float* ring_score, const long long* gi,             \
+         long long src_rows, const __nv_bfloat16* w, __nv_bfloat16* out, long long ldo, int G, int D_, float eps,         \
+         unsigned* invalid, int pdl) {                                                                                   \
+-        pdl_enter(pdl);                                                                                                 \
+         (void)D_;                                                                                                       \
+-        tf_ds_compress2x_norm_body<D>(ckv, ckv_ld, cgate, cgate_ld, rslot, ring_kv, ring_score, gi, src_rows, w, out,    \
+-                                      ldo, G, eps, invalid);                                                            \
++        if (pdl) {                                                                                                      \
++            /* TF_DS_PDL: the successor may be scheduled now; the comp_norm weight is a fixed model weight (no writer \
++               in the round), so it is read here, before the wait for the predecessor's bytes. */                        \
++            pdl_launch(1);                                                                                              \
++            const __nv_bfloat16 wv = w[threadIdx.x];                                                                    \
++            pdl_wait(1);                                                                                                \
++            tf_ds_compress2x_norm_body<D>(ckv, ckv_ld, cgate, cgate_ld, rslot, ring_kv, ring_score, gi, src_rows, wv,  \
++                                          out, ldo, G, eps, invalid);                                                   \
++        } else {                                                                                                        \
++            tf_ds_compress2x_norm_body<D>(ckv, ckv_ld, cgate, cgate_ld, rslot, ring_kv, ring_score, gi, src_rows,       \
++                                          w[threadIdx.x], out, ldo, G, eps, invalid);                                   \
++        }                                                                                                               \
+     }
+ 
+ TF_DS_COMPRESS2X_NORM_KERNEL(tf_ds_compress2x_norm128_kernel, 128)
+@@ -830,11 +854,13 @@ extern "C" __global__ void __launch_bounds__(128) tf_ds_fused_idx_key_kernel(con
+                                                                              uint8_t* codes, uint8_t* scales,
+                                                                              const long long* rows_idx,
+                                                                              int D, int RD, float eps, int pdl) {
+-    pdl_enter(pdl);
++    pdl_launch(pdl);
++    const __nv_bfloat16 wv = w[threadIdx.x];   // the layer's index-key norm weight: fixed at load, no writer in the round
++    pdl_wait(pdl);
+     const int r = blockIdx.x;
+     __shared__ __nv_bfloat16 srow[512];   // D <= 512
+     // phase 1: _rmsnorm (x row -> srow, bf16)
+-    tf_ds_triton_rmsnorm_row<128>(x + (long long)r * ldx, w, srow, eps);
++    tf_ds_triton_rmsnorm_row<128, true>(x + (long long)r * ldx, w, srow, eps, wv);
+     __syncthreads();
+     // phases 2+3: _rope_heads (RD/2 pairs, head base = D - RD) and _fp4_store in one packed-column pass
+     tf_ds_key_store_row<false>(srow, cos, sin, pos[r], codes, scales, rows_idx[r], D, RD);
