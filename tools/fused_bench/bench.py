@@ -844,6 +844,105 @@ def case_index_score_rows(rows, width):
     return row
 
 
+def score_key_np(score, cols, flip=False):
+    """The kit's score key (queries.py _score_keys / _index_score KEYS): ordered score bits (-0 as +0) above the
+    inverted column. flip=True adds idx_fused.zig scoreKey's top-bit XOR (the 0206 fold's encoding)."""
+    b = score.astype("f4").view("u4").copy()
+    b[b == 0x80000000] = 0
+    sb = b.view("i4").astype("i8")
+    ordered = np.where(sb < 0, sb ^ 0x7FFFFFFF, sb)
+    key = ((ordered.astype("u8") & 0xFFFFFFFF) << np.uint64(32)) | (np.uint64(0xFFFFFFFF) - cols.astype("u8"))
+    return key ^ np.uint64(0x8000000000000000) if flip else key
+
+
+def key_score_bits(keys):
+    """Inverse of score_key_np's high half: the fp32 bits the key orders by."""
+    o = (keys >> np.uint64(32)).astype("u4").view("i4").astype("i8")
+    sb = np.where(o < 0, o ^ 0x7FFFFFFF, o)
+    return (sb & 0xFFFFFFFF).astype("u4")
+
+
+def case_index_score_cand_parity(rows, width, nblk=2048, cb=8, timing=True):
+    """Candidate 3's exactness question: does the kit's pool-only scorer (_index_score_cand, d4803f, the decode form)
+    give the prompt scorer's (_index_score_rows, 739ce7, KEYS=0) score bits on the pool's columns? Compares every
+    candidate key against scoreKey(rows' fp32 score, original column), with a causal vis per row (columns at or past
+    vis must come out as the -inf key) and some -1 (empty) list slots. Times both at the shape."""
+    label = f"kit _index_score_cand vs _index_score_rows R={rows} width={width} nblk={nblk}"
+    if not shape_ok(label):
+        return None
+    ih, idd = 32, 128
+    nt = (width + 63) // 64
+    nbk = width // cb
+    g = np.random.default_rng(11)
+    q = Buffer(bf((rows, ih, idd)))
+    kc = Buffer(g.integers(0, 256, size=(width, idd // 2), dtype="u1"))
+    ks = Buffer(g.integers(118, 136, size=(width, idd // 32), dtype="u1"))
+    wt = Buffer(bf((rows, ih)))
+    visv = np.array([width - 64 * r - 3 for r in range(rows)], "i8")   # causal-ish: each row sees a bit less
+    vis = Buffer(visv)
+    sc = out((rows, width), "f4")
+    (rows_path,) = opts.kit.glob("739ce7*.cubin")
+    launch(rows_path, "_index_score_rows", (rows, nt), 32, 8704, q, kc, ks, wt, vis, sc, width, rows, sc, nt, P(), P())
+    lists = np.full((rows, nblk), -1, "i4")
+    for r in range(rows):
+        pick = np.sort(g.choice(nbk, size=nblk - 5, replace=False)).astype("i4")
+        lists[r, :nblk - 5] = pick                                     # last 5 slots empty (-1)
+    cblk = Buffer(lists)
+    kb = Buffer(np.zeros(rows, "i8"))
+    nout = nblk * cb
+    keys = out((rows, nout), "u8")
+    (cand_path,) = opts.kit.glob("d4803f*.cubin")
+
+    def cand():
+        launch(cand_path, "_index_score_cand", (rows, (nout + 63) // 64), 128, 10240, q, kc, ks, wt, vis, keys, width, nout, kb, cblk, nblk, P(), P())
+
+    def full():
+        launch(rows_path, "_index_score_rows", (rows, nt), 32, 8704, q, kc, ks, wt, vis, sc, width, rows, sc, nt, P(), P())
+
+    cand()
+    cu("cuStreamSynchronize", stream)
+    score = sc.readarr()
+    got = keys.readarr().view("u8")
+    import collections
+    diffs = 0; ninf_bad = 0; empty = {}; ulp_hist = collections.Counter(); low_ok = 0
+    for r in range(rows):
+        for i in range(nblk):
+            b = lists[r, i]
+            seg = got[r, i * cb:(i + 1) * cb]
+            if b < 0:
+                empty.setdefault(int(seg[0]), 0); empty[int(seg[0])] += 1
+                continue
+            cols = np.arange(b * cb, b * cb + cb)
+            want = score_key_np(score[r, cols], cols)
+            vis_ok = cols < visv[r]
+            want_inf = score_key_np(np.full(cb, -np.inf, "f4"), cols)
+            want = np.where(vis_ok, want, want_inf)
+            bad = seg != want
+            diffs += int(bad.sum())
+            ninf_bad += int((bad & ~vis_ok).sum())
+            if bad.any():
+                gb = key_score_bits(seg[bad & vis_ok]).astype("i8"); wb = score[r, cols][bad & vis_ok].view("u4").astype("i8")
+                ulp_hist.update((np.abs(gb - wb)).tolist())
+                low_ok += int((seg[bad] & np.uint64(0xFFFFFFFF) == want[bad] & np.uint64(0xFFFFFFFF)).sum())
+    row = {"kernel": "kit-index-score-cand", "shape": label, "rows": rows, "width": width,
+           "parity": {"new_vs_ref": diffs, "past_vis_mismatch": ninf_bad},
+           "empty_slot_keys": {hex(k): v for k, v in list(empty.items())[:4]},
+           "compared": int(sum(cb for r in range(rows) for i in range(nblk) if lists[r, i] >= 0)),
+           "mismatch_bit_distance": {str(k): v for k, v in sorted(ulp_hist.items())[:12]}, "mismatch_column_ok": low_ok}
+    if diffs:
+        r0 = next(r for r in range(rows) for i in range(nblk) if lists[r, i] >= 0 and (got[r, i*cb:(i+1)*cb] != np.where(np.arange(lists[r,i]*cb, lists[r,i]*cb+cb) < visv[r], score_key_np(score[r, lists[r,i]*cb:lists[r,i]*cb+cb], np.arange(lists[r,i]*cb, lists[r,i]*cb+cb)), score_key_np(np.full(cb, -np.inf, "f4"), np.arange(lists[r,i]*cb, lists[r,i]*cb+cb)))).any())
+        i0 = next(i for i in range(nblk) if lists[r0, i] >= 0)
+        c0 = np.arange(lists[r0, i0] * cb, lists[r0, i0] * cb + cb)
+        row["first_mismatch"] = {"row": r0, "block": int(lists[r0, i0]), "got": [hex(int(x)) for x in got[r0, i0*cb:(i0+1)*cb][:3]],
+                                 "want": [hex(int(x)) for x in score_key_np(score[r0, c0], c0)[:3]],
+                                 "score": [float(x) for x in score[r0, c0][:3]]}
+        failures.append(label)
+    if DO_TIMING and timing:
+        attach_timing(row, label, [full, cand], ["rows_full", "cand_pool"], None, opts.batch, opts.reps)
+    results.append(row)
+    return row
+
+
 def case_score_keys_only(rows, width):
     """The kit _score_keys launch alone at a fold width: the launch the fold removes."""
     label = f"kit _score_keys R={rows} width={width}"
@@ -1616,9 +1715,12 @@ def main():
                 case_score_keys_only(rows, w)
             free_all()
         if selected("index-score") and opts.kernel != "all":
-            for rows in (128,):
-                for w in (16384, 32768, 65536, 131072):
-                    case_index_score_rows(rows, w)
+            if opts.shape is None or "_index_score_rows" in (opts.shape or ""):
+                for rows in (128,):
+                    for w in (16384, 32768, 65536, 131072):
+                        case_index_score_rows(rows, w)
+            for rows, w in ((16, 32768), (16, 65536), (16, 131072)):
+                case_index_score_cand_parity(rows, w)
             free_all()
         if selected("compress-decode"):
             for rows, d in DECODE_SHAPES:
