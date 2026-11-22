@@ -17,6 +17,22 @@
   - **Standalone diagnostics deferred.** The 0266/0267 microbenchmark queue and its watcher were cancelled before either produced GPU timings. The prepared harnesses compare pair-once with a repeated compressor baseline and sweep Markov cache misses against the original bias-plus-score sequence. Resume in a separately scheduled idle Spark window. [Follow-up](todo.md#new-kernels-to-test-against-kept2-2026-11-22) · [Harnesses](runs/negative-kernels-20261122/)
 - **kall (18:38 UTC, `runs/overnight-20261122/kall/RESULTS.md`): 0265+0266+0268 together are exact ×2 but give no gain, so they are held and production stays on `27baa93`.** Probe −0.08%, rounds +0.13% mean. 4K×1 is +0.16%, so k265's single-switch −1.75% and −1.89% didn't reproduce (likely noise). 4-stream rounds are +0.7–1.1%. With 0267 added (all4), rounds are +1.25%. The patches stay off by default in `kernel-stack-0265`. Lesson: a ≈1.8% single-cell win from two arms each is not enough evidence; require a replicate before staging a deploy.
 - **k267 (17:39 UTC, `runs/overnight-20261122/k267/RESULTS.md`): 0267 `TF_DS_MARKOV_FUSED` is rejected.** It's exact and sampled-identical and the banner fires, but every greedy probe row is 6–10% slower (prose −10.2%) and the fused kernel is slower than the two launches it replaces. Sampled traffic is unaffected (the arm doesn't engage). The bias-cache miss rate is 51.7% (rank 0, about 39K lookups an arm). The `markov_cache` counters start from Zig's `undefined` fill (0xAAAA…); subtract `0xAAAAAAAAAAAAAAAA` until they're zero-initialized.
+- **Outside-repo reviews (19:00 UTC).** Nine forks reviewed: zachxu Coder-1x, Senti100, HelloTianxu, joseyarashio, Blackwellboy/BLACKFOLD, bertholomus, Yushell 2.7 bpw, ursuciprian, Elevatormusic. Clones are in the session scratchpad; the source patches were copied to `runs/kernel-round-20261122d/src/`.
+  - **No faster decode:** none beats our sampled 1-stream or 4-stream decode.
+  - **Production checks:** the Engram token map's sha matches the kit's (`de40bcdd…`).
+  - **Bug confirmed in our tree:** a failed stretch capture leaves `side_out` / `pf_out` set (`round.zig:1905`), so every later capture fails until a restart.
+  - **Kernel round 0273–0276 (pi agents, started 19:03 UTC):**
+    - 0273 the capture-join fix (joseyarashio 0062);
+    - 0274 the call-gate first token (joseyarashio 0061);
+    - 0275 `TF_DS_COPY_MIN` (Yushell 0006);
+    - 0276 `TF_DS_CACHE_REPLACE_STALE` (upstream PR #134 keep side).
+  - **Later candidates:**
+    - Drafter D1 overlay (ursuciprian), after a `mtp.*` name/shape/dtype compatibility check;
+    - `top_k` -1/0/>56 with concurrent streams;
+    - `TCP_NODELAY`, `NCCL_MAX_CTAS=4`;
+    - 4,096-row prompt passes (bertholomus v0.7.1: +3–10% prefill, same-quant, exact; a port);
+    - `TF_DS_NO_COPIES` / `SOLO_OVERHEAD` (already in our tree, never measured).
+  - **Calibration:** the kit_bench word-list prompts read ~11% high against natural text, so outside prefill numbers (2,543–2,583 tok/s) aren't comparable with ours (1,984–2,066 natural).
 - **Scheduling round A results (18:42 UTC, `runs/sched-20261122/RESULTS-A.md`):**
   - **Ring cost (standalone bench, width 5120, production settings):** 9.4 µs + 1.16 µs a row (1 row 9.9 µs, 7 rows 17.3 µs, 28 rows 41.0 µs). Repeats agree within ±0.4 µs, and byte checks are clean.
   - **Back-to-back price:** 7.22 rows × 80 gathers ≈ 1.4 ms a round.
