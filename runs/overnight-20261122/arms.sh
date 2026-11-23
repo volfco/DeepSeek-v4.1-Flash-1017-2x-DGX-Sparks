@@ -41,7 +41,7 @@ while IFS= read -r line <&3; do
   ok=0; for i in $(seq 60); do curl -sf -m 5 http://127.0.0.1:8000/health >/dev/null && { ok=1; break; }; sleep 5; done
   (( ok )) || { echo "  no /health"; continue; }
   for r in 0 1; do
-    echo "rank$r $(insp $r "docker inspect -f '{{.Config.Image}}' $C") $(insp $r "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $C" | grep -E '^(TF_DS_|TENSORFOLD_)' | grep -vE '_(KEY|TOKEN)=' | sort | tr '\n' ' ')"
+    echo "rank$r $(insp $r "docker inspect -f '{{.Config.Image}}' $C") $(insp $r "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $C" | grep -E '^(TF_DS_|TENSORFOLD_|NCCL_)' | grep -vE '_(KEY|TOKEN)=' | sort | tr '\n' ' ')"
   done > "$OUT/$name.armed.txt"
   if (( EXACT )); then
     like=(); [[ -n "$REF" ]] && like=(--like "$REF")

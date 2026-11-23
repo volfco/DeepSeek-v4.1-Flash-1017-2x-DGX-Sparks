@@ -42,6 +42,16 @@
   - **`TF_DS_SOLO_OVERHEAD=1` held.** It engages (fewer rounds, 7,452 vs 7,499–7,554, 6.41 rows a round vs 6.31–6.35), but the probe is −0.01% and chunk-gap p95 −0.18%.
   - `TCP_NODELAY` is dropped from the candidate list: `link.zig` already sets it, plus `SO_BUSY_POLL`.
   - `TF_DS_NO_COPIES` was measured before (`to-benchmark.md`: mildly negative).
+- **Kernel round 0277–0279 (pi agents, started 02:49 UTC, base production `10c9866`, `runs/kernel-round-20261123/`).**
+  - 0277 `TF_DS_DRAFT_RING_BATCH`: the drafter's three per-stage KV norm/RoPE/ring launches in one, dropping the unread `dr.ao`.
+  - 0278 `TF_DS_TAPS_PACKED`: prompt taps written straight into the drafter's row-major layout (no completion copies).
+  - 0279 `TF_DS_IDX_PICK_WIDE`: the indexer's small-row selection past 16,384 blocks, up to 65,536 (decode beyond a 262K-token bucket, which still falls back to 3 launches).
+  - **todo.md is stale here:** top-k exchange in sampled verification is 0261 `TOPK_MERGE` (already in production), and 0195's small-row form and `max_nbk` 16,384 are done.
+- **NCCL screen queued after D1 (`runs/nccl-screen-20261123/`).** One knob per arm on top of production, with 3 controls:
+  - Knobs: `MAX_CTAS` 2/8, `MIN_CTAS=4`, `PROTO` Simple/LL, `NCHANNELS_PER_NET_PEER` 1/4, `BUFFSIZE` 8M, `P2P_NET_CHUNKSIZE` 512K, `IB_QPS_PER_CONNECTION` 2.
+  - The short workload (`short.py`) runs cold 32K×2 and 96K prefill plus greedy decode at x1/x4.
+  - There's no exact panel, because NCCL here only all-gathers and send/recvs (`comm.zig`, no reductions); finalists get the full exact suite.
+  - `arms.sh` `armed.txt` now records `NCCL_*` env.
 - **Running (02:23 UTC): drafter D1 (`runs/d1-20261123/`).** `chain.sh` stops production, builds both ranks' D1 weight files, then runs the ctl1/d1a/ctl2/d1b suite. `arms.sh` restores production at the end.
   - **Overlay:** ursuciprian's refit DSpark drafter, 165 `mtp.*` tensors. All the names match ours; 37 attention trellises are 6-bit (ours are 4-bit, and the engine already serves 6-bit linears).
   - **Layout:** a sibling data dir, `/nfs1/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036-d1`, plus a worker dir `rank-cache-…-d1`, selected by `DATA_SUFFIX=-d1` (a new `scripts/config.sh` hook that's a no-op when unset). Production's data is untouched.
