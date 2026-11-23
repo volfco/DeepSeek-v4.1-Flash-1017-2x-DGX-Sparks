@@ -52,10 +52,7 @@
   - The short workload (`short.py`) runs cold 32K×2 and 96K prefill plus greedy decode at x1/x4.
   - There's no exact panel, because NCCL here only all-gathers and send/recvs (`comm.zig`, no reductions); finalists get the full exact suite.
   - `arms.sh` `armed.txt` now records `NCCL_*` env.
-- **Running (02:23 UTC): drafter D1 (`runs/d1-20261123/`).** `chain.sh` stops production, builds both ranks' D1 weight files, then runs the ctl1/d1a/ctl2/d1b suite. `arms.sh` restores production at the end.
-  - **Overlay:** ursuciprian's refit DSpark drafter, 165 `mtp.*` tensors. All the names match ours; 37 attention trellises are 6-bit (ours are 4-bit, and the engine already serves 6-bit linears).
-  - **Layout:** a sibling data dir, `/nfs1/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036-d1`, plus a worker dir `rank-cache-…-d1`, selected by `DATA_SUFFIX=-d1` (a new `scripts/config.sh` hook that's a no-op when unset). Production's data is untouched.
-  - **Worker disk:** the D1 weight file leaves about 131 GB free, which is below the 180 GiB spill budget. Delete the losing weight file after the verdict.
+- **Drafter D1 REJECTED (03:26 UTC, `runs/d1-20261123/RESULTS.md`).** Exact ×2, but it accepts fewer tokens a round on every probe row: decode −2.42% mean, streamed x1 −5.15%. It was fit against a different base quant (LibertAIDAI), not our Mia EAQ + ablit. Both weight files are deleted; the `DATA_SUFFIX` hook stays.
 - **PRODUCTION CHANGED 21:25 UTC: image `tensorfold-dsv41:bench-fused-next-10c9866`** (`kernel-stack-0272` = `27baa93` + 0272 + 0273 + 0274 + 0275). This adopts the 0273 failed-capture join fix and the 0274 tool-call first-token fix. 0272 (`RING_TRACE`) and 0275 (`COPY_MIN`) are in the image but unset.
   - Deploy checks: exact 39/39 and sampled IDENTICAL vs `sched2/ctl1`, `tool_choice: required` + thinking returns a tool call, validate rc=0.
   - Backup: `~/dsv41-env-backups/.env.bak-20261122-pre-10c9866`.
