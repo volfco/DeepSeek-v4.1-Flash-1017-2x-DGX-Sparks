@@ -2,6 +2,58 @@
 
 **Current state (2026-11-23 05:20 UTC): production runs image `tensorfold-dsv41:bench-fused-next-2bb052f` (`kernel-stack-0278` = 10c9866 + 0278 + 0279) with `TF_DS_TAPS_PACKED=1`, `TF_DS_IDX_PICK_WIDE=1`, `NCCL_MAX_CTAS=4`, plus `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2`. Deployed 05:20 UTC: exact 39/39, sampled identical, validate ok. Undo: `.env.bak-20261123-pre-2bb052f` (before that `-pre-mc4`, `.env.bak-20261122-pre-10c9866`).**
 
+## Status summary (2026-11-23 05:30 UTC)
+
+**Production:** `bench-fused-next-2bb052f`, which is recipe-0264 `27baa93` + 0272–0275 + 0278 + 0279. The `.env` switches are `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2`, `TAPS_PACKED`, `IDX_PICK_WIDE` and `NCCL_MAX_CTAS=4`. The exact reference is `runs/deploy-10c9866-20261122/exact.json`; every deploy since has been IDENTICAL against it.
+
+**Adopted overnight (Nov 22–23), all exact 39/39:**
+
+| When (UTC) | Change | Gain | Record |
+|---|---|---|---|
+| Nov 22 13:49 | `DRAFT_BLOCK_KEPT=2` | decode +0.3% | `runs/overnight-20261122/kept/` |
+| Nov 22 21:25 | image 10c9866: 0273 capture-join fix, 0274 tool-call first-token fix | bug fixes | `runs/deploy-10c9866-20261122/` |
+| Nov 23 02:22 | `NCCL_MAX_CTAS=4` | cold prefill +0.8% | `runs/overnight-20261122/nccl/` |
+| Nov 23 05:20 | image 2bb052f with 0278 `TAPS_PACKED` and 0279 `IDX_PICK_WIDE` | prefill +0.5%; 0279 neutral (>262K decode) | `runs/k278/` |
+
+**Rejected or held (exact unless noted):**
+- 0265, 0266, 0268, 0269 and 0270: neutral.
+- 0267 `MARKOV_FUSED`: −6 to −10% greedy.
+- 0271 `RESUME_ASSEMBLE`: inert, since it needs lossy `EXACT_RESUME`.
+- 0272 `RING_TRACE`: a diagnostic.
+- 0275 `COPY_MIN`: neutral.
+- 0276 `CACHE_REPLACE_STALE`: inert; every kept state has a spill point.
+- 0277: not built (kit cubin).
+- `SOLO_OVERHEAD`: neutral.
+- Drafter D1: −2.4% decode.
+- NCCL `PROTO`/`CHANNELS`/`BUFFSIZE`/`QPS`/`CHUNKSIZE`/`MIN_CTAS`/`MAX_CTAS` 2 and 8: none better than `MAX_CTAS=4`.
+- `ENGRAM_SCALES=map` and `GREEDY_ARGMAX`: slower.
+- M1 measured `TF_DS_ROUND_MS`: −0.24%.
+
+**Root causes and findings:**
+- The k272 rank-1 wait was the harness's rank-0-only `ROUND_PROFILE`. The real residual is ~0.4% at 1 stream, from L2 prefetch helping rank 0 more (`runs/sched-20261122/b2/`).
+- Multi-turn cost is the 2,048-row resume-grid remainder, about 1.1 s TTFT per ~8K turn (`runs/cache-20261122/`).
+- Spill restore after a restart is 1.5 s for 300K and 2.7 s for 600K, against 152 s / 332 s cold (`runs/k278/`).
+- NCCL carries only all-gathers and send/recv, so its knobs can't move bits.
+
+**Open, in rough priority order:**
+1. **Pool-pressure cache replay.** About 100 distinct ~22K documents fill the 2.1M-position pool, then revisit the early ones. It exercises staleness and spill-restore under memory pressure, and times restore against recompute. `runs/cache-20261122/replay.py` with `K=100 WORDS=16000 R=2`.
+2. **`top_k` -1/0/>56 with concurrent sampled streams:** correctness and slow-path check.
+3. **More than 4 concurrent streams** (8, 16): total-throughput scaling; no suite has gone past 4.
+4. **Operator decisions (not exact against the current reference, per decisions §0121):**
+   - 4,096-row prompt passes (bertholomus, +3–10% prefill);
+   - `TF_DS_EXACT_RESUME` for multi-turn (~1 s TTFT a turn).
+5. **Low value, parked:**
+   - per-rank prefetch budget (≤0.4% at 1 stream);
+   - deferred 0266/0267 microbenchmarks;
+   - idx selection past 65,536 blocks (hierarchical).
+
+**Housekeeping:**
+- `todo.md` is stale on 0195 small-row/`max_nbk` (done) and the sampled top-k exchange (that's 0261 `TOPK_MERGE`).
+- `scripts/config.sh` has a `DATA_SUFFIX` hook (no-op unset). The head's copy also carries an uncommitted CPUSET block.
+- Local commits since `25581bd` are not pushed.
+- Uncommitted edits to `todo.md` and `runs/suite-fused-next2-20261121/query128/bench.py` predate this session; they were left alone.
+
+
 - **Superseded 21:25 UTC by 10c9866 (see below). Earlier production: `tensorfold-dsv41:bench-fused-next-27baa93` from 10:44 UTC**, with `TF_DS_KV_FETCH_REUSE=1 TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1 TF_DS_PLACE_BOUND_ALL=1` plus the earlier switches. **It is byte-for-byte what `zig/patches/` builds** (`recipe-0264`; the export chain is verified). Validated 8/8.
 - **Undo, one step at a time:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-0264 .env && ./start.sh restart` goes back to recipe-0261 (`086e8cb`). Earlier steps: `-pre-recipe` (`69335b8`, the fused-next lineage + 0259), `-pre-kvreuse` (`84806bb`), `-pre-fnext` (before today).
 - **Today's adopted gains, all exact 39/39 (plus sampled-identical for 0261):** 0259 rounds −1.7%; 0264 rounds −0.41% (−2.15% at 128K × 4); 0260/0261 neutral (launch and collective savings below resolution); the recipe-lineage move neutral. [0264](runs/overnight-20261122/placebound/RESULTS.md) · [lineage](runs/overnight-20261122/lineage/RESULTS.md) · [0259](runs/kvreuse-ab-20261122/RESULTS.md)
@@ -9,7 +61,7 @@
 - **`TF_DS_DRAFT_BLOCK_KEPT=2` adopted (ABBA 11:50–12:24 UTC, exact 39/39 in all six arms):** decode tok/s +0.32% mean on the narrow probe (json +2.5%, yaml +1.0%, tetris sampled +1.25%; tetris greedy −0.9%, prose −0.8%); k3 +0.25%. Round counts repeat exactly within each pair, so the effect is real: widening sooner gives fewer, slightly longer rounds. Deploy `runs/deploy-kept2-20261122` (env-only; undo `.env.bak-20261122-pre-kept2`). [Kept](runs/overnight-20261122/kept/RESULTS.md)
 - **Decode ring probe, corrected interpretation.** Across 904 rounds, rank 0 averaged about 4 µs staging, 22 µs from doorbell publication to observing the receive flag (76% of the measured interval), and 3 µs copying out. The aggregate mixes ring operations. It leaves the shares of late peer arrival, CPU proxy service, RDMA transfer and GPU flag observation unresolved. [Raw profile](runs/overnight-20261122/ringprobe/probe1.profile.txt) · [Scheduling investigation](runs/overnight-20261122/ringprobe/SCHEDULING.md)
   - **Start with the gather after MoE.** The earlier 32K × 4 profile measured 1.85/1.57 ms per round in this phase on ranks 0/1. In an exclusive two-board window, measure the graph-replay ring at the served hidden width of 5,120 (140 KiB per rank at seven rows). Match per-rank traces by round, layer, collective and sequence, using same-clock intervals. If next-layer weight prefetch delays publication, test moving its fork just after publication with the same bytes and join. Check the next gather for displaced wait and compare probe-off, graphs-on round latency and sampled output tok/s at one and four streams. This remains a proposed hardware experiment. [Both-rank phases](runs/overnight-20261122/phases/RESULTS.md) · [Experiment design](runs/overnight-20261122/ringprobe/SCHEDULING.md)
-- **Next: M1, price rows correctly** (`docs/benchmark-gaps-and-moe-review.md` §4.4, never run). The draft allocator prices a round with the static `draft.round_ms` table (30.0 ms at 1 row … 52.1 at 6; `draft.zig:840`). That table predates today's faster build, and the Nov review found its shape wrong (intercept too high, slope past five rows too low). `rowcost/` measures forward ms by rows under `TF_DS_FIX_K=0..6` at 1–4 streams. A fitted `TF_DS_ROUND_MS` then gets an ABBA. It is lossless by construction: drafts only choose how many rows a round verifies. (`TF_DS_ALLOCATE_LEARNED=1` is the in-process variant; it lost 2.5% in combo2, so do not retry it.) A wait loop must not `pgrep -f` a pattern that appears in its own command line; one deadlocked that way for 75 min. Wait on a log line instead (`chain1.sh`).
+- **M1, price rows correctly (DONE Nov 22 14:22–15:04 UTC: measured `TF_DS_ROUND_MS` −0.24%, not adopted; see the scheduler ABBA bullet below).** Original plan, kept for reference (`docs/benchmark-gaps-and-moe-review.md` §4.4): The draft allocator prices a round with the static `draft.round_ms` table (30.0 ms at 1 row … 52.1 at 6; `draft.zig:840`). That table predates today's faster build, and the Nov review found its shape wrong (intercept too high, slope past five rows too low). `rowcost/` measures forward ms by rows under `TF_DS_FIX_K=0..6` at 1–4 streams. A fitted `TF_DS_ROUND_MS` then gets an ABBA. It is lossless by construction: drafts only choose how many rows a round verifies. (`TF_DS_ALLOCATE_LEARNED=1` is the in-process variant; it lost 2.5% in combo2, so do not retry it.) A wait loop must not `pgrep -f` a pattern that appears in its own command line; one deadlocked that way for 75 min. Wait on a log line instead (`chain1.sh`).
 - **Kernel round 0265–0268 (pi agents, `mimo-v2.6-pro` via `xiaomi-token-plan-sgp`, started 13:49 UTC), from todo.md "New kernels to test against KEPT=2":** one agent a patch, each in its own worktree `~/Workspace/tfref-k<NNNN>` (branch `kernel-<NNNN>` off `recipe-0264` `27baa93`). 0265 `TF_DS_DRAFT_HEAD_SCORED` (the drafter head projects only scored rows), 0266 `TF_DS_COMPRESS2_PAIR_ONCE` (0197 computes each distinct ratio-2 pair once a window), 0267 `TF_DS_MARKOV_FUSED` (greedy Markov bias miss + tile scoring, plus a miss counter under the profile), 0268 `TF_DS_DRAFT_QKV_NORM` (the drafter's joint q/KV norm). The 0198 E8M0-from-bits, exact-reciprocal and warp-integer-max items are already in recipe-0264 (`tf_ds_scale_byte_bits`, `tf_ds_recip_bits`; the masked `__reduce_max_sync` was measured 0.10 µs slower and is kept only for the whole-warp case). Briefs and reports: `runs/kernel-round-20261122b/`. Each one is gated on hardware separately, with `KEPT=2` in both arms.
   - **k265 result (17:00 UTC, `runs/overnight-20261122/k265/RESULTS.md`):** stacked image `5ec7aba` (0265+0266+0268) with every switch off is bit-identical to production. Each switch alone: exact ×2 and sampled-identical ×2. The sampled probe is flat (it's quantized and can't resolve <0.5%). The workload's round time shows 0265 −1.75% and 0268 −1.89% at 4K×1 (both arms below both controls), plus 0268 −1.55% at 32K×4. 0266 has no measurable effect. Only 0265 logs a banner. 0266/0268 engagement is inferred from code (0266's pair kernels are mandatory `try` lookups at load; 0268's gate `wq_a.n<=2048` holds at 1280); the rank-0 profile can't show either.
   - **Lesson:** a switch with no banner and a null result can't be told apart from a switch that never fired. Future briefs should require a one-time `std.log.info` banner on first engagement (0265's pattern, `draft.zig:709`).
@@ -85,11 +137,11 @@
     - 0275 `TF_DS_COPY_MIN` (Yushell 0006);
     - 0276 `TF_DS_CACHE_REPLACE_STALE` (upstream PR #134 keep side).
   - **Later candidates:**
-    - Drafter D1 overlay (ursuciprian), after a `mtp.*` name/shape/dtype compatibility check;
-    - `top_k` -1/0/>56 with concurrent streams;
-    - `TCP_NODELAY`, `NCCL_MAX_CTAS=4`;
-    - 4,096-row prompt passes (bertholomus v0.7.1: +3–10% prefill, same-quant, exact; a port);
-    - `TF_DS_NO_COPIES` / `SOLO_OVERHEAD` (already in our tree, never measured).
+    - Drafter D1 overlay (ursuciprian): **done, rejected −2.4%** (`runs/d1-20261123/`);
+    - `top_k` -1/0/>56 with concurrent streams: **open**;
+    - `TCP_NODELAY` (already set in `link.zig`) and `NCCL_MAX_CTAS=4`: **adopted**, +0.8% prefill;
+    - 4,096-row prompt passes (bertholomus v0.7.1: +3–10% prefill; a port): **open, operator decision** (chunk shape moves bits, decisions §0121);
+    - `TF_DS_NO_COPIES` (measured earlier, mildly negative) and `SOLO_OVERHEAD`: **held**, neutral.
   - **Calibration:** the kit_bench word-list prompts read ~11% high against natural text, so outside prefill numbers (2,543–2,583 tok/s) aren't comparable with ours (1,984–2,066 natural).
 - **Scheduling round A results (18:42 UTC, `runs/sched-20261122/RESULTS-A.md`):**
   - **Ring cost (standalone bench, width 5120, production settings):** 9.4 µs + 1.16 µs a row (1 row 9.9 µs, 7 rows 17.3 µs, 28 rows 41.0 µs). Repeats agree within ±0.4 µs, and byte checks are clean.
