@@ -1,0 +1,8 @@
+# kernel-stack-0278 (2bb052f) = production 10c9866 + 0278 TF_DS_TAPS_PACKED + 0279 TF_DS_IDX_PICK_WIDE (both off by default).
+# ctl arms on 2bb052f prove the off path is exact vs production's reference.
+ctl1|tensorfold-dsv41:bench-fused-next-2bb052f|
+t278a|tensorfold-dsv41:bench-fused-next-2bb052f|TF_DS_TAPS_PACKED=1
+w279a|tensorfold-dsv41:bench-fused-next-2bb052f|TF_DS_IDX_PICK_WIDE=1
+ctl2|tensorfold-dsv41:bench-fused-next-2bb052f|
+w279b|tensorfold-dsv41:bench-fused-next-2bb052f|TF_DS_IDX_PICK_WIDE=1
+t278b|tensorfold-dsv41:bench-fused-next-2bb052f|TF_DS_TAPS_PACKED=1

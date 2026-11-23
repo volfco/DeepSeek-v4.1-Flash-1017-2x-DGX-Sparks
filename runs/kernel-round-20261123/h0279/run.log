@@ -1,0 +1,60 @@
+h0279: CPU emulation of tf_ds_idx_pick_wide_kernel (extracted source) vs an independent sort reference
+k = 2048 (candidate_blocks); every modes: 0 = nbk (no masking), 1 = nbk/2 + 1, 2 = 0 (all slots -1)
+case wide nbk=16385 rows=1 pattern=random-finite every=mode1: match (2048 slots)
+case wide nbk=16385 rows=1 pattern=equal-maxima every=mode2: match (2048 slots)
+case wide nbk=16385 rows=1 pattern=signed-zeros every=mode0: match (2048 slots)
+case wide nbk=16385 rows=1 pattern=all-neg-inf every=mode1: match (2048 slots)
+case wide nbk=16385 rows=1 pattern=mixed-islands every=mode2: match (2048 slots)
+case wide nbk=16385 rows=1 pattern=nan-maxima every=mode0: match (2048 slots)
+case wide nbk=16385 rows=7 pattern=random-finite every=mode1: match (14336 slots)
+case wide nbk=16385 rows=7 pattern=equal-maxima every=mode2: match (14336 slots)
+case wide nbk=16385 rows=7 pattern=signed-zeros every=mode0: match (14336 slots)
+case wide nbk=16385 rows=7 pattern=all-neg-inf every=mode1: match (14336 slots)
+case wide nbk=16385 rows=7 pattern=mixed-islands every=mode2: match (14336 slots)
+case wide nbk=16385 rows=7 pattern=nan-maxima every=mode0: match (14336 slots)
+case wide nbk=32768 rows=1 pattern=random-finite every=mode1: match (2048 slots)
+case wide nbk=32768 rows=1 pattern=equal-maxima every=mode2: match (2048 slots)
+case wide nbk=32768 rows=1 pattern=signed-zeros every=mode0: match (2048 slots)
+case wide nbk=32768 rows=1 pattern=all-neg-inf every=mode1: match (2048 slots)
+case wide nbk=32768 rows=1 pattern=mixed-islands every=mode2: match (2048 slots)
+case wide nbk=32768 rows=1 pattern=nan-maxima every=mode0: match (2048 slots)
+case wide nbk=32768 rows=7 pattern=random-finite every=mode1: match (14336 slots)
+case wide nbk=32768 rows=7 pattern=equal-maxima every=mode2: match (14336 slots)
+case wide nbk=32768 rows=7 pattern=signed-zeros every=mode0: match (14336 slots)
+case wide nbk=32768 rows=7 pattern=all-neg-inf every=mode1: match (14336 slots)
+case wide nbk=32768 rows=7 pattern=mixed-islands every=mode2: match (14336 slots)
+case wide nbk=32768 rows=7 pattern=nan-maxima every=mode0: match (14336 slots)
+case wide nbk=65536 rows=1 pattern=random-finite every=mode1: match (2048 slots)
+case wide nbk=65536 rows=1 pattern=equal-maxima every=mode2: match (2048 slots)
+case wide nbk=65536 rows=1 pattern=signed-zeros every=mode0: match (2048 slots)
+case wide nbk=65536 rows=1 pattern=all-neg-inf every=mode1: match (2048 slots)
+case wide nbk=65536 rows=1 pattern=mixed-islands every=mode2: match (2048 slots)
+case wide nbk=65536 rows=1 pattern=nan-maxima every=mode0: match (2048 slots)
+case wide nbk=65536 rows=7 pattern=random-finite every=mode1: match (14336 slots)
+case wide nbk=65536 rows=7 pattern=equal-maxima every=mode2: match (14336 slots)
+case wide nbk=65536 rows=7 pattern=signed-zeros every=mode0: match (14336 slots)
+case wide nbk=65536 rows=7 pattern=all-neg-inf every=mode1: match (14336 slots)
+case wide nbk=65536 rows=7 pattern=mixed-islands every=mode2: match (14336 slots)
+case wide nbk=65536 rows=7 pattern=nan-maxima every=mode0: match (14336 slots)
+case mixed-rows nbk=32768 rows=7: match (14336 slots)
+negative control nbk=65537 rows=1: kernel-vs-reference DIVERGES as expected at slot 2047 (kernel 2047, reference 65536; the reference takes column 65,536, the kernel never can)
+h0279: selection cases: all match the reference (0 mismatched)
+h0279 gate: the worktree's fused_trace.idxArm (over idx_pick_wide.wideOk) at the brief's matrix
+16,385 blocks: idxArm(fused=true, wide=true, rows=1, nbk=16385, k=2048) = idx_wide (want idx_wide) ok
+32,768 blocks: idxArm(fused=true, wide=true, rows=1, nbk=32768, k=2048) = idx_wide (want idx_wide) ok
+65,536 blocks: idxArm(fused=true, wide=true, rows=1, nbk=65536, k=2048) = idx_wide (want idx_wide) ok
+65,537 blocks: idxArm(fused=true, wide=true, rows=1, nbk=65537, k=2048) = idx_unfused (want idx_unfused) ok
+16,385 blocks: idxArm(fused=true, wide=true, rows=7, nbk=16385, k=2048) = idx_wide (want idx_wide) ok
+32,768 blocks: idxArm(fused=true, wide=true, rows=7, nbk=32768, k=2048) = idx_wide (want idx_wide) ok
+65,536 blocks: idxArm(fused=true, wide=true, rows=7, nbk=65536, k=2048) = idx_wide (want idx_wide) ok
+65,537 blocks: idxArm(fused=true, wide=true, rows=7, nbk=65537, k=2048) = idx_unfused (want idx_unfused) ok
+switch off: idxArm(fused=true, wide=false, rows=7, nbk=32768, k=2048) = idx_unfused (want idx_unfused) ok
+prompt arm: idxArm(fused=true, wide=true, rows=7, nbk=32768, k=2048) = idx_unfused (want idx_unfused) ok
+rows 8: idxArm(fused=true, wide=true, rows=8, nbk=32768, k=2048) = idx_unfused (want idx_unfused) ok
+k past the cap: idxArm(fused=true, wide=true, rows=7, nbk=16385, k=2049) = idx_unfused (want idx_unfused) ok
+staging bound (small): idxArm(fused=true, wide=true, rows=7, nbk=16384, k=2048) = idx_small (want idx_small) ok
+small pool: idxArm(fused=true, wide=true, rows=7, nbk=6144, k=2048) = idx_small (want idx_small) ok
+many rows (fused): idxArm(fused=true, wide=true, rows=32, nbk=16384, k=2048) = idx_fused (want idx_fused) ok
+prompt pooled: idxArm(fused=true, wide=true, rows=1, nbk=8192, k=2048) = idx_fused (want idx_fused) ok
+everything off: idxArm(fused=false, wide=false, rows=7, nbk=8192, k=2048) = idx_unfused (want idx_unfused) ok
+h0279 gate: all arms as expected (0 mismatches)

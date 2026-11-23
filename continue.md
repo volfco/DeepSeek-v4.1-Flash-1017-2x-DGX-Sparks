@@ -47,11 +47,15 @@
   - 0278 `TF_DS_TAPS_PACKED`: prompt taps written straight into the drafter's row-major layout (no completion copies).
   - 0279 `TF_DS_IDX_PICK_WIDE`: the indexer's small-row selection past 16,384 blocks, up to 65,536 (decode beyond a 262K-token bucket, which still falls back to 3 launches).
   - **todo.md is stale here:** top-k exchange in sampled verification is 0261 `TOPK_MERGE` (already in production), and 0195's small-row form and `max_nbk` 16,384 are done.
-- **NCCL screen queued after D1 (`runs/nccl-screen-20261123/`).** One knob per arm on top of production, with 3 controls:
-  - Knobs: `MAX_CTAS` 2/8, `MIN_CTAS=4`, `PROTO` Simple/LL, `NCHANNELS_PER_NET_PEER` 1/4, `BUFFSIZE` 8M, `P2P_NET_CHUNKSIZE` 512K, `IB_QPS_PER_CONNECTION` 2.
-  - The short workload (`short.py`) runs cold 32K×2 and 96K prefill plus greedy decode at x1/x4.
-  - There's no exact panel, because NCCL here only all-gathers and send/recvs (`comm.zig`, no reductions); finalists get the full exact suite.
-  - `arms.sh` `armed.txt` now records `NCCL_*` env.
+- **NCCL screen (03:26–04:17 UTC, `runs/nccl-screen-20261123/RESULTS.md`): no winner; `MAX_CTAS=4` stays.** `PROTO=LL` −19% prefill, `MAX_CTAS=2` −2.3%, `IB_QPS_PER_CONNECTION=2` −1.2%, `BUFFSIZE=8M` −0.4%. `MAX_CTAS=8`, `MIN_CTAS=4`, `PROTO=Simple`, `NCHANNELS_PER_NET_PEER` 1/4 and `P2P_NET_CHUNKSIZE=512K` are all within ±0.2% (controls ±0.1%).
+- **Kernel round 0277–0279 results:**
+  - 0277: not built. `kvNormRope` is the kit cubin `_kv_norm_rope`, and ~0.02% of a round wasn't worth it.
+  - 0278 `TAPS_PACKED`: committed `971c69d`.
+  - 0279 `IDX_PICK_WIDE`: committed `f6e126b`. It engages at contexts over 262K: 300K → nbk 32,768, 600K → 65,536.
+  - Stack `kernel-stack-0278` = `2bb052f` (`tfref-kstack4`). Its image is built; `zig build test` passed on rerun (one spill-tier timing flake).
+- **Running (04:35 UTC): `runs/k278/` gate on 2bb052f.** Arms ctl1, t278a, w279a, ctl2, w279b, t278b.
+  - Checks: exact, sampled, and `work.py` (cold 32K/96K prefill, then greedy 256-token decode at ~300K and ~600K).
+  - The long prompts are unsalted, so the decode sha is compared across arms and later arms' prefill may come from the spill tier, a first real exercise of disk restore.
 - **Drafter D1 REJECTED (03:26 UTC, `runs/d1-20261123/RESULTS.md`).** Exact ×2, but it accepts fewer tokens a round on every probe row: decode −2.42% mean, streamed x1 −5.15%. It was fit against a different base quant (LibertAIDAI), not our Mia EAQ + ablit. Both weight files are deleted; the `DATA_SUFFIX` hook stays.
 - **PRODUCTION CHANGED 21:25 UTC: image `tensorfold-dsv41:bench-fused-next-10c9866`** (`kernel-stack-0272` = `27baa93` + 0272 + 0273 + 0274 + 0275). This adopts the 0273 failed-capture join fix and the 0274 tool-call first-token fix. 0272 (`RING_TRACE`) and 0275 (`COPY_MIN`) are in the image but unset.
   - Deploy checks: exact 39/39 and sampled IDENTICAL vs `sched2/ctl1`, `tool_choice: required` + thinking returns a tool call, validate rc=0.

@@ -1,0 +1,65 @@
+== tf_ds_hc_mean4_kernel extracted from /home/colum/Workspace/tfref-k0278/zig/kernels/cuda/dsv41_torch.cu ==
+// A DSpark tap as the prompt forward takes it, h.to(fp32).mean(1).to(bf16) over the 4 streams: torch's reduce_kernel
+// over the middle dim (a thread an output: four accumulators from 0, one value each, combined in order; too few
+// values a thread to split them over the block), times MeanOps' factor 0.25, rounded to bf16. h [rows, 4, D] bf16,
+// out [rows, D] (row stride os).
+extern "C" __global__ void tf_ds_hc_mean4_kernel(const __nv_bfloat16* h, __nv_bfloat16* out, long long os, int rows,
+                                                 int D, int pdl) {
+    pdl_enter(pdl);
+    const long long total = (long long)rows * D;
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (long long)gridDim.x * blockDim.x) {
+        const long long r = i / D, d = i % D;
+        const __nv_bfloat16* x = h + r * 4 * D + d;
+        const float a0 = __fadd_rn(0.f, __bfloat162float(x[0]));
+        const float a1 = __fadd_rn(0.f, __bfloat162float(x[D]));
+        const float a2 = __fadd_rn(0.f, __bfloat162float(x[2 * D]));
+        const float a3 = __fadd_rn(0.f, __bfloat162float(x[3 * D]));
+        const float s = __fadd_rn(__fadd_rn(__fadd_rn(a0, a1), a2), a3);
+        out[r * os + d] = __float2bfloat16_rn(__fmul_rn(s, 0.25f));
+    }
+}
+
+== harness: planar + completion copies vs packed write vs independent reference ==
+h0278: TF_DS_TAPS_PACKED write/copy layout emulation (cap=2048, taps=3, D=5120)
+kernel: extracted tf_ds_hc_mean4_kernel, sequential virtual-thread loop
+reference: independent, from BRIEF-0278's spec (packed rows [rows, taps*D])
+
+case rows=1 (minimum chunk)
+  ok   rows=1 chunk=1 planar+copy == reference: 15360 elements (30720 bytes) identical
+  ok   rows=1 chunk=1 packed write == reference (served grid): 15360 elements (30720 bytes) identical
+  ok   rows=1 chunk=1 packed write == reference (1x32 grid): 15360 elements (30720 bytes) identical
+  ok   rows=1 chunk=1 absorb window [max(0,n-128), n) identical: 15360 elements (30720 bytes) identical
+       completion copies avoided: 1 rows x 3 taps x 5120 D x 2B = 0.03 MiB
+case rows=127 (partial chunk)
+  ok   rows=127 chunk=1 planar+copy == reference: 1950720 elements (3901440 bytes) identical
+  ok   rows=127 chunk=1 packed write == reference (served grid): 1950720 elements (3901440 bytes) identical
+  ok   rows=127 chunk=1 packed write == reference (1x32 grid): 1950720 elements (3901440 bytes) identical
+  ok   rows=127 chunk=1 absorb window [max(0,n-128), n) identical: 1950720 elements (3901440 bytes) identical
+       completion copies avoided: 127 rows x 3 taps x 5120 D x 2B = 3.72 MiB
+case rows=128 (the served post-replay chunk)
+  ok   rows=128 chunk=1 planar+copy == reference: 1966080 elements (3932160 bytes) identical
+  ok   rows=128 chunk=1 packed write == reference (served grid): 1966080 elements (3932160 bytes) identical
+  ok   rows=128 chunk=1 packed write == reference (1x32 grid): 1966080 elements (3932160 bytes) identical
+  ok   rows=128 chunk=1 absorb window [max(0,n-128), n) identical: 1966080 elements (3932160 bytes) identical
+       completion copies avoided: 128 rows x 3 taps x 5120 D x 2B = 3.75 MiB
+case rows=2048 (full chunk_rows)
+  ok   rows=2048 chunk=1 planar+copy == reference: 31457280 elements (62914560 bytes) identical
+  ok   rows=2048 chunk=1 packed write == reference (served grid): 31457280 elements (62914560 bytes) identical
+  ok   rows=2048 chunk=1 packed write == reference (1x32 grid): 31457280 elements (62914560 bytes) identical
+  ok   rows=2048 chunk=1 absorb window [max(0,n-128), n) identical: 1966080 elements (3932160 bytes) identical
+       completion copies avoided: 2048 rows x 3 taps x 5120 D x 2B = 60.00 MiB
+case a partial last chunk: 2048 then 517 through the shared buffers
+  ok   rows=2048 chunk=1 planar+copy == reference: 31457280 elements (62914560 bytes) identical
+  ok   rows=2048 chunk=1 packed write == reference (served grid): 31457280 elements (62914560 bytes) identical
+  ok   rows=2048 chunk=1 packed write == reference (1x32 grid): 31457280 elements (62914560 bytes) identical
+  ok   rows=2048 chunk=1 absorb window [max(0,n-128), n) identical: 1966080 elements (3932160 bytes) identical
+       completion copies avoided: 2048 rows x 3 taps x 5120 D x 2B = 60.00 MiB
+  ok   rows=517 chunk=2 planar+copy == reference: 7941120 elements (15882240 bytes) identical
+  ok   rows=517 chunk=2 packed write == reference (served grid): 7941120 elements (15882240 bytes) identical
+  ok   rows=517 chunk=2 packed write == reference (1x32 grid): 7941120 elements (15882240 bytes) identical
+  ok   rows=517 chunk=2 absorb window [max(0,n-128), n) identical: 1966080 elements (3932160 bytes) identical
+       completion copies avoided: 517 rows x 3 taps x 5120 D x 2B = 15.15 MiB
+case negative control: packed base with the planar stride os=D
+  ok   wrong stride: mismatch detected at element 20480 (the harness sees layout errors)
+
+ALL CASES MATCHED: 0 failure(s)
