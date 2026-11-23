@@ -1,6 +1,6 @@
 # Continue
 
-**Current state (2026-11-23 02:25 UTC, overnight run): production runs image `tensorfold-dsv41:bench-fused-next-10c9866` (`kernel-stack-0272` = recipe-0264 `27baa93` + 0272–0275, 0272/0275 unset) with `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2` (deployed 21:25 UTC: exact 39/39, sampled identical, tool-call check ok, validate ok). **Plus `NCCL_MAX_CTAS=4` since 02:22 UTC 2026-11-23** (cold prefill +0.8%, exact; undo `.env.bak-20261123-pre-mc4`). Earlier undo: `.env.bak-20261122-pre-10c9866`.**
+**Current state (2026-11-23 05:20 UTC): production runs image `tensorfold-dsv41:bench-fused-next-2bb052f` (`kernel-stack-0278` = 10c9866 + 0278 + 0279) with `TF_DS_TAPS_PACKED=1`, `TF_DS_IDX_PICK_WIDE=1`, `NCCL_MAX_CTAS=4`, plus `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2`. Deployed 05:20 UTC: exact 39/39, sampled identical, validate ok. Undo: `.env.bak-20261123-pre-2bb052f` (before that `-pre-mc4`, `.env.bak-20261122-pre-10c9866`).**
 
 - **Superseded 21:25 UTC by 10c9866 (see below). Earlier production: `tensorfold-dsv41:bench-fused-next-27baa93` from 10:44 UTC**, with `TF_DS_KV_FETCH_REUSE=1 TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1 TF_DS_PLACE_BOUND_ALL=1` plus the earlier switches. **It is byte-for-byte what `zig/patches/` builds** (`recipe-0264`; the export chain is verified). Validated 8/8.
 - **Undo, one step at a time:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-0264 .env && ./start.sh restart` goes back to recipe-0261 (`086e8cb`). Earlier steps: `-pre-recipe` (`69335b8`, the fused-next lineage + 0259), `-pre-kvreuse` (`84806bb`), `-pre-fnext` (before today).
@@ -53,9 +53,11 @@
   - 0278 `TAPS_PACKED`: committed `971c69d`.
   - 0279 `IDX_PICK_WIDE`: committed `f6e126b`. It engages at contexts over 262K: 300K → nbk 32,768, 600K → 65,536.
   - Stack `kernel-stack-0278` = `2bb052f` (`tfref-kstack4`). Its image is built; `zig build test` passed on rerun (one spill-tier timing flake).
-- **Running (04:35 UTC): `runs/k278/` gate on 2bb052f.** Arms ctl1, t278a, w279a, ctl2, w279b, t278b.
-  - Checks: exact, sampled, and `work.py` (cold 32K/96K prefill, then greedy 256-token decode at ~300K and ~600K).
-  - The long prompts are unsalted, so the decode sha is compared across arms and later arms' prefill may come from the spill tier, a first real exercise of disk restore.
+- **k278 ADOPTED (05:20 UTC, `runs/k278/RESULTS.md`): production is now 2bb052f with 0278 `TAPS_PACKED` and 0279 `IDX_PICK_WIDE` on.**
+  - All arms exact 39/39 and sampled identical; the 300K/600K decode shas equal control.
+  - 0278: cold prefill +0.4% at 32K, +0.6% at 96K, with every cell above both controls.
+  - 0279: neutral at depth.
+  - **Spill restore works:** a restarted server serves a 300K prompt in 1.5 s TTFT and 600K in 2.7 s, from disk (cold: 152 s / 332 s).
 - **Drafter D1 REJECTED (03:26 UTC, `runs/d1-20261123/RESULTS.md`).** Exact ×2, but it accepts fewer tokens a round on every probe row: decode −2.42% mean, streamed x1 −5.15%. It was fit against a different base quant (LibertAIDAI), not our Mia EAQ + ablit. Both weight files are deleted; the `DATA_SUFFIX` hook stays.
 - **PRODUCTION CHANGED 21:25 UTC: image `tensorfold-dsv41:bench-fused-next-10c9866`** (`kernel-stack-0272` = `27baa93` + 0272 + 0273 + 0274 + 0275). This adopts the 0273 failed-capture join fix and the 0274 tool-call first-token fix. 0272 (`RING_TRACE`) and 0275 (`COPY_MIN`) are in the image but unset.
   - Deploy checks: exact 39/39 and sampled IDENTICAL vs `sched2/ctl1`, `tool_choice: required` + thinking returns a tool call, validate rc=0.

@@ -1,0 +1,14 @@
+48c48
+< IMAGE=tensorfold-dsv41:bench-fused-next-10c9866
+---
+> IMAGE=tensorfold-dsv41:bench-fused-next-2bb052f
+62a63,65
+> # 2026-11-23: image 2bb052f + 0278 TAPS_PACKED (prefill +0.5%) + 0279 IDX_PICK_WIDE (neutral; >262K decode), exact; runs/k278; undo: restore /home/colum/dsv41-env-backups/.env.bak-20261123-pre-2bb052f
+> TF_DS_TAPS_PACKED=1
+> TF_DS_IDX_PICK_WIDE=1
+rank0 tensorfold-dsv41:bench-fused-next-2bb052f NCCL_MAX_CTAS=4 TF_DS_IDX_PICK_WIDE=1 TF_DS_TAPS_PACKED=1 
+rank1 tensorfold-dsv41:bench-fused-next-2bb052f NCCL_MAX_CTAS=4 TF_DS_IDX_PICK_WIDE=1 TF_DS_TAPS_PACKED=1 
+RESULT: IDENTICAL (0 problem(s), 39 cases)
+sampled vs ref: IDENTICAL
+validate rc=0
+deployed
