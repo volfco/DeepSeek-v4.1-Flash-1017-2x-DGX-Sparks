@@ -32,6 +32,14 @@
   - **Mech arms (1 stream, 8×384 tokens, trace N=4, 39,294 records a rank each):** fx1L/fx1Lb (production) max 4.117/4.124 s, gap p50 attn −1.5/−2.6 µs, moe −5.2 µs; `PREFETCH=0` 4.338 s (+5.3% slower), gap +1.0/+1.6 µs; `SIDE=0` 4.167 s (+1.1% slower), gap +0.6/−0.4 µs. Producer µs r0/r1: attn 198/201 with prefetch vs 240/240 without; moe 537/542 vs 559/559.
   - **Row/concurrency split (profile off, N=16):** gap = producer r0 − r1 (positive = rank 0 late). k0 (no drafts, 1 row): rank 0 late ~9–11 µs p50 at x1, ~2 µs at x4. Fixed k6 and production (6–7 rows): rank 1 late ~3–10 µs p50 at x1, ≈0 at x4. So the sign flips with row count; at production row counts it is rank 1.
   - **Possible next step:** a per-rank prefetch budget knob (≤0.4% at 1 stream). Not pursued: below the ±0.25% forward_ms resolution once halved, and prefetch has no rank-specific code.
+- **Cache replay (00:30 UTC, `runs/cache-20261122/RESULTS.md`): 0276 and 0271 are both inert in production; both held with no hardware arm.**
+  - **0276:** no state went stale (0 `misses_stale`, pool 2.1M positions, ~480K tokens cached). Every kept state also gets a spill-tier point, which 0276 skips by design.
+  - **0271:** it needs `TF_DS_EXACT_RESUME`, which is lossy (decisions §0121).
+  - **Multi-turn finding:** resumes land on the 2,048-row grid, so each later turn recomputes up to 2,047 rows. That's ≈1.1 s TTFT per ~8K-token turn at the head of the queue. Prompt passes run one at a time (≈1.9K tok/s), so at C=4 turns queue to 4–6.7 s TTFT.
+  - `replay.py` (`repeat` / `turns` modes, `/metrics` deltas) is the reusable workload.
+- **Running (01:05 UTC): `runs/overnight-20261122/nccl/` with arms ctl1, mc4a, soloa, ctl2, solob, mc4b** (`NCCL_MAX_CTAS=4`, `TF_DS_SOLO_OVERHEAD=1`). It runs on 10c9866 with exact, sampled, probe and `PREFILL_CELL=1` (cold 32K/96K).
+  - `TCP_NODELAY` is dropped from the candidate list: `link.zig` already sets it, plus `SO_BUSY_POLL`.
+  - `TF_DS_NO_COPIES` was measured before (`to-benchmark.md`: mildly negative).
 - **PRODUCTION CHANGED 21:25 UTC: image `tensorfold-dsv41:bench-fused-next-10c9866`** (`kernel-stack-0272` = `27baa93` + 0272 + 0273 + 0274 + 0275). This adopts the 0273 failed-capture join fix and the 0274 tool-call first-token fix. 0272 (`RING_TRACE`) and 0275 (`COPY_MIN`) are in the image but unset.
   - Deploy checks: exact 39/39 and sampled IDENTICAL vs `sched2/ctl1`, `tool_choice: required` + thinking returns a tool call, validate rc=0.
   - Backup: `~/dsv41-env-backups/.env.bak-20261122-pre-10c9866`.
@@ -47,7 +55,7 @@
   - **Arms:** ctl1, cm3a, tr16a, ctl2, tr16b, cm3b. `cm3` is `TF_DS_COPY_MIN=3`; `tr16` is `TF_DS_RING_TRACE=16`.
   - **Bug fixes in the controls:** 0273 and 0274 are unconditional, so the ctl arms carry them; exact vs production proves they keep bits.
   - **Trace files:** `arms.sh` now copies each rank's `/tmp/ring_trace.<r>.jsonl` out of the container when an arm sets `TF_DS_RING_TRACE`. The chain runs `h0272/summarize.py` on both arms (Round B's data).
-  - **Still running:** 0276 (cache replace-stale).
+  - 0276 (cache replace-stale): done, but inert in production (see the cache replay bullet).
 - **Outside-repo reviews (19:00 UTC).** Nine forks reviewed: zachxu Coder-1x, Senti100, HelloTianxu, joseyarashio, Blackwellboy/BLACKFOLD, bertholomus, Yushell 2.7 bpw, ursuciprian, Elevatormusic. Clones are in the session scratchpad; the source patches were copied to `runs/kernel-round-20261122d/src/`.
   - **No faster decode:** none beats our sampled 1-stream or 4-stream decode.
   - **Production checks:** the Engram token map's sha matches the kit's (`de40bcdd…`).

@@ -1,0 +1,9 @@
+# production image 10c9866 + production .env. mc4: NCCL_MAX_CTAS=4 (bertholomus/joseyarashio setting; NCCL carries the
+# prompt pass's all-gathers). solo: TF_DS_SOLO_OVERHEAD=1 (a lone drafted stream's head windows priced with the fixed
+# overhead; in tree, never measured). PREFILL_CELL=1 adds cold 32K/96K prefill a arm.
+ctl1|tensorfold-dsv41:bench-fused-next-10c9866|
+mc4a|tensorfold-dsv41:bench-fused-next-10c9866|NCCL_MAX_CTAS=4
+soloa|tensorfold-dsv41:bench-fused-next-10c9866|TF_DS_SOLO_OVERHEAD=1
+ctl2|tensorfold-dsv41:bench-fused-next-10c9866|
+solob|tensorfold-dsv41:bench-fused-next-10c9866|TF_DS_SOLO_OVERHEAD=1
+mc4b|tensorfold-dsv41:bench-fused-next-10c9866|NCCL_MAX_CTAS=4
