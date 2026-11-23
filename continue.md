@@ -1,6 +1,6 @@
 # Continue
 
-**Current state (2026-11-22 23:00 UTC, overnight run): production runs image `tensorfold-dsv41:bench-fused-next-10c9866` (`kernel-stack-0272` = recipe-0264 `27baa93` + 0272–0275, 0272/0275 unset) with `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2` (deployed 21:25 UTC: exact 39/39, sampled identical, tool-call check ok, validate ok). Undo: `.env.bak-20261122-pre-10c9866`.**
+**Current state (2026-11-23 02:25 UTC, overnight run): production runs image `tensorfold-dsv41:bench-fused-next-10c9866` (`kernel-stack-0272` = recipe-0264 `27baa93` + 0272–0275, 0272/0275 unset) with `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2` (deployed 21:25 UTC: exact 39/39, sampled identical, tool-call check ok, validate ok). **Plus `NCCL_MAX_CTAS=4` since 02:22 UTC 2026-11-23** (cold prefill +0.8%, exact; undo `.env.bak-20261123-pre-mc4`). Earlier undo: `.env.bak-20261122-pre-10c9866`.**
 
 - **Superseded 21:25 UTC by 10c9866 (see below). Earlier production: `tensorfold-dsv41:bench-fused-next-27baa93` from 10:44 UTC**, with `TF_DS_KV_FETCH_REUSE=1 TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1 TF_DS_PLACE_BOUND_ALL=1` plus the earlier switches. **It is byte-for-byte what `zig/patches/` builds** (`recipe-0264`; the export chain is verified). Validated 8/8.
 - **Undo, one step at a time:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-0264 .env && ./start.sh restart` goes back to recipe-0261 (`086e8cb`). Earlier steps: `-pre-recipe` (`69335b8`, the fused-next lineage + 0259), `-pre-kvreuse` (`84806bb`), `-pre-fnext` (before today).
@@ -37,9 +37,15 @@
   - **0271:** it needs `TF_DS_EXACT_RESUME`, which is lossy (decisions §0121).
   - **Multi-turn finding:** resumes land on the 2,048-row grid, so each later turn recomputes up to 2,047 rows. That's ≈1.1 s TTFT per ~8K-token turn at the head of the queue. Prompt passes run one at a time (≈1.9K tok/s), so at C=4 turns queue to 4–6.7 s TTFT.
   - `replay.py` (`repeat` / `turns` modes, `/metrics` deltas) is the reusable workload.
-- **Running (01:05 UTC): `runs/overnight-20261122/nccl/` with arms ctl1, mc4a, soloa, ctl2, solob, mc4b** (`NCCL_MAX_CTAS=4`, `TF_DS_SOLO_OVERHEAD=1`). It runs on 10c9866 with exact, sampled, probe and `PREFILL_CELL=1` (cold 32K/96K).
+- **nccl suite (01:05–02:18 UTC, `runs/overnight-20261122/nccl/`), all 6 arms exact 39/39 + sampled IDENTICAL:**
+  - **`NCCL_MAX_CTAS=4` ADOPTED (02:22 UTC, `runs/deploy-mc4-20261123/`).** Cold prefill +0.83% at 32K (2,101/2,102 vs 2,084/2,084 tok/s) and +0.85% at 96K (2,045/2,050 vs 2,031/2,029). Both arms beat both controls, whose spread is ≤0.1%. Decode is neutral (probe −0.00%, chunk-gap p95 −0.01%). Env proof: `nccl/mc4a.nccl-env.txt` and the deploy's `armed.txt`. Deploy checks: exact IDENTICAL vs `deploy-10c9866/exact.json`, sampled IDENTICAL, validate rc=0.
+  - **`TF_DS_SOLO_OVERHEAD=1` held.** It engages (fewer rounds, 7,452 vs 7,499–7,554, 6.41 rows a round vs 6.31–6.35), but the probe is −0.01% and chunk-gap p95 −0.18%.
   - `TCP_NODELAY` is dropped from the candidate list: `link.zig` already sets it, plus `SO_BUSY_POLL`.
   - `TF_DS_NO_COPIES` was measured before (`to-benchmark.md`: mildly negative).
+- **Running (02:23 UTC): drafter D1 (`runs/d1-20261123/`).** `chain.sh` stops production, builds both ranks' D1 weight files, then runs the ctl1/d1a/ctl2/d1b suite. `arms.sh` restores production at the end.
+  - **Overlay:** ursuciprian's refit DSpark drafter, 165 `mtp.*` tensors. All the names match ours; 37 attention trellises are 6-bit (ours are 4-bit, and the engine already serves 6-bit linears).
+  - **Layout:** a sibling data dir, `/nfs1/tensorfold-dsv41/45ee5d0f-ablit-0bdc2036-d1`, plus a worker dir `rank-cache-…-d1`, selected by `DATA_SUFFIX=-d1` (a new `scripts/config.sh` hook that's a no-op when unset). Production's data is untouched.
+  - **Worker disk:** the D1 weight file leaves about 131 GB free, which is below the 180 GiB spill budget. Delete the losing weight file after the verdict.
 - **PRODUCTION CHANGED 21:25 UTC: image `tensorfold-dsv41:bench-fused-next-10c9866`** (`kernel-stack-0272` = `27baa93` + 0272 + 0273 + 0274 + 0275). This adopts the 0273 failed-capture join fix and the 0274 tool-call first-token fix. 0272 (`RING_TRACE`) and 0275 (`COPY_MIN`) are in the image but unset.
   - Deploy checks: exact 39/39 and sampled IDENTICAL vs `sched2/ctl1`, `tool_choice: required` + thinking returns a tool call, validate rc=0.
   - Backup: `~/dsv41-env-backups/.env.bak-20261122-pre-10c9866`.
