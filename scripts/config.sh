@@ -179,6 +179,9 @@ HF_CACHE="${HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}"
 # so that one NFS export serves the worker too.
 DATA_SUB="tensorfold-dsv41/${MODEL_REVISION:0:8}"
 [[ "$ABLIT" != 1 ]] || DATA_SUB+="-ablit-${ABLIT_REVISION:0:8}"
+# DATA_SUFFIX (default empty): a sibling data dir and worker weight file, e.g. "-d1" for runs/d1-20261123/build.sh's
+# drafter overlay; production's own dir is never touched by it.
+DATA_SUB+="${DATA_SUFFIX:-}"
 DATA_DIR="$HF_CACHE/$DATA_SUB"
 KIT_SUB="tensorfold-dsv41/kit-${KIT_REF:0:8}"
 # The worker reads this Spark's HF_CACHE over NFS (the recipe's only mode: one copy of the 196 GiB checkpoint, here): a
@@ -197,6 +200,7 @@ WORKER_CACHE_DIR="${WORKER_CACHE_DIR:-\$HOME/.cache/dsv41-tensorfold/rank-cache-
 if [[ "$ABLIT" == 1 && "$WORKER_CACHE_DIR" != *"-ablit-${ABLIT_REVISION:0:8}" ]]; then
   WORKER_CACHE_DIR+="-ablit-${ABLIT_REVISION:0:8}"
 fi
+[[ -z "${DATA_SUFFIX:-}" || "$WORKER_CACHE_DIR" == *"$DATA_SUFFIX" ]] || WORKER_CACHE_DIR+="$DATA_SUFFIX"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/dsv41-tensorfold}"   # locks and the prepared marker
 LOG_DIR="${LOG_DIR:-$HOME/.cache/dsv41-tensorfold/logs}"
 LOG_KEEP="${LOG_KEEP:-10}"
