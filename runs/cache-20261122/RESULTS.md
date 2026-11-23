@@ -18,11 +18,12 @@ Docs 0–5 were already cached by the earlier runs (same text), so the later run
 
 ## 0276 `TF_DS_CACHE_REPLACE_STALE`: no hardware arm, held
 
-- No kept state went stale: 0 `misses_stale`, and no "goes stale" log lines since the 21:25 restart, even with
-  ~480K tokens cached plus live streams. Staleness only comes from a placement needing pool room
-  (`lanes.zig` `placeKept` / `staleOver`), and the pool is 2,101,248 positions.
+- No kept state went stale (0 `misses_stale`, no "goes stale" lines). That's expected rather than tested: ~480K of the
+  pool's 2,101,248 positions were in use, and staleness only comes from a placement needing pool room
+  (`lanes.zig` `placeKept` / `staleOver`). A pool-pressure replay (~100 distinct ~22K documents) is still owed. It
+  would also exercise the spill-restore path, which has had 0 `disk_hits` all night.
 - Even when a state does go stale, production's spill tier writes a durable point for every kept state
-  (`prompt_cache_writes_enqueued` = `prompt_cache_kept`, 23/23 since restart). 0276 deliberately skips entries with
+  (`prompt_cache_writes_enqueued` = `prompt_cache_kept`, 23/23 since restart). The point is assigned synchronously at keep time (`prompt_cache.zig:1250`, `t.vtable.keep` returns the id), so there is no window before the write publishes. 0276 deliberately skips entries with
   `e.point != null` (the tier's `adopt` already replaces their stale twin on restore). Only full-end keeps
   (`TF_DS_PROMPT_ENDSTATE`, off in production) carry no point.
 - So the arm cannot fire under production's configuration. It stays committed off-by-default on `kernel-0276`
@@ -30,7 +31,7 @@ Docs 0–5 were already cached by the earlier runs (same text), so the later run
 
 ## 0271 `TF_DS_RESUME_ASSEMBLE`: inert in production, held
 
-- It only runs on an exact-resume prepend (`replayCut`, `pre > 0`), which needs `TF_DS_EXACT_RESUME=1`.
+- It only runs on an exact-resume prepend (`replayCut`, `pre > 0`). `pre` comes from `tailPre` on the chunk's `Tail`, which only exists under `TF_DS_EXACT_RESUME=1` (`prompt.zig:188`, verified in `tfref-k0271`).
 - `decisions.md` §0121 rules exact resume **lossy** (any off-grid chunk shape moves bits) and opt-in only.
   Production resumes on the 2,048-row grid, so 0271 can never engage there and needs no further hardware time.
 
