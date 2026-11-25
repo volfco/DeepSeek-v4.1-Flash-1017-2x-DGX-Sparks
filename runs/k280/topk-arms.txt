@@ -1,0 +1,8 @@
+# 0261 TF_DS_TOPK_MERGE on sampled traffic, on vs off, on production's own image (empty image = .env's).
+# It has never been timed on sampled rounds: every earlier round-time workload was greedy, where the path does not engage.
+# on = production as it runs (.env has TF_DS_TOPK_MERGE=1); off = the full-logit exchange over the RDMA ring + the
+# 129,280-column draw on rank 0. The environment wins over .env (scripts/config.sh), so =0 turns it off for the arm.
+on1||
+off1||TF_DS_TOPK_MERGE=0
+off2||TF_DS_TOPK_MERGE=0
+on2||

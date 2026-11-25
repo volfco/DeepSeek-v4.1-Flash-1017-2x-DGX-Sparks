@@ -1,0 +1,21 @@
+19:03:15 start
+19:28:55 pi exited rc=0
+19:28:55 resume 1
+Done. Checkpoint summary:
+
+## 0275 complete
+
+**Commit** `42a2c2d59600aae1889a0a38233817021cf61768` on `kernel-0275` (parent `27baa93`), subject exactly
+`0275 dsv41: TF_DS_COPY_MIN (unset: today's minimum): the copy draft's minimum match length`. Working tree clean.
+
+**What shipped** — `TF_DS_COPY_MIN=<n>`, off by default:
+- `zig/src/families/dsv41/copy_min.zig` (new, pure): parse/bounds (unset/`""`/`"0"` → today's 2; integer 2..7; else stderr message + startup refusal), `takes` host reference, 3 tests.
+- Wiring: `native.zig` (parse beside `TF_DS_NO_COPIES`) → `lanes.zig` field + `facts()` → `core/lanes/config.zig` `Model`/`Config` `?u32` → `core/lanes/windows.zig:141` gate (`copied.len < (cfg.copy_min orelse 2)`) + one-shot engagement banner (0265's atomic-swap pattern).
+
+**Key findings** — the brief's gate path drifted (`zig/src/core/lanes/windows.zig:141`, not `families/dsv41/`); source-patch `n` == our `copied.len` threshold exactly (n=2 = today, n=3 refuses 2-token copies, match gate `enter_match`=8 untouched). Lossless: verify/accept unchanged and the sampler keys draws by (seed, position, id), so drafts cannot move a token. `TF_DS_NO_COPIES` dominates (arm never runs); `TF_DS_SOLO_OVERHEAD` orthogonal.
+
+**Gate** — `zig build test` exit 0 (1 unnamed flake in run 1 of 8, all reruns clean); cuda stub check: identical 9-error set to base; harness `h0275/` exit 0 — 14 cases × all prefixes × n∈{unset,2,3,4,5,6,7} match an independent brute-force reference, unset==today proven.
+
+**Open (hardware-only)**: the n=3 throughput claim, output bit-identity vs GPU row-count rounding, and banner counting — all listed in `report-0275.md`. Nothing left to do locally.
+19:42:35 pi exited rc=0
+19:42:35 committed 42a2c2d 0275 dsv41: TF_DS_COPY_MIN (unset: today's minimum): the copy draft's minimum match length

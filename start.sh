@@ -61,7 +61,7 @@ for v in CONTEXT PARALLEL MAX_TOKENS TOP_K; do [[ "${!v}" =~ ^[1-9][0-9]*$ ]] ||
 (( CONTEXT <= 1048576 )) || die "CONTEXT is at most 1048576 (the model's window), not $CONTEXT"
 [[ -z "$POOL" ]] || { [[ "$POOL" =~ ^[1-9][0-9]*$ ]] && (( POOL >= CONTEXT )); } || die "POOL is empty (the pool is CONTEXT) or a count of positions of at least CONTEXT ($CONTEXT), not $POOL"
 (( PARALLEL <= 16 )) || die "PARALLEL is 1 to 16 (the engine's streams), not $PARALLEL"
-[[ -z "$ROUND_ROWS" ]] || { [[ "$ROUND_ROWS" =~ ^[0-9]+$ ]] && (( ROUND_ROWS == 16 )); } || die "ROUND_ROWS must be empty or 16: the pinned kit has no wider row kernels (issue #23), not $ROUND_ROWS"
+[[ -z "$ROUND_ROWS" ]] || { [[ "$ROUND_ROWS" =~ ^[0-9]+$ ]] && (( ROUND_ROWS >= 16 && ROUND_ROWS <= 48 )); } || die "ROUND_ROWS must be empty (16) or 16 to 48: the engine splits a wider round's gate into 16-row pieces on the pinned kit (0017, TF_DS_ROUND_ROWS 16..48), not $ROUND_ROWS"
 [[ -z "$THINKING_BUDGET" || "$THINKING_BUDGET" =~ ^[1-9][0-9]*$ ]] || die "THINKING_BUDGET is a positive count of reasoning tokens (or empty for no cap), not $THINKING_BUDGET"
 [[ -z "$CPUSET" || "$CPUSET" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || die "CPUSET is a docker cpu list (15-19, or empty to take the host's), not $CPUSET"
 [[ "$DROP_REASONING_HISTORY" =~ ^[01]$ ]] || die "DROP_REASONING_HISTORY is 0 or 1, not $DROP_REASONING_HISTORY"

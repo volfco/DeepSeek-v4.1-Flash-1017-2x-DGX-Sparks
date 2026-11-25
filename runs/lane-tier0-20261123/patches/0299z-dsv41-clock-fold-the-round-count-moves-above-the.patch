@@ -1,0 +1,44 @@
+From c82ff51891f87a1f66114c61610818805a640f23 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Mon, 23 Nov 2026 15:10:36 -0800
+Subject: [PATCH 4/4] 0299z dsv41: clock_fold: the round count moves above the
+ degenerate-buffer guard (every call counts one round, as documented;
+ REVIEW.md F3)
+
+---
+ zig/src/families/dsv41/clock_fold.zig | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/zig/src/families/dsv41/clock_fold.zig b/zig/src/families/dsv41/clock_fold.zig
+index 3a8894b..d100db6 100644
+--- a/zig/src/families/dsv41/clock_fold.zig
++++ b/zig/src/families/dsv41/clock_fold.zig
+@@ -7,6 +7,7 @@ const std = @import("std");
+ /// h = one round's clock buffer as read back from the device. clk_* are the Model's accumulators; every call counts
+ /// one round (a round whose buffer holds fewer than two clocks contributes no gaps).
+ pub fn fold(clk_ph: *[256]u64, clk_cnt: *[256]u64, clk_rounds: *u64, h: []const u64) void {
++    clk_rounds.* += 1;
+     if (h.len < 3) return;
+     const cap = (h.len - 1) / 2;
+     const n = @min(h[0], cap);
+@@ -15,7 +16,6 @@ pub fn fold(clk_ph: *[256]u64, clk_cnt: *[256]u64, clk_rounds: *u64, h: []const
+         clk_ph[tag] += h[1 + 2 * i] -% h[1 + 2 * (i - 1)];
+         clk_cnt[tag] += 1;
+     }
+-    clk_rounds.* += 1;
+ }
+ 
+ test "the fold reads nonzero phases from a constructed profiler state (0299: rounds read undefined fill and every phase read 0 us)" {
+@@ -75,6 +75,9 @@ test "the fold never reads past the clock count: fill after it and a count past
+     fold(&clk_ph, &clk_cnt, &clk_rounds, &h);
+     try std.testing.expectEqual(@as(u64, 1), clk_rounds);
+     try std.testing.expectEqual(@as(u64, 0), clk_cnt[2]);
++    // a degenerate buffer (fewer than one clock entry) still counts the round: the pre-image counted every call
++    fold(&clk_ph, &clk_cnt, &clk_rounds, h[0..2]);
++    try std.testing.expectEqual(@as(u64, 2), clk_rounds);
+ }
+ 
+ test "the profile's fields are assigned where the bug class bites: Model.open and Round.init start from undefined" {
+-- 
+2.56.1
+

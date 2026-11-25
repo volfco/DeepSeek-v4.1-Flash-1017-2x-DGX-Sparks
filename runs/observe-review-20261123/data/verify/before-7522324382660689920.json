@@ -1,0 +1,335 @@
+{
+ "file": "dashboards-before/7522324382660689920.json",
+ "title": "DGX Sparks",
+ "hours": 24.0,
+ "checked_at": "2026-11-23T07:02:58Z",
+ "counts": {
+  "data": 21,
+  "empty": 0,
+  "error": 0,
+  "static": 0
+ },
+ "panels": [
+  {
+   "tab": "Default",
+   "id": "Panel_ID7059361",
+   "title": "CPU Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "100 - avg by (host_name) (system_cpu_utilization{state=\"idle\"})",
+     "sent": "100 - avg by (host_name) (system_cpu_utilization{state=\"idle\"})",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID9551509",
+   "title": "Memory Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "avg by (host_name) (system_memory_utilization{state=\"used\"}) * 100",
+     "sent": "avg by (host_name) (system_memory_utilization{state=\"used\"}) * 100",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID7794757",
+   "title": "Load Average (5m)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "avg by (host_name) (system_cpu_load_average_5m)",
+     "sent": "avg by (host_name) (system_cpu_load_average_5m)",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID9072210",
+   "title": "Memory Usage by State",
+   "type": "line",
+   "queries": [
+    {
+     "query": "avg by (host_name, state) (system_memory_usage)",
+     "sent": "avg by (host_name, state) (system_memory_usage)",
+     "series": 24,
+     "points": 6936
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID8865172",
+   "title": "Disk I/O",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_disk_io[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_disk_io[5m]))",
+     "series": 204,
+     "points": 58956
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID4886166",
+   "title": "Network I/O",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_network_io[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_network_io[5m]))",
+     "series": 214,
+     "points": 55520
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID6285699",
+   "title": "Filesystem Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, mountpoint) (system_filesystem_utilization) * 100",
+     "sent": "max by (host_name, mountpoint) (system_filesystem_utilization) * 100",
+     "series": 64,
+     "points": 18496
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID3862360",
+   "title": "Memory Page Faults",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, type) (rate(system_paging_faults[5m]))",
+     "sent": "sum by (host_name, type) (rate(system_paging_faults[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID7489564",
+   "title": "GPU Temperature",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_gpu_temp",
+     "sent": "dcgm_fi_dev_gpu_temp",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID2513784",
+   "title": "GPU Memory Temperature",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_memory_temp",
+     "sent": "dcgm_fi_dev_memory_temp",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID9360943",
+   "title": "GPU Power Draw",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_power_usage",
+     "sent": "dcgm_fi_dev_power_usage",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID0525346",
+   "title": "SM Clock",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_sm_clock",
+     "sent": "dcgm_fi_dev_sm_clock",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID5679373",
+   "title": "GPU Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_gpu_util",
+     "sent": "dcgm_fi_dev_gpu_util",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID4803554",
+   "title": "Memory Copy Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_mem_copy_util",
+     "sent": "dcgm_fi_dev_mem_copy_util",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID2104237",
+   "title": "Encoder Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_enc_util",
+     "sent": "dcgm_fi_dev_enc_util",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID0098259",
+   "title": "Decoder Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_dec_util",
+     "sent": "dcgm_fi_dev_dec_util",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID6807578",
+   "title": "Fabric RX Throughput",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_bytes_phy[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_bytes_phy[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID5638768",
+   "title": "Fabric TX Throughput",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_bytes_phy[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_bytes_phy[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID7995086",
+   "title": "RDMA Out-of-Buffer (congestion)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca) (rate(rx_out_of_buffer[5m]))",
+     "sent": "sum by (host_name, hca) (rate(rx_out_of_buffer[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID6301141",
+   "title": "Port Link State (4=up)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, hca, port) (ib_port_state)",
+     "sent": "max by (host_name, hca, port) (ib_port_state)",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID6151595",
+   "title": "Phy Discards",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_discards_phy[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_discards_phy[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_discards_phy[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_discards_phy[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  }
+ ]
+}

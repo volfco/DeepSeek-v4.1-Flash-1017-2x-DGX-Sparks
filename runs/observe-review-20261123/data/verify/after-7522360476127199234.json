@@ -1,0 +1,3445 @@
+{
+ "file": "dashboards-after/7522360476127199234.json",
+ "title": "Tensorfold",
+ "hours": 24.0,
+ "checked_at": "2026-11-23T07:23:53Z",
+ "counts": {
+  "data": 155,
+  "empty": 2,
+  "error": 0,
+  "static": 4
+ },
+ "panels": [
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000001",
+   "title": "Requests running",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:requests_running)",
+     "sent": "sum(tensorfold:requests_running)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000002",
+   "title": "Requests waiting",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:requests_waiting)",
+     "sent": "sum(tensorfold:requests_waiting)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000003",
+   "title": "Generation tokens running",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:generation_tokens_running)",
+     "sent": "sum(tensorfold:generation_tokens_running)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000004",
+   "title": "KV cache usage",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "max(tensorfold:kv_cache_usage_ratio) * 100",
+     "sent": "max(tensorfold:kv_cache_usage_ratio) * 100",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000005",
+   "title": "Prompt cache entries",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_entries)",
+     "sent": "sum(tensorfold:prompt_cache_entries)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000006",
+   "title": "Pair broken / failed",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "max(tensorfold:pair_broken)",
+     "sent": "max(tensorfold:pair_broken)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "max(tensorfold:pair_failed)",
+     "sent": "max(tensorfold:pair_failed)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000007",
+   "title": "Spill stored",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_stored_bytes)",
+     "sent": "sum(tensorfold:spill_stored_bytes)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000008",
+   "title": "Spill disk free",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_disk_free_bytes)",
+     "sent": "sum(tensorfold:spill_disk_free_bytes)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000010",
+   "title": "KV shard parts",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:kv_shard_parts)",
+     "sent": "sum(tensorfold:kv_shard_parts)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000011",
+   "title": "Restores active",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_restores_active)",
+     "sent": "sum(tensorfold:prompt_cache_restores_active)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000012",
+   "title": "Refusals / disconnects (5m)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:service_refused[5m]))",
+     "sent": "sum(rate(tensorfold:service_refused[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:client_disconnections_total[5m]))",
+     "sent": "sum(rate(tensorfold:client_disconnections_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000013",
+   "title": "Prompt tokens/s",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_tokens_total[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_tokens_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000014",
+   "title": "Generation tokens/s",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:generation_tokens_total[5m]))",
+     "sent": "sum(rate(tensorfold:generation_tokens_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000015",
+   "title": "Prompt cache hit ratio",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_tokens_cached_total[5m])) / clamp_min(sum(rate(tensorfold:prompt_tokens_total[5m])), 1)",
+     "sent": "sum(rate(tensorfold:prompt_tokens_cached_total[5m])) / clamp_min(sum(rate(tensorfold:prompt_tokens_total[5m])), 1)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000016",
+   "title": "End-to-end latency p50 / p95",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:e2e_request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:e2e_request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:e2e_request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:e2e_request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000017",
+   "title": "Draft acceptance",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:mtp_accepted_total[5m])) / clamp_min(sum(rate(tensorfold:mtp_drafted_total[5m])), 1) * 100",
+     "sent": "sum(rate(tensorfold:mtp_accepted_total[5m])) / clamp_min(sum(rate(tensorfold:mtp_drafted_total[5m])), 1) * 100",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:mtp_drafted_total[5m]))",
+     "sent": "sum(rate(tensorfold:mtp_drafted_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000018",
+   "title": "Prefix cache hits vs queries",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prefix_cache_hits_total[5m]))",
+     "sent": "sum(rate(tensorfold:prefix_cache_hits_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prefix_cache_queries_total[5m]))",
+     "sent": "sum(rate(tensorfold:prefix_cache_queries_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000019",
+   "title": "Spill writes committed vs failed",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_writes_committed[5m]))",
+     "sent": "sum(rate(tensorfold:spill_writes_committed[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_writes_failed[5m]))",
+     "sent": "sum(rate(tensorfold:spill_writes_failed[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000020",
+   "title": "Spill reads/s",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_reads[5m]))",
+     "sent": "sum(rate(tensorfold:spill_reads[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000021",
+   "title": "Prompt cache restores vs evictions",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restored_tokens[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restored_tokens[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_evicted[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_evicted[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000022",
+   "title": "KV shard live rows by part",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (part) (tensorfold:kv_shard_part_live_rows)",
+     "sent": "sum by (part) (tensorfold:kv_shard_part_live_rows)",
+     "series": 2,
+     "points": 572
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000023",
+   "title": "Spill stored by rank",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (tensorfold:spill_stored_bytes)",
+     "sent": "sum by (rank) (tensorfold:spill_stored_bytes)",
+     "series": 2,
+     "points": 572
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000024",
+   "title": "Preemptions / evicted turns",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:preemptions_total[5m]))",
+     "sent": "sum(rate(tensorfold:preemptions_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_evicted_turns[5m]))",
+     "sent": "sum(rate(tensorfold:spill_evicted_turns[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "Panel_ID0000900",
+   "title": "Device memory / peak",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:device_memory_bytes)",
+     "sent": "sum(tensorfold:device_memory_bytes)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "max(tensorfold:device_memory_peak_bytes)",
+     "sent": "max(tensorfold:device_memory_peak_bytes)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001000",
+   "title": "Engram lookup p95",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:engram_lookup_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:engram_lookup_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 218
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001001",
+   "title": "Disk restore wait (avg)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restore_wait_ns[5m])) / clamp_min(sum(rate(tensorfold:prompt_cache_restore_waits[5m])), 1) / 1e9",
+     "sent": "sum(rate(tensorfold:prompt_cache_restore_wait_ns[5m])) / clamp_min(sum(rate(tensorfold:prompt_cache_restore_waits[5m])), 1) / 1e9",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001002",
+   "title": "Disk restore wait (max)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "max(tensorfold:prompt_cache_restore_wait_max_ns) / 1e9",
+     "sent": "max(tensorfold:prompt_cache_restore_wait_max_ns) / 1e9",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001003",
+   "title": "Engram reads/s",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:engram_lookup_seconds_count[5m]))",
+     "sent": "sum(rate(tensorfold:engram_lookup_seconds_count[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001004",
+   "title": "Restoring bytes reserved",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_restoring_bytes)",
+     "sent": "sum(tensorfold:prompt_cache_restoring_bytes)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001005",
+   "title": "Parked on restore",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_parked)",
+     "sent": "sum(tensorfold:prompt_cache_parked)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001006",
+   "title": "Engram lookup latency",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:engram_lookup_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:engram_lookup_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 218
+    },
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:engram_lookup_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:engram_lookup_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 218
+    },
+    {
+     "query": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:engram_lookup_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:engram_lookup_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 218
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001007",
+   "title": "Restore progress (blocks done / total)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_restore_blocks_done)",
+     "sent": "sum(tensorfold:prompt_cache_restore_blocks_done)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(tensorfold:prompt_cache_restore_blocks_total)",
+     "sent": "sum(tensorfold:prompt_cache_restore_blocks_total)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001008",
+   "title": "Restore wait timeouts/s",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restore_wait_timeouts[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restore_wait_timeouts[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(tensorfold:prompt_cache_parked)",
+     "sent": "sum(tensorfold:prompt_cache_parked)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001009",
+   "title": "Disk cache hit ratio",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_disk_hits[5m])) / clamp_min(sum(rate(tensorfold:prompt_cache_disk_lookups[5m])), 1)",
+     "sent": "sum(rate(tensorfold:prompt_cache_disk_hits[5m])) / clamp_min(sum(rate(tensorfold:prompt_cache_disk_lookups[5m])), 1)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_disk_lookups[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_disk_lookups[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001010",
+   "title": "Spill read throughput",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_read_bytes[5m]))",
+     "sent": "sum(rate(tensorfold:spill_read_bytes[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_reads[5m]))",
+     "sent": "sum(rate(tensorfold:spill_reads[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram & disk reads",
+   "id": "Panel_ID0001011",
+   "title": "Spill read failures",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_read_failed[5m]))",
+     "sent": "sum(rate(tensorfold:spill_read_failed[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_presence_refused[5m]))",
+     "sent": "sum(rate(tensorfold:spill_presence_refused[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_compatible_misses[5m]))",
+     "sent": "sum(rate(tensorfold:spill_compatible_misses[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001012",
+   "title": "Entries now",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_entries)",
+     "sent": "sum(tensorfold:prompt_cache_entries)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001013",
+   "title": "Held bytes",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_held_bytes)",
+     "sent": "sum(tensorfold:prompt_cache_held_bytes)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001014",
+   "title": "Restores active",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_restores_active)",
+     "sent": "sum(tensorfold:prompt_cache_restores_active)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001015",
+   "title": "Disk hits committed",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_disk_hits_committed)",
+     "sent": "sum(tensorfold:prompt_cache_disk_hits_committed)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001016",
+   "title": "Writes pending",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_writes_pending)",
+     "sent": "sum(tensorfold:spill_writes_pending)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001017",
+   "title": "Restored tokens",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:prompt_cache_restored_tokens)",
+     "sent": "sum(tensorfold:prompt_cache_restored_tokens)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001018",
+   "title": "Memory hits vs misses",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_memory_hits[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_memory_hits[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_memory_misses[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_memory_misses[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001019",
+   "title": "Kept vs evicted",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_kept[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_kept[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_evicted[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_evicted[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001020",
+   "title": "Refused vs failed",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_refused[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_refused[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_failed[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_failed[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001021",
+   "title": "Cached vs computed tokens",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_cached_tokens[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_cached_tokens[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_computed_tokens[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_computed_tokens[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001022",
+   "title": "Chats continued",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:chats_continued[5m]))",
+     "sent": "sum(rate(tensorfold:chats_continued[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:chats_continued_prefill_tokens[5m]))",
+     "sent": "sum(rate(tensorfold:chats_continued_prefill_tokens[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001023",
+   "title": "Restores begun / shared / failed",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_begun[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_begun[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_shared[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_shared[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_failed[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_failed[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_cancelled[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_cancelled[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001024",
+   "title": "Restores dropped / refused / deferred",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_dropped[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_dropped[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_refused[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_refused[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_deferred[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_deferred[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_deferred_expired[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_deferred_expired[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001025",
+   "title": "Room waits",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_room_waits[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_room_waits[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_restores_room_wait_expired[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_restores_room_wait_expired[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001026",
+   "title": "Disk writes enqueued / promoted / flushes",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_writes_enqueued[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_writes_enqueued[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_shared_promoted[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_shared_promoted[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_flushes[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_flushes[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Prompt cache",
+   "id": "Panel_ID0001027",
+   "title": "Flush timeouts / unpublished",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_flush_timeouts[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_flush_timeouts[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_flush_unpublished[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_flush_unpublished[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001028",
+   "title": "Points published",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_points)",
+     "sent": "sum(tensorfold:spill_points)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001029",
+   "title": "Blocks on disk",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_blocks)",
+     "sent": "sum(tensorfold:spill_blocks)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001030",
+   "title": "Stored / cap",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_stored_bytes)",
+     "sent": "sum(tensorfold:spill_stored_bytes)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(tensorfold:spill_cap_bytes)",
+     "sent": "sum(tensorfold:spill_cap_bytes)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001031",
+   "title": "Disk free",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_disk_free_bytes)",
+     "sent": "sum(tensorfold:spill_disk_free_bytes)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001032",
+   "title": "Staging now / peak",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_staging_bytes)",
+     "sent": "sum(tensorfold:spill_staging_bytes)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "max(tensorfold:spill_staging_peak)",
+     "sent": "max(tensorfold:spill_staging_peak)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001033",
+   "title": "Writes queued (rate)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_writes_queued[5m]))",
+     "sent": "sum(rate(tensorfold:spill_writes_queued[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001034",
+   "title": "Writes committed / failed / cancelled",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_writes_committed[5m]))",
+     "sent": "sum(rate(tensorfold:spill_writes_committed[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_writes_failed[5m]))",
+     "sent": "sum(rate(tensorfold:spill_writes_failed[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_writes_cancelled[5m]))",
+     "sent": "sum(rate(tensorfold:spill_writes_cancelled[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001035",
+   "title": "Cancelled breakdown",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_writes_cancelled_guard[5m]))",
+     "sent": "sum(rate(tensorfold:spill_writes_cancelled_guard[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_writes_cancelled_staging[5m]))",
+     "sent": "sum(rate(tensorfold:spill_writes_cancelled_staging[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_writes_cancelled_shutdown[5m]))",
+     "sent": "sum(rate(tensorfold:spill_writes_cancelled_shutdown[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001036",
+   "title": "No space / forced staging / quota trims",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_no_space[5m]))",
+     "sent": "sum(rate(tensorfold:spill_no_space[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_forced_staging[5m]))",
+     "sent": "sum(rate(tensorfold:spill_forced_staging[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_quota_trims[5m]))",
+     "sent": "sum(rate(tensorfold:spill_quota_trims[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001037",
+   "title": "Dedup blocks / bytes",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_dedup_blocks[5m]))",
+     "sent": "sum(rate(tensorfold:spill_dedup_blocks[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_dedup_bytes[5m]))",
+     "sent": "sum(rate(tensorfold:spill_dedup_bytes[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001038",
+   "title": "Written bytes",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_written_bytes[5m]))",
+     "sent": "sum(rate(tensorfold:spill_written_bytes[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001039",
+   "title": "Integrity errors",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_crc_errors[5m]))",
+     "sent": "sum(rate(tensorfold:spill_crc_errors[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_size_errors[5m]))",
+     "sent": "sum(rate(tensorfold:spill_size_errors[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001040",
+   "title": "Evictions",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_evicted_turns[5m]))",
+     "sent": "sum(rate(tensorfold:spill_evicted_turns[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_evicted_forks[5m]))",
+     "sent": "sum(rate(tensorfold:spill_evicted_forks[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_evicted_conversations[5m]))",
+     "sent": "sum(rate(tensorfold:spill_evicted_conversations[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_evicted_shared[5m]))",
+     "sent": "sum(rate(tensorfold:spill_evicted_shared[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001041",
+   "title": "Recovered points / dropped temporaries",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_recovered_points)",
+     "sent": "sum(tensorfold:spill_recovered_points)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(tensorfold:spill_dropped_temporaries)",
+     "sent": "sum(tensorfold:spill_dropped_temporaries)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID0001042",
+   "title": "Pictures kept vs refused",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spill_pictures_kept[5m]))",
+     "sent": "sum(rate(tensorfold:spill_pictures_kept[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spill_pictures_refused[5m]))",
+     "sent": "sum(rate(tensorfold:spill_pictures_refused[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Spill tier",
+   "id": "Panel_ID6867210",
+   "title": "Blocks on disk",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(tensorfold:spill_blocks)",
+     "sent": "sum(tensorfold:spill_blocks)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001043",
+   "title": "Parts / ranks",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(tensorfold:kv_shard_parts)",
+     "sent": "sum(tensorfold:kv_shard_parts)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(tensorfold:kv_shard_ranks)",
+     "sent": "sum(tensorfold:kv_shard_ranks)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001044",
+   "title": "Rows by part",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (part) (tensorfold:kv_shard_part_rows)",
+     "sent": "sum by (part) (tensorfold:kv_shard_part_rows)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum by (part) (tensorfold:kv_shard_part_free)",
+     "sent": "sum by (part) (tensorfold:kv_shard_part_free)",
+     "series": 2,
+     "points": 572
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001045",
+   "title": "Live streams by part",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (part) (tensorfold:kv_shard_part_live)",
+     "sent": "sum by (part) (tensorfold:kv_shard_part_live)",
+     "series": 2,
+     "points": 572
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001046",
+   "title": "Kept / twin / hold rows by part",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (part) (tensorfold:kv_shard_part_kept_rows)",
+     "sent": "sum by (part) (tensorfold:kv_shard_part_kept_rows)",
+     "series": 2,
+     "points": 572
+    },
+    {
+     "query": "sum by (part) (tensorfold:kv_shard_part_twin_rows)",
+     "sent": "sum by (part) (tensorfold:kv_shard_part_twin_rows)",
+     "series": 2,
+     "points": 572
+    },
+    {
+     "query": "sum by (part) (tensorfold:kv_shard_part_hold_rows)",
+     "sent": "sum by (part) (tensorfold:kv_shard_part_hold_rows)",
+     "series": 2,
+     "points": 572
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001047",
+   "title": "Carries breakdown",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:kv_shard_carries[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_carries[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_carry_rescued[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_carry_rescued[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_carry_pressure[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_carry_pressure[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_carry_others[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_carry_others[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_carry_paused[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_carry_paused[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001048",
+   "title": "Moves / moved tokens / bytes",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:kv_shard_moves[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_moves[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_moved_tokens[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_moved_tokens[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_moved_bytes[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_moved_bytes[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001049",
+   "title": "Transfers failed / staled / twins",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:kv_shard_transfers_failed[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_transfers_failed[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_staled[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_staled[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_twins_made[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_twins_made[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_twins_revoked[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_twins_revoked[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001050",
+   "title": "Refusals",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:kv_shard_refused_pinned[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_refused_pinned[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_refused_twin[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_refused_twin[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_refused_loading[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_refused_loading[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_refused_partial[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_refused_partial[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_refused_no_target[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_refused_no_target[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_refused_small[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_refused_small[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001051",
+   "title": "No part / plans / checks",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:kv_shard_no_part[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_no_part[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_plans[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_plans[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_checks[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_checks[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001052",
+   "title": "Prompt fetch traffic",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:kv_shard_prompt_fetches[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_prompt_fetches[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_prompt_rows[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_prompt_rows[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_prompt_bytes[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_prompt_bytes[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_prompt_syncs[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_prompt_syncs[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001053",
+   "title": "Copies / decode rounds",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:kv_shard_copies[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_copies[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_copy_bytes[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_copy_bytes[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_fetch_rounds[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_fetch_rounds[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:kv_shard_owner_rounds[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_owner_rounds[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001054",
+   "title": "Per-rank prompt bytes",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_bytes[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_bytes[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_fetches[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_fetches[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard",
+   "id": "Panel_ID0001055",
+   "title": "Per-rank failures / plans",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_transfers_failed[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_transfers_failed[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_plans[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_plans[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_checks[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_checks[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Latency, drafting & pair",
+   "id": "Panel_ID0001056",
+   "title": "Request latency",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Latency, drafting & pair",
+   "id": "Panel_ID0001057",
+   "title": "Time to first token",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Latency, drafting & pair",
+   "id": "Panel_ID0001058",
+   "title": "Time per output token",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_time_per_output_token_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_time_per_output_token_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 215
+    },
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_time_per_output_token_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_time_per_output_token_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 215
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Latency, drafting & pair",
+   "id": "Panel_ID0001059",
+   "title": "Prefill / decode seconds",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_prefill_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_prefill_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_decode_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_decode_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "sum(rate(tensorfold:decode_rounds_total[5m]))",
+     "sent": "sum(rate(tensorfold:decode_rounds_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Latency, drafting & pair",
+   "id": "Panel_ID0001060",
+   "title": "Draft acceptance",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:mtp_accepted_total[5m])) / clamp_min(sum(rate(tensorfold:mtp_drafted_total[5m])), 1)",
+     "sent": "sum(rate(tensorfold:mtp_accepted_total[5m])) / clamp_min(sum(rate(tensorfold:mtp_drafted_total[5m])), 1)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:mtp_drafted_total[5m]))",
+     "sent": "sum(rate(tensorfold:mtp_drafted_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:mtp_accepted_total[5m]))",
+     "sent": "sum(rate(tensorfold:mtp_accepted_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Latency, drafting & pair",
+   "id": "Panel_ID0001061",
+   "title": "Pair health (ms)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max(tensorfold:pair_busy_ms)",
+     "sent": "max(tensorfold:pair_busy_ms)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "max(tensorfold:pair_stall_ms)",
+     "sent": "max(tensorfold:pair_stall_ms)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Latency, drafting & pair",
+   "id": "Panel_ID0001062",
+   "title": "Pair state",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max(tensorfold:pair_broken)",
+     "sent": "max(tensorfold:pair_broken)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "max(tensorfold:pair_stalled)",
+     "sent": "max(tensorfold:pair_stalled)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:pair_failed[5m]))",
+     "sent": "sum(rate(tensorfold:pair_failed[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Latency, drafting & pair",
+   "id": "Panel_ID0001063",
+   "title": "Preemptions / refused / disconnects",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:preemptions_total[5m]))",
+     "sent": "sum(rate(tensorfold:preemptions_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:service_refused[5m]))",
+     "sent": "sum(rate(tensorfold:service_refused[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:client_disconnections_total[5m]))",
+     "sent": "sum(rate(tensorfold:client_disconnections_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0001",
+   "title": "How to read this tab",
+   "type": "markdown",
+   "queries": [],
+   "status": "static"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0002",
+   "title": "Decode tok/s a stream (1 h)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(increase(tensorfold:generation_tokens_total[1h])) / (sum(increase(tensorfold:request_decode_seconds_sum[1h])) > 0)",
+     "sent": "sum(increase(tensorfold:generation_tokens_total[1h])) / (sum(increase(tensorfold:request_decode_seconds_sum[1h])) > 0)",
+     "series": 1,
+     "points": 269
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0003",
+   "title": "Tokens a round (1 h)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(increase(tensorfold:generation_tokens_total[1h])) / (sum(increase(tensorfold:decode_rounds_total[1h])) > 0)",
+     "sent": "sum(increase(tensorfold:generation_tokens_total[1h])) / (sum(increase(tensorfold:decode_rounds_total[1h])) > 0)",
+     "series": 1,
+     "points": 269
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0004",
+   "title": "Accepted / drafted (1 h)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "100 * sum(increase(tensorfold:mtp_accepted_total[1h])) / (sum(increase(tensorfold:mtp_drafted_total[1h])) > 0)",
+     "sent": "100 * sum(increase(tensorfold:mtp_accepted_total[1h])) / (sum(increase(tensorfold:mtp_drafted_total[1h])) > 0)",
+     "series": 1,
+     "points": 269
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0005",
+   "title": "Decode ms a round (1 h)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "1000 * sum(increase(tensorfold:request_decode_seconds_sum[1h])) / ((sum(increase(tensorfold:decode_rounds_total[1h])) - sum(increase(tensorfold:request_decode_seconds_count[1h]))) > 0)",
+     "sent": "1000 * sum(increase(tensorfold:request_decode_seconds_sum[1h])) / ((sum(increase(tensorfold:decode_rounds_total[1h])) - sum(increase(tensorfold:request_decode_seconds_count[1h]))) > 0)",
+     "series": 1,
+     "points": 269
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0006",
+   "title": "Prefill tok/s, uncached (1 h)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "(sum(increase(tensorfold:prompt_tokens_total[1h])) - sum(increase(tensorfold:prompt_tokens_cached_total[1h]))) / (sum(increase(tensorfold:request_prefill_seconds_sum[1h])) > 0)",
+     "sent": "(sum(increase(tensorfold:prompt_tokens_total[1h])) - sum(increase(tensorfold:prompt_tokens_cached_total[1h]))) / (sum(increase(tensorfold:request_prefill_seconds_sum[1h])) > 0)",
+     "series": 1,
+     "points": 269
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0007",
+   "title": "Cached share of prompt tokens (1 h)",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "100 * sum(increase(tensorfold:prompt_tokens_cached_total[1h])) / (sum(increase(tensorfold:prompt_tokens_total[1h])) > 0)",
+     "sent": "100 * sum(increase(tensorfold:prompt_tokens_cached_total[1h])) / (sum(increase(tensorfold:prompt_tokens_total[1h])) > 0)",
+     "series": 1,
+     "points": 269
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0008",
+   "title": "Decode tok/s a stream, live against benchmark",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:generation_tokens_total[5m])) / (sum(rate(tensorfold:request_decode_seconds_sum[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:generation_tokens_total[5m])) / (sum(rate(tensorfold:request_decode_seconds_sum[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "label_replace(vector(128), \"ref\", \"bench: sampled code-like x1 (106-135)\", \"\", \"\")",
+     "sent": "label_replace(vector(128), \"ref\", \"bench: sampled code-like x1 (106-135)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(60), \"ref\", \"bench: sampled prose x1 (59-60)\", \"\", \"\")",
+     "sent": "label_replace(vector(60), \"ref\", \"bench: sampled prose x1 (59-60)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(55), \"ref\", \"bench: sampled x4, each stream (220 total)\", \"\", \"\")",
+     "sent": "label_replace(vector(55), \"ref\", \"bench: sampled x4, each stream (220 total)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(74), \"ref\", \"bench: greedy at 300K depth\", \"\", \"\")",
+     "sent": "label_replace(vector(74), \"ref\", \"bench: greedy at 300K depth\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0009",
+   "title": "Generated tok/s, all streams (wall clock)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:generation_tokens_total[5m]))",
+     "sent": "sum(rate(tensorfold:generation_tokens_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "label_replace(vector(219.8), \"ref\", \"bench: sampled x4 total\", \"\", \"\")",
+     "sent": "label_replace(vector(219.8), \"ref\", \"bench: sampled x4 total\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(168.4), \"ref\", \"bench: sampled x2 total\", \"\", \"\")",
+     "sent": "label_replace(vector(168.4), \"ref\", \"bench: sampled x2 total\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(129.7), \"ref\", \"bench: streamed x1\", \"\", \"\")",
+     "sent": "label_replace(vector(129.7), \"ref\", \"bench: streamed x1\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(138), \"ref\", \"bench: 8 streams, dec8 cell (136-138.5)\", \"\", \"\")",
+     "sent": "label_replace(vector(138), \"ref\", \"bench: 8 streams, dec8 cell (136-138.5)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(117), \"ref\", \"bench: 4 streams, dec4 cell (116-119)\", \"\", \"\")",
+     "sent": "label_replace(vector(117), \"ref\", \"bench: 4 streams, dec4 cell (116-119)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0010",
+   "title": "Decode ms a round, live against benchmark",
+   "type": "line",
+   "queries": [
+    {
+     "query": "1000 * sum(rate(tensorfold:request_decode_seconds_sum[5m])) / ((sum(rate(tensorfold:decode_rounds_total[5m])) - sum(rate(tensorfold:request_decode_seconds_count[5m]))) > 0)",
+     "sent": "1000 * sum(rate(tensorfold:request_decode_seconds_sum[5m])) / ((sum(rate(tensorfold:decode_rounds_total[5m])) - sum(rate(tensorfold:request_decode_seconds_count[5m]))) > 0)",
+     "series": 1,
+     "points": 215
+    },
+    {
+     "query": "label_replace(vector(42.6), \"ref\", \"bench: x1 code-like (5.5 drafted a round)\", \"\", \"\")",
+     "sent": "label_replace(vector(42.6), \"ref\", \"bench: x1 code-like (5.5 drafted a round)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(30.2), \"ref\", \"bench: x1 prose (1.5 drafted a round)\", \"\", \"\")",
+     "sent": "label_replace(vector(30.2), \"ref\", \"bench: x1 prose (1.5 drafted a round)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(66.2), \"ref\", \"bench: x4 (chunk gap p50)\", \"\", \"\")",
+     "sent": "label_replace(vector(66.2), \"ref\", \"bench: x4 (chunk gap p50)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(87), \"ref\", \"bench: 8 streams (dec8 round)\", \"\", \"\")",
+     "sent": "label_replace(vector(87), \"ref\", \"bench: 8 streams (dec8 round)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0011",
+   "title": "Tokens a round, live against benchmark",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:generation_tokens_total[5m])) / (sum(rate(tensorfold:decode_rounds_total[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:generation_tokens_total[5m])) / (sum(rate(tensorfold:decode_rounds_total[5m])) > 0)",
+     "series": 1,
+     "points": 215
+    },
+    {
+     "query": "label_replace(vector(5.4), \"ref\", \"bench: x1 code-like (4.2-6.1)\", \"\", \"\")",
+     "sent": "label_replace(vector(5.4), \"ref\", \"bench: x1 code-like (4.2-6.1)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(1.8), \"ref\", \"bench: x1 prose\", \"\", \"\")",
+     "sent": "label_replace(vector(1.8), \"ref\", \"bench: x1 prose\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(3.7), \"ref\", \"bench: x4, each stream\", \"\", \"\")",
+     "sent": "label_replace(vector(3.7), \"ref\", \"bench: x4, each stream\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0012",
+   "title": "Drafted rows a round",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:mtp_drafted_total[5m])) / (sum(rate(tensorfold:decode_rounds_total[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:mtp_drafted_total[5m])) / (sum(rate(tensorfold:decode_rounds_total[5m])) > 0)",
+     "series": 1,
+     "points": 215
+    },
+    {
+     "query": "label_replace(vector(5.5), \"ref\", \"bench: x1 code-like\", \"\", \"\")",
+     "sent": "label_replace(vector(5.5), \"ref\", \"bench: x1 code-like\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(1.5), \"ref\", \"bench: x1 prose\", \"\", \"\")",
+     "sent": "label_replace(vector(1.5), \"ref\", \"bench: x1 prose\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(3.0), \"ref\", \"bench: x4, each stream\", \"\", \"\")",
+     "sent": "label_replace(vector(3.0), \"ref\", \"bench: x4, each stream\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0013",
+   "title": "Accepted / drafted, live against benchmark",
+   "type": "line",
+   "queries": [
+    {
+     "query": "100 * sum(rate(tensorfold:mtp_accepted_total[5m])) / (sum(rate(tensorfold:mtp_drafted_total[5m])) > 0)",
+     "sent": "100 * sum(rate(tensorfold:mtp_accepted_total[5m])) / (sum(rate(tensorfold:mtp_drafted_total[5m])) > 0)",
+     "series": 1,
+     "points": 215
+    },
+    {
+     "query": "label_replace(vector(81), \"ref\", \"bench: x1 code-like (73-87)\", \"\", \"\")",
+     "sent": "label_replace(vector(81), \"ref\", \"bench: x1 code-like (73-87)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(53), \"ref\", \"bench: x1 prose (51-54)\", \"\", \"\")",
+     "sent": "label_replace(vector(53), \"ref\", \"bench: x1 prose (51-54)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(90), \"ref\", \"bench: x4\", \"\", \"\")",
+     "sent": "label_replace(vector(90), \"ref\", \"bench: x4\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0014",
+   "title": "Prefill tok/s on uncached tokens, live against benchmark",
+   "type": "line",
+   "queries": [
+    {
+     "query": "(sum(rate(tensorfold:prompt_tokens_total[5m])) - sum(rate(tensorfold:prompt_tokens_cached_total[5m]))) / (sum(rate(tensorfold:request_prefill_seconds_sum[5m])) > 0)",
+     "sent": "(sum(rate(tensorfold:prompt_tokens_total[5m])) - sum(rate(tensorfold:prompt_tokens_cached_total[5m]))) / (sum(rate(tensorfold:request_prefill_seconds_sum[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "label_replace(vector(2105), \"ref\", \"bench: cold 32K\", \"\", \"\")",
+     "sent": "label_replace(vector(2105), \"ref\", \"bench: cold 32K\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(2041), \"ref\", \"bench: cold 96K\", \"\", \"\")",
+     "sent": "label_replace(vector(2041), \"ref\", \"bench: cold 96K\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(1680), \"ref\", \"bench: 8K turn, 1.8K uncached tail\", \"\", \"\")",
+     "sent": "label_replace(vector(1680), \"ref\", \"bench: 8K turn, 1.8K uncached tail\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0015",
+   "title": "Time to first token: mean, and its prompt-pass part",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:time_to_first_token_seconds_sum[5m])) / (sum(rate(tensorfold:time_to_first_token_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:time_to_first_token_seconds_sum[5m])) / (sum(rate(tensorfold:time_to_first_token_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "sum(rate(tensorfold:request_prefill_seconds_sum[5m])) / (sum(rate(tensorfold:request_prefill_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:request_prefill_seconds_sum[5m])) / (sum(rate(tensorfold:request_prefill_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "(sum(rate(tensorfold:time_to_first_token_seconds_sum[5m])) - sum(rate(tensorfold:request_prefill_seconds_sum[5m]))) / (sum(rate(tensorfold:time_to_first_token_seconds_count[5m])) > 0)",
+     "sent": "(sum(rate(tensorfold:time_to_first_token_seconds_sum[5m])) - sum(rate(tensorfold:request_prefill_seconds_sum[5m]))) / (sum(rate(tensorfold:time_to_first_token_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0016",
+   "title": "TTFT per 1,000 uncached prompt tokens",
+   "type": "line",
+   "queries": [
+    {
+     "query": "1000 * sum(rate(tensorfold:time_to_first_token_seconds_sum[5m])) / ((sum(rate(tensorfold:prompt_tokens_total[5m])) - sum(rate(tensorfold:prompt_tokens_cached_total[5m]))) > 0)",
+     "sent": "1000 * sum(rate(tensorfold:time_to_first_token_seconds_sum[5m])) / ((sum(rate(tensorfold:prompt_tokens_total[5m])) - sum(rate(tensorfold:prompt_tokens_cached_total[5m]))) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "label_replace(vector(0.475), \"ref\", \"bench: cold prefill at 2,105 tok/s\", \"\", \"\")",
+     "sent": "label_replace(vector(0.475), \"ref\", \"bench: cold prefill at 2,105 tok/s\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0017",
+   "title": "Prompt depth: tokens a request",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_tokens_total[5m])) / (sum(rate(tensorfold:request_latency_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:prompt_tokens_total[5m])) / (sum(rate(tensorfold:request_latency_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "(sum(rate(tensorfold:prompt_tokens_total[5m])) - sum(rate(tensorfold:prompt_tokens_cached_total[5m]))) / (sum(rate(tensorfold:request_latency_seconds_count[5m])) > 0)",
+     "sent": "(sum(rate(tensorfold:prompt_tokens_total[5m])) - sum(rate(tensorfold:prompt_tokens_cached_total[5m]))) / (sum(rate(tensorfold:request_latency_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "sum(rate(tensorfold:generation_tokens_total[5m])) / (sum(rate(tensorfold:request_latency_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:generation_tokens_total[5m])) / (sum(rate(tensorfold:request_latency_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0018",
+   "title": "Streams running and waiting",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(tensorfold:requests_running)",
+     "sent": "sum(tensorfold:requests_running)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(tensorfold:requests_waiting)",
+     "sent": "sum(tensorfold:requests_waiting)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "label_replace(vector(4), \"ref\", \"bench: the sampled probe's widest burst\", \"\", \"\")",
+     "sent": "label_replace(vector(4), \"ref\", \"bench: the sampled probe's widest burst\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "label_replace(vector(8), \"ref\", \"bench: the widest suite cell (dec8)\", \"\", \"\")",
+     "sent": "label_replace(vector(8), \"ref\", \"bench: the widest suite cell (dec8)\", \"\", \"\")",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Benchmark vs live",
+   "id": "Panel_R0019",
+   "title": "Tokens each live stream holds",
+   "type": "line",
+   "queries": [
+    {
+     "query": "tensorfold:kv_cache_usage_ratio * 524288",
+     "sent": "tensorfold:kv_cache_usage_ratio * 524288",
+     "series": 8,
+     "points": 712
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0020",
+   "title": "Requests finished a minute",
+   "type": "line",
+   "queries": [
+    {
+     "query": "60 * sum(rate(tensorfold:request_latency_seconds_count[5m]))",
+     "sent": "60 * sum(rate(tensorfold:request_latency_seconds_count[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0021",
+   "title": "Mean seconds a request: latency, TTFT, prompt pass, decode",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:request_latency_seconds_sum[5m])) / (sum(rate(tensorfold:request_latency_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:request_latency_seconds_sum[5m])) / (sum(rate(tensorfold:request_latency_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "sum(rate(tensorfold:time_to_first_token_seconds_sum[5m])) / (sum(rate(tensorfold:time_to_first_token_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:time_to_first_token_seconds_sum[5m])) / (sum(rate(tensorfold:time_to_first_token_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "sum(rate(tensorfold:request_prefill_seconds_sum[5m])) / (sum(rate(tensorfold:request_prefill_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:request_prefill_seconds_sum[5m])) / (sum(rate(tensorfold:request_prefill_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "sum(rate(tensorfold:request_decode_seconds_sum[5m])) / (sum(rate(tensorfold:request_decode_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:request_decode_seconds_sum[5m])) / (sum(rate(tensorfold:request_decode_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0022",
+   "title": "Observations a second, by histogram",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:request_latency_seconds_count[5m]))",
+     "sent": "sum(rate(tensorfold:request_latency_seconds_count[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:time_to_first_token_seconds_count[5m]))",
+     "sent": "sum(rate(tensorfold:time_to_first_token_seconds_count[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:request_prefill_seconds_count[5m]))",
+     "sent": "sum(rate(tensorfold:request_prefill_seconds_count[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:request_decode_seconds_count[5m]))",
+     "sent": "sum(rate(tensorfold:request_decode_seconds_count[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:request_time_per_output_token_seconds_count[5m]))",
+     "sent": "sum(rate(tensorfold:request_time_per_output_token_seconds_count[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0023",
+   "title": "Busy seconds a second, by histogram sum",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:request_latency_seconds_sum[5m]))",
+     "sent": "sum(rate(tensorfold:request_latency_seconds_sum[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:time_to_first_token_seconds_sum[5m]))",
+     "sent": "sum(rate(tensorfold:time_to_first_token_seconds_sum[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:request_prefill_seconds_sum[5m]))",
+     "sent": "sum(rate(tensorfold:request_prefill_seconds_sum[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:request_decode_seconds_sum[5m]))",
+     "sent": "sum(rate(tensorfold:request_decode_seconds_sum[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0024",
+   "title": "Time per output token: mean, p50, p95",
+   "type": "line",
+   "queries": [
+    {
+     "query": "1000 * sum(rate(tensorfold:request_time_per_output_token_seconds_sum[5m])) / (sum(rate(tensorfold:request_time_per_output_token_seconds_count[5m])) > 0)",
+     "sent": "1000 * sum(rate(tensorfold:request_time_per_output_token_seconds_sum[5m])) / (sum(rate(tensorfold:request_time_per_output_token_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 215
+    },
+    {
+     "query": "1000 * histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_time_per_output_token_seconds_bucket[5m])))",
+     "sent": "1000 * histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_time_per_output_token_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 215
+    },
+    {
+     "query": "1000 * histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_time_per_output_token_seconds_bucket[5m])))",
+     "sent": "1000 * histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_time_per_output_token_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 215
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0025",
+   "title": "Time to first token quantiles",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:time_to_first_token_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0026",
+   "title": "Decode seconds quantiles",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_decode_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_decode_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:request_decode_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:request_decode_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:request_decode_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:request_decode_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0027",
+   "title": "Prompt pass seconds quantiles",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_prefill_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_prefill_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:request_prefill_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:request_prefill_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:request_prefill_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:request_prefill_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0028",
+   "title": "Request latency quantiles",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.99, sum by (le) (rate(tensorfold:request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0029",
+   "title": "Tokens a second: prompt, cached, generated",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_tokens_total[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_tokens_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_tokens_cached_total[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_tokens_cached_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:generation_tokens_total[5m]))",
+     "sent": "sum(rate(tensorfold:generation_tokens_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0030",
+   "title": "Generated tokens held by live streams",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(tensorfold:generation_tokens_running)",
+     "sent": "sum(tensorfold:generation_tokens_running)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Throughput & latency (means)",
+   "id": "Panel_R0031",
+   "title": "Energy (TF_DS_ENERGY)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:joules_total[5m]))",
+     "sent": "sum(rate(tensorfold:joules_total[5m]))",
+     "series": 0,
+     "points": 0
+    }
+   ],
+   "status": "empty"
+  },
+  {
+   "tab": "Cache causes & resume depth",
+   "id": "Panel_R0032",
+   "title": "Memory misses by cause",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_misses_no_prefix[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_misses_no_prefix[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_misses_tail_window[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_misses_tail_window[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_misses_stale[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_misses_stale[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Cache causes & resume depth",
+   "id": "Panel_R0033",
+   "title": "Keeps refused by cause",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_refused_budget[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_refused_budget[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_refused_restores[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_refused_restores[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Cache causes & resume depth",
+   "id": "Panel_R0034",
+   "title": "Evictions by cause",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_evicted_superseded[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_evicted_superseded[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_evicted_lru[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_evicted_lru[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Cache causes & resume depth",
+   "id": "Panel_R0035",
+   "title": "Failures by cause",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_failed_save[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_failed_save[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_failed_restore[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_failed_restore[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Cache causes & resume depth",
+   "id": "Panel_R0036",
+   "title": "Resume depth of prompt passes",
+   "type": "line",
+   "queries": [
+    {
+     "query": "histogram_quantile(0.1, sum by (le) (rate(tensorfold:prompt_cache_resume_depth_percent_bucket[5m])))",
+     "sent": "histogram_quantile(0.1, sum by (le) (rate(tensorfold:prompt_cache_resume_depth_percent_bucket[5m])))",
+     "series": 1,
+     "points": 216
+    },
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:prompt_cache_resume_depth_percent_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:prompt_cache_resume_depth_percent_bucket[5m])))",
+     "series": 1,
+     "points": 216
+    },
+    {
+     "query": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:prompt_cache_resume_depth_percent_bucket[5m])))",
+     "sent": "histogram_quantile(0.9, sum by (le) (rate(tensorfold:prompt_cache_resume_depth_percent_bucket[5m])))",
+     "series": 1,
+     "points": 216
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_resume_depth_percent_sum[5m])) / (sum(rate(tensorfold:prompt_cache_resume_depth_percent_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:prompt_cache_resume_depth_percent_sum[5m])) / (sum(rate(tensorfold:prompt_cache_resume_depth_percent_count[5m])) > 0)",
+     "series": 1,
+     "points": 216
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Cache causes & resume depth",
+   "id": "Panel_R0037",
+   "title": "Prompt passes with a resume depth",
+   "type": "line",
+   "queries": [
+    {
+     "query": "60 * sum(rate(tensorfold:prompt_cache_resume_depth_percent_count[5m]))",
+     "sent": "60 * sum(rate(tensorfold:prompt_cache_resume_depth_percent_count[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Cache causes & resume depth",
+   "id": "Panel_R0038",
+   "title": "Chats continued without their own turn state",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_chats_continued[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_chats_continued[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:prompt_cache_chats_continued_prefill_tokens[5m]))",
+     "sent": "sum(rate(tensorfold:prompt_cache_chats_continued_prefill_tokens[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram row cache",
+   "id": "Panel_R0039",
+   "title": "Row-cache has() calls",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:engram_rowcache_has_total[5m]))",
+     "sent": "sum(rate(tensorfold:engram_rowcache_has_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:engram_rowcache_fast_total[5m]))",
+     "sent": "sum(rate(tensorfold:engram_rowcache_fast_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:engram_rowcache_lock_total[5m]))",
+     "sent": "sum(rate(tensorfold:engram_rowcache_lock_total[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram row cache",
+   "id": "Panel_R0040",
+   "title": "Share of has() calls answered without the lock",
+   "type": "line",
+   "queries": [
+    {
+     "query": "100 * sum(rate(tensorfold:engram_rowcache_fast_total[5m])) / (sum(rate(tensorfold:engram_rowcache_has_total[5m])) > 0)",
+     "sent": "100 * sum(rate(tensorfold:engram_rowcache_fast_total[5m])) / (sum(rate(tensorfold:engram_rowcache_has_total[5m])) > 0)",
+     "series": 0,
+     "points": 0
+    }
+   ],
+   "status": "empty"
+  },
+  {
+   "tab": "Engram row cache",
+   "id": "Panel_R0041",
+   "title": "Engram read: mean seconds",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:engram_lookup_seconds_sum[5m])) / (sum(rate(tensorfold:engram_lookup_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:engram_lookup_seconds_sum[5m])) / (sum(rate(tensorfold:engram_lookup_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 218
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Engram row cache",
+   "id": "Panel_R0042",
+   "title": "Engram read seconds a second",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:engram_lookup_seconds_sum[5m]))",
+     "sent": "sum(rate(tensorfold:engram_lookup_seconds_sum[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard by rank",
+   "id": "Panel_R0043",
+   "title": "Cross-part copies by rank",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_copies{rank=~\"$rank\"}[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_copies{rank=~\".*\"}[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard by rank",
+   "id": "Panel_R0044",
+   "title": "Cross-part copy bytes by rank",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_copy_bytes{rank=~\"$rank\"}[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_copy_bytes{rank=~\".*\"}[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard by rank",
+   "id": "Panel_R0045",
+   "title": "Decode rounds that fetched owners' rows, by rank",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_fetch_rounds{rank=~\"$rank\"}[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_fetch_rounds{rank=~\".*\"}[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard by rank",
+   "id": "Panel_R0046",
+   "title": "Decode rounds attended as an owner, by rank",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_owner_rounds{rank=~\"$rank\"}[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_owner_rounds{rank=~\".*\"}[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard by rank",
+   "id": "Panel_R0047",
+   "title": "Prompt fetch: rows unfolded, by rank",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_picks{rank=~\"$rank\"}[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_picks{rank=~\".*\"}[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard by rank",
+   "id": "Panel_R0048",
+   "title": "Prompt fetch: compressed rows, by rank",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_rows{rank=~\"$rank\"}[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_rows{rank=~\".*\"}[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard by rank",
+   "id": "Panel_R0049",
+   "title": "Prompt fetch: host reads waited on, by rank",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_syncs{rank=~\"$rank\"}[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:kv_shard_rank_prompt_syncs{rank=~\".*\"}[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard by rank",
+   "id": "Panel_R0050",
+   "title": "Prompt fetch: rows unfolded, all ranks",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:kv_shard_prompt_picks[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_prompt_picks[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "KV shard by rank",
+   "id": "Panel_R0051",
+   "title": "Kept states staged before their rows changed",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:kv_shard_staged[5m]))",
+     "sent": "sum(rate(tensorfold:kv_shard_staged[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "vLLM-name copies",
+   "id": "Panel_R0052",
+   "title": "About this tab",
+   "type": "markdown",
+   "queries": [],
+   "status": "static"
+  },
+  {
+   "tab": "vLLM-name copies",
+   "id": "Panel_R0053",
+   "title": "num_requests_running / num_requests_waiting",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(tensorfold:num_requests_running)",
+     "sent": "sum(tensorfold:num_requests_running)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(tensorfold:num_requests_waiting)",
+     "sent": "sum(tensorfold:num_requests_waiting)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "vLLM-name copies",
+   "id": "Panel_R0054",
+   "title": "kv_cache_usage_perc by stream",
+   "type": "line",
+   "queries": [
+    {
+     "query": "100 * tensorfold:kv_cache_usage_perc",
+     "sent": "100 * tensorfold:kv_cache_usage_perc",
+     "series": 8,
+     "points": 712
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "vLLM-name copies",
+   "id": "Panel_R0055",
+   "title": "spec_decode draft and accepted tokens",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:spec_decode_num_draft_tokens_total[5m]))",
+     "sent": "sum(rate(tensorfold:spec_decode_num_draft_tokens_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(rate(tensorfold:spec_decode_num_accepted_tokens_total[5m]))",
+     "sent": "sum(rate(tensorfold:spec_decode_num_accepted_tokens_total[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "100 * sum(rate(tensorfold:spec_decode_num_accepted_tokens_total[5m])) / (sum(rate(tensorfold:spec_decode_num_draft_tokens_total[5m])) > 0)",
+     "sent": "100 * sum(rate(tensorfold:spec_decode_num_accepted_tokens_total[5m])) / (sum(rate(tensorfold:spec_decode_num_draft_tokens_total[5m])) > 0)",
+     "series": 1,
+     "points": 215
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "vLLM-name copies",
+   "id": "Panel_R0056",
+   "title": "e2e_request_latency_seconds: mean, p50, p95",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:e2e_request_latency_seconds_sum[5m])) / (sum(rate(tensorfold:e2e_request_latency_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:e2e_request_latency_seconds_sum[5m])) / (sum(rate(tensorfold:e2e_request_latency_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:e2e_request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:e2e_request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:e2e_request_latency_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:e2e_request_latency_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "vLLM-name copies",
+   "id": "Panel_R0057",
+   "title": "request_decode_time_seconds: mean, p50, p95",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:request_decode_time_seconds_sum[5m])) / (sum(rate(tensorfold:request_decode_time_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:request_decode_time_seconds_sum[5m])) / (sum(rate(tensorfold:request_decode_time_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_decode_time_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_decode_time_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_decode_time_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_decode_time_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "vLLM-name copies",
+   "id": "Panel_R0058",
+   "title": "request_prefill_time_seconds: mean, p50, p95",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(rate(tensorfold:request_prefill_time_seconds_sum[5m])) / (sum(rate(tensorfold:request_prefill_time_seconds_count[5m])) > 0)",
+     "sent": "sum(rate(tensorfold:request_prefill_time_seconds_sum[5m])) / (sum(rate(tensorfold:request_prefill_time_seconds_count[5m])) > 0)",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_prefill_time_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.5, sum by (le) (rate(tensorfold:request_prefill_time_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    },
+    {
+     "query": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_prefill_time_seconds_bucket[5m])))",
+     "sent": "histogram_quantile(0.95, sum by (le) (rate(tensorfold:request_prefill_time_seconds_bucket[5m])))",
+     "series": 1,
+     "points": 217
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0059",
+   "title": "About this tab",
+   "type": "markdown",
+   "queries": [],
+   "status": "static"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0060",
+   "title": "Scrape target up, by host",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name) (up{service_name=\"tensorfold\"})",
+     "sent": "max by (host_name) (up{service_name=\"tensorfold\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0061",
+   "title": "Samples a scrape, by host",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name) (scrape_samples_scraped{service_name=\"tensorfold\"})",
+     "sent": "max by (host_name) (scrape_samples_scraped{service_name=\"tensorfold\"})",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "max by (host_name) (scrape_samples_post_metric_relabeling{service_name=\"tensorfold\"})",
+     "sent": "max by (host_name) (scrape_samples_post_metric_relabeling{service_name=\"tensorfold\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0062",
+   "title": "Scrape duration and new series",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name) (scrape_duration_seconds{service_name=\"tensorfold\"})",
+     "sent": "max by (host_name) (scrape_duration_seconds{service_name=\"tensorfold\"})",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "max by (host_name) (scrape_series_added{service_name=\"tensorfold\"})",
+     "sent": "max by (host_name) (scrape_series_added{service_name=\"tensorfold\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0063",
+   "title": "Engine restarts in the last hour",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(resets(tensorfold:engram_lookup_seconds_count[1h]))",
+     "sent": "sum(resets(tensorfold:engram_lookup_seconds_count[1h]))",
+     "series": 1,
+     "points": 289
+    },
+    {
+     "query": "sum(changes(tensorfold:device_memory_peak_bytes[1h]))",
+     "sent": "sum(changes(tensorfold:device_memory_peak_bytes[1h]))",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0064",
+   "title": "Device memory: now and peak",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum(tensorfold:device_memory_bytes)",
+     "sent": "sum(tensorfold:device_memory_bytes)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "max(tensorfold:device_memory_peak_bytes)",
+     "sent": "max(tensorfold:device_memory_peak_bytes)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0065",
+   "title": "Pair state",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max(tensorfold:pair_broken)",
+     "sent": "max(tensorfold:pair_broken)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "max(tensorfold:pair_stalled)",
+     "sent": "max(tensorfold:pair_stalled)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(increase(tensorfold:pair_failed[5m]))",
+     "sent": "sum(increase(tensorfold:pair_failed[5m]))",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "sum(increase(tensorfold:service_refused[5m]))",
+     "sent": "sum(increase(tensorfold:service_refused[5m]))",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0066",
+   "title": "Engine thread busy without progress",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max(tensorfold:pair_busy_ms)",
+     "sent": "max(tensorfold:pair_busy_ms)",
+     "series": 1,
+     "points": 286
+    },
+    {
+     "query": "max(tensorfold:pair_stall_ms)",
+     "sent": "max(tensorfold:pair_stall_ms)",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0067",
+   "title": "Disk tier by rank: stored bytes",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (tensorfold:spill_stored_bytes{rank=~\"$rank\"})",
+     "sent": "sum by (rank) (tensorfold:spill_stored_bytes{rank=~\".*\"})",
+     "series": 2,
+     "points": 572
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0068",
+   "title": "Disk tier by rank: points and blocks",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (tensorfold:spill_points{rank=~\"$rank\"})",
+     "sent": "sum by (rank) (tensorfold:spill_points{rank=~\".*\"})",
+     "series": 2,
+     "points": 572
+    },
+    {
+     "query": "sum by (rank) (tensorfold:spill_blocks{rank=~\"$rank\"})",
+     "sent": "sum by (rank) (tensorfold:spill_blocks{rank=~\".*\"})",
+     "series": 2,
+     "points": 572
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Ranks, scrape & restarts",
+   "id": "Panel_R0069",
+   "title": "Disk tier by rank: reads and writes",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (rank) (rate(tensorfold:spill_reads{rank=~\"$rank\"}[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:spill_reads{rank=~\".*\"}[5m]))",
+     "series": 2,
+     "points": 572
+    },
+    {
+     "query": "sum by (rank) (rate(tensorfold:spill_writes_committed{rank=~\"$rank\"}[5m]))",
+     "sent": "sum by (rank) (rate(tensorfold:spill_writes_committed{rank=~\".*\"}[5m]))",
+     "series": 2,
+     "points": 572
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Any series",
+   "id": "Panel_R0070",
+   "title": "About this tab",
+   "type": "markdown",
+   "queries": [],
+   "status": "static"
+  },
+  {
+   "tab": "Any series",
+   "id": "Panel_R0071",
+   "title": "$series as stored",
+   "type": "line",
+   "queries": [
+    {
+     "query": "{__name__=\"$series\"}",
+     "sent": "{__name__=\"tensorfold:requests_running\"}",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Any series",
+   "id": "Panel_R0072",
+   "title": "$series as a rate (counters)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "rate({__name__=\"$series\"}[5m])",
+     "sent": "rate({__name__=\"tensorfold:requests_running\"}[5m])",
+     "series": 1,
+     "points": 286
+    }
+   ],
+   "status": "data"
+  }
+ ]
+}

@@ -1,0 +1,177 @@
+fx1L r0 producer excess: n 19090 p50 0.0 p90 50.9 p99 170.2 p99.9 314.0 max 131674.1 us; mean of positive part 28.25 us/transfer; >100us 747 >500us 5 >2ms 3
+fx1L r0 ring excess: n 19090 p50 0.0 p90 13.8 p99 157.8 p99.9 278.2 max 434.9 us; mean of positive part 7.78 us/transfer; >100us 416 >500us 0 >2ms 0
+    attn_gather  n   7403 producer excess p90/p99/p99.9    8.9/  99.5/  289.3 us | ring excess p90/p99/p99.9   13.1/ 131.8/  190.9 us | mean ring-excess>0 6.59
+    engram       n    365 producer excess p90/p99/p99.9    7.7/ 120.2/ 2924.5 us | ring excess p90/p99/p99.9   16.9/ 118.0/  195.8 us | mean ring-excess>0 8.02
+    head         n    186 producer excess p90/p99/p99.9   19.9/ 192.6/  379.8 us | ring excess p90/p99/p99.9   81.1/ 321.0/  434.9 us | mean ring-excess>0 25.01
+    kv           n   1488 producer excess p90/p99/p99.9    9.0/  66.3/  161.8 us | ring excess p90/p99/p99.9   10.5/ 108.6/  175.8 us | mean ring-excess>0 5.14
+    moe_gather   n   7422 producer excess p90/p99/p99.9   88.7/ 203.7/  337.5 us | ring excess p90/p99/p99.9   15.5/ 164.8/  310.9 us | mean ring-excess>0 9.23
+    pass         n   2226 producer excess p90/p99/p99.9   36.6/ 155.4/  247.4 us | ring excess p90/p99/p99.9    7.8/ 163.9/  299.4 us | mean ring-excess>0 7.22
+fx1L r1 producer excess: n 19117 p50 0.0 p90 54.9 p99 175.7 p99.9 315.6 max 131789.2 us; mean of positive part 29.01 us/transfer; >100us 829 >500us 3 >2ms 2
+fx1L r1 ring excess: n 19117 p50 0.0 p90 12.4 p99 145.7 p99.9 237.4 max 2799.3 us; mean of positive part 6.50 us/transfer; >100us 271 >500us 1 >2ms 1
+    attn_gather  n   7403 producer excess p90/p99/p99.9    9.6/ 122.6/  246.2 us | ring excess p90/p99/p99.9   11.5/  94.7/  194.3 us | mean ring-excess>0 5.43
+    engram       n    365 producer excess p90/p99/p99.9   15.9/ 125.0/  814.4 us | ring excess p90/p99/p99.9    7.1/  65.8/ 2799.3 us | mean ring-excess>0 11.76
+    head         n    186 producer excess p90/p99/p99.9   40.5/ 318.3/  374.0 us | ring excess p90/p99/p99.9   27.5/ 191.2/  447.3 us | mean ring-excess>0 15.31
+    kv           n   1515 producer excess p90/p99/p99.9   12.9/  98.3/  161.3 us | ring excess p90/p99/p99.9   20.2/  87.6/  189.1 us | mean ring-excess>0 8.15
+    moe_gather   n   7422 producer excess p90/p99/p99.9   89.0/ 205.4/  341.2 us | ring excess p90/p99/p99.9   12.5/ 158.3/  288.8 us | mean ring-excess>0 7.35
+    pass         n   2226 producer excess p90/p99/p99.9   41.8/ 180.4/  394.0 us | ring excess p90/p99/p99.9    6.8/ 132.7/  179.8 us | mean ring-excess>0 4.49
+  producer excess > 100 us: r0 747, r1 829, both 450
+  where: [(('P', 'other', 0), 44), (('F', 'moe_gather', 33), 34), (('F', 'moe_gather', 1), 33), (('F', 'moe_gather', 31), 26), (('F', 'attn_gather', 0), 25), (('P', 'other', 2), 25), (('P', 'other', 1), 25), (('F', 'moe_gather', 38), 25), (('F', 'moe_gather', 17), 24), (('F', 'moe_gather', 2), 23), (('F', 'moe_gather', 24), 23), (('F', 'moe_gather', 0), 23), (('F', 'moe_gather', 27), 23), (('F', 'moe_gather', 16), 23)]
+     seq 12 unit 2 F attn_gather L0 rows 6: excess r0 489 r1 452 us (median 338)
+     seq 100 unit 2 F attn_gather L39 rows 6: excess r0 -19 r1 111 us (median 216)
+     seq 116 unit 4 F engram L1 rows 4: excess r0 2925 r1 125 us (median 233)
+     seq 140 unit 4 F moe_gather L11 rows 4: excess r0 277 r1 104 us (median 450)
+     seq 148 unit 4 F moe_gather L14 rows 4: excess r0 103 r1 -26 us (median 440)
+     seq 156 unit 4 F moe_gather L18 rows 4: excess r0 208 r1 35 us (median 344)
+     seq 172 unit 4 F moe_gather L25 rows 4: excess r0 22 r1 167 us (median 388)
+     seq 224 unit 6 F moe_gather L2 rows 3: excess r0 9 r1 112 us (median 419)
+     seq 252 unit 6 F attn_gather L15 rows 3: excess r0 -22 r1 119 us (median 207)
+     seq 320 unit 8 F attn_gather L0 rows 6: excess r0 126 r1 113 us (median 466)
+     seq 340 unit 8 F moe_gather L8 rows 6: excess r0 147 r1 154 us (median 602)
+     seq 344 unit 8 F moe_gather L10 rows 6: excess r0 132 r1 -35 us (median 548)
+     seq 352 unit 8 F kv L14 rows 6: excess r0 210 r1 7 us (median 209)
+     seq 376 unit 8 F moe_gather L24 rows 6: excess r0 117 r1 110 us (median 515)
+     seq 396 unit 8 F moe_gather L33 rows 6: excess r0 143 r1 -82 us (median 639)
+     seq 408 unit 8 F attn_gather L39 rows 6: excess r0 22 r1 112 us (median 216)
+     seq 424 unit 10 F moe_gather L0 rows 5: excess r0 251 r1 106 us (median 717)
+     seq 452 unit 10 F attn_gather L13 rows 5: excess r0 277 r1 10 us (median 212)
+     seq 520 unit 11 P other L-1 rows 1: excess r0 -7 r1 204 us (median 1222)
+     seq 680 unit 14 F moe_gather L22 rows 3: excess r0 173 r1 -7 us (median 297)
+     seq 844 unit 18 F moe_gather L3 rows 7: excess r0 182 r1 169 us (median 695)
+     seq 904 unit 18 F moe_gather L30 rows 7: excess r0 -28 r1 152 us (median 681)
+     seq 912 unit 18 F attn_gather L34 rows 7: excess r0 -13 r1 153 us (median 229)
+     seq 964 unit 20 F moe_gather L11 rows 5: excess r0 65 r1 141 us (median 521)
+     seq 1000 unit 20 F moe_gather L27 rows 5: excess r0 92 r1 130 us (median 503)
+     seq 1016 unit 20 F moe_gather L34 rows 5: excess r0 160 r1 232 us (median 576)
+     seq 1092 unit 22 F moe_gather L22 rows 7: excess r0 117 r1 76 us (median 466)
+     seq 1172 unit 24 F moe_gather L12 rows 7: excess r0 165 r1 -45 us (median 742)
+     seq 1296 unit 26 F moe_gather L21 rows 3: excess r0 -13 r1 131 us (median 278)
+     seq 1384 unit 28 F moe_gather L14 rows 7: excess r0 168 r1 161 us (median 629)
+     seq 1468 unit 30 F moe_gather L6 rows 5: excess r0 101 r1 107 us (median 527)
+     seq 1684 unit 34 F attn_gather L11 rows 5: excess r0 -5 r1 152 us (median 217)
+     seq 1776 unit 36 F attn_gather L6 rows 7: excess r0 12 r1 110 us (median 230)
+     seq 1956 unit 39 P other L0 rows 5: excess r0 189 r1 -28 us (median 594)
+     seq 2244 unit 44 F moe_gather L31 rows 4: excess r0 110 r1 115 us (median 438)
+     seq 2392 unit 48 F moe_gather L5 rows 7: excess r0 -4 r1 162 us (median 732)
+     seq 2520 unit 50 F moe_gather L16 rows 5: excess r0 216 r1 220 us (median 530)
+     seq 2592 unit 52 F moe_gather L2 rows 7: excess r0 141 r1 120 us (median 773)
+     seq 2636 unit 52 F moe_gather L22 rows 7: excess r0 -60 r1 128 us (median 466)
+     seq 2748 unit 54 F moe_gather L26 rows 7: excess r0 108 r1 114 us (median 633)
+  per-forward mean producer excess (r0): n 741 sd 21.68 us; autocorrelation by lag (forwards): [(1, 0.172), (2, 0.164), (3, 0.046), (4, 0.021), (8, 0.066), (16, -0.01), (31, 0.015), (32, 0.023), (33, -0.026), (64, 0.022)]
+fx1Lb r0 producer excess: n 19090 p50 0.0 p90 52.4 p99 172.4 p99.9 332.0 max 131319.7 us; mean of positive part 28.44 us/transfer; >100us 745 >500us 4 >2ms 3
+fx1Lb r0 ring excess: n 19090 p50 0.0 p90 13.3 p99 155.0 p99.9 211.2 max 369.2 us; mean of positive part 7.41 us/transfer; >100us 383 >500us 0 >2ms 0
+    attn_gather  n   7403 producer excess p90/p99/p99.9    8.6/  78.8/  186.9 us | ring excess p90/p99/p99.9   13.9/ 128.9/  192.0 us | mean ring-excess>0 6.67
+    engram       n    365 producer excess p90/p99/p99.9    6.7/ 158.5/ 2686.5 us | ring excess p90/p99/p99.9   20.9/ 161.5/  206.9 us | mean ring-excess>0 9.27
+    head         n    186 producer excess p90/p99/p99.9   17.1/ 165.0/  305.5 us | ring excess p90/p99/p99.9   94.1/ 256.2/  369.2 us | mean ring-excess>0 27.99
+    kv           n   1488 producer excess p90/p99/p99.9    9.9/ 101.0/  208.4 us | ring excess p90/p99/p99.9   10.7/ 115.3/  191.0 us | mean ring-excess>0 5.57
+    moe_gather   n   7422 producer excess p90/p99/p99.9   89.3/ 215.9/  374.8 us | ring excess p90/p99/p99.9   14.2/ 165.9/  211.4 us | mean ring-excess>0 8.45
+    pass         n   2226 producer excess p90/p99/p99.9   35.7/ 171.0/  310.8 us | ring excess p90/p99/p99.9    7.8/ 139.3/  213.1 us | mean ring-excess>0 5.60
+fx1Lb r1 producer excess: n 19117 p50 0.0 p90 54.3 p99 173.1 p99.9 294.1 max 131564.3 us; mean of positive part 29.01 us/transfer; >100us 822 >500us 4 >2ms 2
+fx1Lb r1 ring excess: n 19117 p50 0.0 p90 12.4 p99 139.8 p99.9 248.8 max 1455.3 us; mean of positive part 6.33 us/transfer; >100us 288 >500us 1 >2ms 0
+    attn_gather  n   7403 producer excess p90/p99/p99.9    9.9/ 128.1/  267.4 us | ring excess p90/p99/p99.9   11.6/  80.6/  179.0 us | mean ring-excess>0 4.77
+    engram       n    365 producer excess p90/p99/p99.9   20.6/ 183.3/ 1232.7 us | ring excess p90/p99/p99.9    6.9/ 153.4/ 1455.3 us | mean ring-excess>0 9.70
+    head         n    186 producer excess p90/p99/p99.9   55.2/ 195.8/  365.0 us | ring excess p90/p99/p99.9   24.9/ 163.0/  310.6 us | mean ring-excess>0 11.96
+    kv           n   1515 producer excess p90/p99/p99.9   13.5/ 118.7/  193.9 us | ring excess p90/p99/p99.9   20.3/ 108.6/  199.2 us | mean ring-excess>0 8.83
+    moe_gather   n   7422 producer excess p90/p99/p99.9   87.6/ 204.0/  319.2 us | ring excess p90/p99/p99.9   11.9/ 160.9/  279.2 us | mean ring-excess>0 7.61
+    pass         n   2226 producer excess p90/p99/p99.9   40.6/ 163.2/  369.5 us | ring excess p90/p99/p99.9    7.4/ 109.2/  218.0 us | mean ring-excess>0 4.50
+  producer excess > 100 us: r0 745, r1 822, both 443
+  where: [(('P', 'other', 0), 55), (('F', 'moe_gather', 1), 32), (('F', 'moe_gather', 33), 31), (('F', 'moe_gather', 31), 29), (('P', 'other', 2), 29), (('F', 'moe_gather', 12), 27), (('F', 'moe_gather', 16), 27), (('F', 'moe_gather', 36), 25), (('F', 'moe_gather', 8), 24), (('F', 'moe_gather', 24), 24), (('F', 'moe_gather', 39), 24), (('F', 'moe_gather', 35), 24), (('F', 'moe_gather', 9), 23), (('F', 'attn_gather', 0), 22)]
+     seq 12 unit 2 F attn_gather L0 rows 6: excess r0 476 r1 398 us (median 335)
+     seq 116 unit 4 F engram L1 rows 4: excess r0 2686 r1 1233 us (median 230)
+     seq 124 unit 4 F attn_gather L4 rows 4: excess r0 139 r1 -14 us (median 212)
+     seq 132 unit 4 F kv L8 rows 4: excess r0 208 r1 -20 us (median 169)
+     seq 136 unit 4 F moe_gather L9 rows 4: excess r0 122 r1 51 us (median 454)
+     seq 140 unit 4 F moe_gather L11 rows 4: excess r0 114 r1 255 us (median 450)
+     seq 200 unit 4 F attn_gather L38 rows 4: excess r0 -20 r1 113 us (median 209)
+     seq 232 unit 6 F moe_gather L6 rows 3: excess r0 -45 r1 108 us (median 380)
+     seq 248 unit 6 F engram L14 rows 3: excess r0 505 r1 60 us (median 186)
+     seq 288 unit 6 F moe_gather L31 rows 3: excess r0 192 r1 36 us (median 384)
+     seq 308 unit 7 P other L0 rows 6: excess r0 41 r1 176 us (median 607)
+     seq 320 unit 8 F attn_gather L0 rows 6: excess r0 152 r1 87 us (median 462)
+     seq 336 unit 8 F attn_gather L7 rows 6: excess r0 126 r1 -17 us (median 224)
+     seq 340 unit 8 F moe_gather L8 rows 6: excess r0 214 r1 342 us (median 597)
+     seq 348 unit 8 F moe_gather L12 rows 6: excess r0 -52 r1 123 us (median 646)
+     seq 376 unit 8 F moe_gather L24 rows 6: excess r0 106 r1 86 us (median 506)
+     seq 424 unit 10 F moe_gather L0 rows 5: excess r0 299 r1 74 us (median 713)
+     seq 440 unit 10 F moe_gather L7 rows 5: excess r0 50 r1 165 us (median 505)
+     seq 844 unit 18 F moe_gather L3 rows 7: excess r0 168 r1 154 us (median 701)
+     seq 932 unit 19 P other L-1 rows 1: excess r0 155 r1 -2 us (median 1243)
+     seq 976 unit 20 F moe_gather L16 rows 5: excess r0 216 r1 52 us (median 527)
+     seq 1000 unit 20 F moe_gather L27 rows 5: excess r0 77 r1 171 us (median 532)
+     seq 1012 unit 20 F moe_gather L32 rows 5: excess r0 384 r1 94 us (median 537)
+     seq 1016 unit 20 F moe_gather L34 rows 5: excess r0 176 r1 182 us (median 564)
+     seq 1124 unit 22 F moe_gather L36 rows 7: excess r0 194 r1 56 us (median 773)
+     seq 1128 unit 22 F moe_gather L38 rows 7: excess r0 66 r1 218 us (median 783)
+     seq 1132 unit 23 P other L0 rows 6: excess r0 20 r1 165 us (median 607)
+     seq 1292 unit 26 F kv L20 rows 3: excess r0 -25 r1 176 us (median 213)
+     seq 1344 unit 27 P other L-1 rows 1: excess r0 0 r1 155 us (median 1243)
+     seq 1352 unit 28 F engram L1 rows 7: excess r0 94 r1 192 us (median 236)
+     seq 1384 unit 28 F moe_gather L14 rows 7: excess r0 316 r1 162 us (median 630)
+     seq 1396 unit 28 F attn_gather L20 rows 7: excess r0 -1 r1 115 us (median 85)
+     seq 1652 unit 33 P other L2 rows 6: excess r0 117 r1 74 us (median 376)
+     seq 2244 unit 44 F moe_gather L31 rows 4: excess r0 85 r1 119 us (median 463)
+     seq 2296 unit 46 F moe_gather L8 rows 6: excess r0 122 r1 58 us (median 597)
+     seq 2300 unit 46 F moe_gather L10 rows 6: excess r0 187 r1 127 us (median 557)
+     seq 2328 unit 46 F attn_gather L23 rows 6: excess r0 -21 r1 134 us (median 225)
+     seq 2336 unit 46 F moe_gather L26 rows 6: excess r0 0 r1 131 us (median 548)
+     seq 2432 unit 48 F moe_gather L23 rows 7: excess r0 83 r1 103 us (median 711)
+     seq 2520 unit 50 F moe_gather L16 rows 5: excess r0 223 r1 192 us (median 527)
+  per-forward mean producer excess (r0): n 741 sd 21.44 us; autocorrelation by lag (forwards): [(1, 0.141), (2, 0.132), (3, 0.002), (4, 0.018), (8, 0.033), (16, -0.034), (31, 0.0), (32, 0.052), (33, -0.009), (64, 0.006)]
+np1L r0 producer excess: n 19090 p50 0.0 p90 51.6 p99 168.4 p99.9 323.1 max 130943.6 us; mean of positive part 27.41 us/transfer; >100us 712 >500us 5 >2ms 3
+np1L r0 ring excess: n 19090 p50 0.0 p90 9.9 p99 141.6 p99.9 238.3 max 378.7 us; mean of positive part 6.01 us/transfer; >100us 333 >500us 0 >2ms 0
+    attn_gather  n   7403 producer excess p90/p99/p99.9    3.6/ 101.4/  304.4 us | ring excess p90/p99/p99.9    7.1/ 123.0/  192.6 us | mean ring-excess>0 5.03
+    engram       n    365 producer excess p90/p99/p99.9    5.4/ 129.5/ 2395.1 us | ring excess p90/p99/p99.9   11.7/ 136.5/  191.3 us | mean ring-excess>0 6.44
+    head         n    186 producer excess p90/p99/p99.9   11.2/ 167.1/  264.8 us | ring excess p90/p99/p99.9   28.9/ 298.8/  378.7 us | mean ring-excess>0 17.97
+    kv           n   1488 producer excess p90/p99/p99.9    3.4/ 126.0/  181.4 us | ring excess p90/p99/p99.9    5.6/  91.1/  186.7 us | mean ring-excess>0 3.90
+    moe_gather   n   7422 producer excess p90/p99/p99.9   86.0/ 196.8/  332.9 us | ring excess p90/p99/p99.9   14.1/ 156.8/  218.2 us | mean ring-excess>0 7.65
+    pass         n   2226 producer excess p90/p99/p99.9   37.4/ 154.0/  281.9 us | ring excess p90/p99/p99.9    4.9/ 120.8/  278.4 us | mean ring-excess>0 4.16
+np1L r1 producer excess: n 19117 p50 0.0 p90 54.9 p99 174.6 p99.9 295.0 max 131200.8 us; mean of positive part 28.22 us/transfer; >100us 798 >500us 3 >2ms 2
+np1L r1 ring excess: n 19117 p50 0.0 p90 11.8 p99 118.8 p99.9 245.4 max 2363.8 us; mean of positive part 5.72 us/transfer; >100us 224 >500us 2 >2ms 1
+    attn_gather  n   7403 producer excess p90/p99/p99.9    4.5/ 145.0/  276.5 us | ring excess p90/p99/p99.9   11.4/  87.3/  188.8 us | mean ring-excess>0 4.73
+    engram       n    365 producer excess p90/p99/p99.9    6.3/ 141.2/  166.8 us | ring excess p90/p99/p99.9   14.5/ 127.9/ 2363.8 us | mean ring-excess>0 14.57
+    head         n    186 producer excess p90/p99/p99.9   30.5/ 306.2/  364.2 us | ring excess p90/p99/p99.9   15.7/ 161.2/  304.4 us | mean ring-excess>0 10.42
+    kv           n   1515 producer excess p90/p99/p99.9    6.0/ 102.5/  162.6 us | ring excess p90/p99/p99.9   22.2/ 116.1/  184.6 us | mean ring-excess>0 8.77
+    moe_gather   n   7422 producer excess p90/p99/p99.9   87.7/ 202.6/  295.0 us | ring excess p90/p99/p99.9   10.5/ 141.1/  281.4 us | mean ring-excess>0 5.95
+    pass         n   2226 producer excess p90/p99/p99.9   39.8/ 166.8/  321.8 us | ring excess p90/p99/p99.9    6.7/  82.2/  177.8 us | mean ring-excess>0 4.29
+  producer excess > 100 us: r0 712, r1 798, both 460
+  where: [(('P', 'other', 0), 43), (('F', 'moe_gather', 33), 32), (('F', 'moe_gather', 1), 31), (('F', 'attn_gather', 0), 30), (('F', 'moe_gather', 37), 25), (('F', 'moe_gather', 7), 25), (('F', 'moe_gather', 2), 24), (('F', 'moe_gather', 24), 23), (('F', 'moe_gather', 31), 23), (('F', 'moe_gather', 8), 22), (('F', 'moe_gather', 0), 22), (('P', 'other', 2), 22), (('P', 'other', 1), 22), (('F', 'moe_gather', 36), 22)]
+     seq 12 unit 2 F attn_gather L0 rows 6: excess r0 716 r1 616 us (median 342)
+     seq 96 unit 2 F attn_gather L37 rows 6: excess r0 134 r1 3 us (median 260)
+     seq 116 unit 4 F engram L1 rows 4: excess r0 2395 r1 30 us (median 240)
+     seq 140 unit 4 F moe_gather L11 rows 4: excess r0 115 r1 129 us (median 473)
+     seq 180 unit 4 F attn_gather L29 rows 4: excess r0 3 r1 169 us (median 253)
+     seq 276 unit 6 F attn_gather L26 rows 3: excess r0 2 r1 151 us (median 247)
+     seq 284 unit 6 F moe_gather L29 rows 3: excess r0 80 r1 272 us (median 407)
+     seq 308 unit 7 P other L0 rows 6: excess r0 102 r1 116 us (median 598)
+     seq 320 unit 8 F attn_gather L0 rows 6: excess r0 341 r1 93 us (median 469)
+     seq 328 unit 8 F attn_gather L3 rows 6: excess r0 1 r1 161 us (median 266)
+     seq 340 unit 8 F moe_gather L8 rows 6: excess r0 141 r1 144 us (median 631)
+     seq 376 unit 8 F moe_gather L24 rows 6: excess r0 96 r1 107 us (median 556)
+     seq 396 unit 8 F moe_gather L33 rows 6: excess r0 -44 r1 137 us (median 671)
+     seq 400 unit 8 F moe_gather L35 rows 6: excess r0 173 r1 40 us (median 714)
+     seq 412 unit 9 P other L0 rows 6: excess r0 195 r1 84 us (median 484)
+     seq 424 unit 10 F moe_gather L0 rows 5: excess r0 279 r1 119 us (median 739)
+     seq 464 unit 10 F attn_gather L18 rows 5: excess r0 -0 r1 110 us (median 257)
+     seq 732 unit 16 F attn_gather L0 rows 3: excess r0 187 r1 13 us (median 468)
+     seq 844 unit 18 F moe_gather L3 rows 7: excess r0 157 r1 175 us (median 719)
+     seq 900 unit 18 F moe_gather L28 rows 7: excess r0 24 r1 119 us (median 624)
+     seq 1016 unit 20 F moe_gather L34 rows 5: excess r0 202 r1 174 us (median 591)
+     seq 1336 unit 26 F moe_gather L39 rows 3: excess r0 58 r1 123 us (median 413)
+     seq 1384 unit 28 F moe_gather L14 rows 7: excess r0 172 r1 153 us (median 661)
+     seq 1456 unit 30 F attn_gather L1 rows 5: excess r0 175 r1 0 us (median 267)
+     seq 1468 unit 30 F moe_gather L6 rows 5: excess r0 105 r1 91 us (median 546)
+     seq 1496 unit 30 F attn_gather L19 rows 5: excess r0 173 r1 -2 us (median 254)
+     seq 1756 unit 35 P other L-1 rows 1: excess r0 172 r1 0 us (median 1242)
+     seq 1800 unit 36 F moe_gather L16 rows 7: excess r0 190 r1 19 us (median 716)
+     seq 2052 unit 40 F moe_gather L37 rows 6: excess r0 21 r1 202 us (median 690)
+     seq 2104 unit 42 F moe_gather L14 rows 6: excess r0 -53 r1 103 us (median 598)
+     seq 2244 unit 44 F moe_gather L31 rows 4: excess r0 122 r1 113 us (median 450)
+     seq 2264 unit 45 P other L0 rows 6: excess r0 -19 r1 118 us (median 598)
+     seq 2304 unit 46 F moe_gather L12 rows 6: excess r0 0 r1 151 us (median 655)
+     seq 2396 unit 48 F moe_gather L7 rows 7: excess r0 -37 r1 102 us (median 677)
+     seq 2516 unit 50 F moe_gather L14 rows 5: excess r0 168 r1 13 us (median 580)
+     seq 2520 unit 50 F moe_gather L16 rows 5: excess r0 225 r1 206 us (median 539)
+     seq 2592 unit 52 F moe_gather L2 rows 7: excess r0 149 r1 142 us (median 804)
+     seq 2748 unit 54 F moe_gather L26 rows 7: excess r0 112 r1 124 us (median 656)
+     seq 2784 unit 55 P other L2 rows 6: excess r0 240 r1 146 us (median 373)
+     seq 2792 unit 56 F moe_gather L0 rows 7: excess r0 162 r1 -35 us (median 1016)
+  per-forward mean producer excess (r0): n 741 sd 21.27 us; autocorrelation by lag (forwards): [(1, 0.133), (2, 0.177), (3, 0.034), (4, 0.044), (8, 0.028), (16, -0.064), (31, 0.015), (32, 0.034), (33, -0.015), (64, 0.05)]

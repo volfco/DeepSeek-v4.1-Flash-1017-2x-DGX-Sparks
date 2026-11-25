@@ -1,0 +1,15 @@
+# kernel-stack-0280 (1421187) = production 2bb052f + 0280 pass profile and counters, 0281 TF_DS_MARKOV_CACHE,
+# 0282 TF_DS_DRAFT_PREFETCH, 0283 the L2 prefetch knobs. Every switch is off (or today's value) unless an arm sets it.
+# ctl arms on the new image prove its off path exact against production's reference and are the timing control:
+# the image's two executables are cross-built, production's were not, so compare arms within this image only.
+# mc = cached Markov bias rows (256 unset); dpf = the drafter pass's L2 prefetch (1: three sites a stage; 2: + hand-off).
+ctl1|tensorfold-dsv41:bench-fused-next-1421187|
+mc2048a|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_MARKOV_CACHE=2048
+mc4096a|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_MARKOV_CACHE=4096
+dpf1a|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_DRAFT_PREFETCH=1
+dpf2a|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_DRAFT_PREFETCH=2
+ctl2|tensorfold-dsv41:bench-fused-next-1421187|
+dpf2b|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_DRAFT_PREFETCH=2
+dpf1b|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_DRAFT_PREFETCH=1
+mc4096b|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_MARKOV_CACHE=4096
+mc2048b|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_MARKOV_CACHE=2048

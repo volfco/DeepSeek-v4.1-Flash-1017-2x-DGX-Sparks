@@ -1,0 +1,3429 @@
+{
+ "file": "dashboards-after/7522324382660689920.sent.json",
+ "title": "DGX Sparks",
+ "hours": 24.0,
+ "checked_at": "2026-11-23T07:23:19Z",
+ "counts": {
+  "data": 117,
+  "empty": 0,
+  "error": 0,
+  "static": 2
+ },
+ "panels": [
+  {
+   "tab": "Default",
+   "id": "Panel_ID7059361",
+   "title": "CPU Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "100 - avg by (host_name) (system_cpu_utilization{state=\"idle\"})",
+     "sent": "100 - avg by (host_name) (system_cpu_utilization{state=\"idle\"})",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID9551509",
+   "title": "Memory Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "avg by (host_name) (system_memory_utilization{state=\"used\"}) * 100",
+     "sent": "avg by (host_name) (system_memory_utilization{state=\"used\"}) * 100",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID7794757",
+   "title": "Load Average (5m)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "avg by (host_name) (system_cpu_load_average_5m)",
+     "sent": "avg by (host_name) (system_cpu_load_average_5m)",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID9072210",
+   "title": "Memory Usage by State",
+   "type": "line",
+   "queries": [
+    {
+     "query": "avg by (host_name, state) (system_memory_usage)",
+     "sent": "avg by (host_name, state) (system_memory_usage)",
+     "series": 24,
+     "points": 6936
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID8865172",
+   "title": "Disk I/O",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_disk_io[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_disk_io[5m]))",
+     "series": 204,
+     "points": 58956
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID4886166",
+   "title": "Network I/O",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_network_io[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_network_io[5m]))",
+     "series": 214,
+     "points": 55520
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID6285699",
+   "title": "Filesystem Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, mountpoint) (system_filesystem_utilization) * 100",
+     "sent": "max by (host_name, mountpoint) (system_filesystem_utilization) * 100",
+     "series": 64,
+     "points": 18496
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID3862360",
+   "title": "Memory Page Faults",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, type) (rate(system_paging_faults[5m]))",
+     "sent": "sum by (host_name, type) (rate(system_paging_faults[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID7489564",
+   "title": "GPU Temperature",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_gpu_temp",
+     "sent": "dcgm_fi_dev_gpu_temp",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID2513784",
+   "title": "GPU Memory Temperature",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_memory_temp",
+     "sent": "dcgm_fi_dev_memory_temp",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID9360943",
+   "title": "GPU Power Draw",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_power_usage",
+     "sent": "dcgm_fi_dev_power_usage",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID0525346",
+   "title": "SM Clock",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_sm_clock",
+     "sent": "dcgm_fi_dev_sm_clock",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID5679373",
+   "title": "GPU Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_gpu_util",
+     "sent": "dcgm_fi_dev_gpu_util",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID4803554",
+   "title": "Memory Copy Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_mem_copy_util",
+     "sent": "dcgm_fi_dev_mem_copy_util",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID2104237",
+   "title": "Encoder Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_enc_util",
+     "sent": "dcgm_fi_dev_enc_util",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID0098259",
+   "title": "Decoder Utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "dcgm_fi_dev_dec_util",
+     "sent": "dcgm_fi_dev_dec_util",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID6807578",
+   "title": "Fabric RX Throughput",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_bytes_phy[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_bytes_phy[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID5638768",
+   "title": "Fabric TX Throughput",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_bytes_phy[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_bytes_phy[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID7995086",
+   "title": "RDMA Out-of-Buffer (congestion)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca) (rate(rx_out_of_buffer[5m]))",
+     "sent": "sum by (host_name, hca) (rate(rx_out_of_buffer[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID6301141",
+   "title": "Port Link State (4=up)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, hca, port) (ib_port_state)",
+     "sent": "max by (host_name, hca, port) (ib_port_state)",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Default",
+   "id": "Panel_ID6151595",
+   "title": "Phy Discards",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_discards_phy[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_discards_phy[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_discards_phy[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_discards_phy[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0001",
+   "title": "system_cpu_load_average_15m",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name) (system_cpu_load_average_15m{host_name=~\"$spark\"})",
+     "sent": "max by (host_name) (system_cpu_load_average_15m{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0002",
+   "title": "system_cpu_load_average_1m",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name) (system_cpu_load_average_1m{host_name=~\"$spark\"})",
+     "sent": "max by (host_name) (system_cpu_load_average_1m{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0003",
+   "title": "system_cpu_load_average_5m",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name) (system_cpu_load_average_5m{host_name=~\"$spark\"})",
+     "sent": "max by (host_name) (system_cpu_load_average_5m{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0004",
+   "title": "system_cpu_logical_count",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name) (system_cpu_logical_count{host_name=~\"$spark\"})",
+     "sent": "max by (host_name) (system_cpu_logical_count{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0005",
+   "title": "system_cpu_time",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, state) (rate(system_cpu_time{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, state) (rate(system_cpu_time{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 16,
+     "points": 4624
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0006",
+   "title": "system_cpu_utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, state) (system_cpu_utilization{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, state) (system_cpu_utilization{host_name=~\"gx10-.*\"})",
+     "series": 16,
+     "points": 4624
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0007",
+   "title": "system_disk_io",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_disk_io{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_disk_io{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 84,
+     "points": 24276
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0008",
+   "title": "system_disk_io_time",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device) (rate(system_disk_io_time{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device) (rate(system_disk_io_time{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 42,
+     "points": 12138
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0009",
+   "title": "system_disk_merged",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_disk_merged{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_disk_merged{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 84,
+     "points": 24276
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0010",
+   "title": "system_disk_operation_time",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_disk_operation_time{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_disk_operation_time{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 84,
+     "points": 24276
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0011",
+   "title": "system_disk_operations",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_disk_operations{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_disk_operations{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 84,
+     "points": 24276
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0012",
+   "title": "system_disk_pending_operations",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device) (system_disk_pending_operations{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device) (system_disk_pending_operations{host_name=~\"gx10-.*\"})",
+     "series": 42,
+     "points": 12138
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0013",
+   "title": "system_disk_weighted_io_time",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device) (rate(system_disk_weighted_io_time{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device) (rate(system_disk_weighted_io_time{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 42,
+     "points": 12138
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0014",
+   "title": "system_filesystem_inodes_usage",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, state, mountpoint) (system_filesystem_inodes_usage{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, state, mountpoint) (system_filesystem_inodes_usage{host_name=~\"gx10-.*\"})",
+     "series": 80,
+     "points": 23120
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0015",
+   "title": "system_filesystem_usage",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, state, mountpoint) (system_filesystem_usage{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, state, mountpoint) (system_filesystem_usage{host_name=~\"gx10-.*\"})",
+     "series": 120,
+     "points": 34680
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0016",
+   "title": "system_filesystem_utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, mountpoint) (system_filesystem_utilization{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, mountpoint) (system_filesystem_utilization{host_name=~\"gx10-.*\"})",
+     "series": 40,
+     "points": 11560
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0017",
+   "title": "system_memory_usage",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, state) (system_memory_usage{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, state) (system_memory_usage{host_name=~\"gx10-.*\"})",
+     "series": 12,
+     "points": 3468
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0018",
+   "title": "system_memory_utilization",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, state) (system_memory_utilization{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, state) (system_memory_utilization{host_name=~\"gx10-.*\"})",
+     "series": 12,
+     "points": 3468
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0019",
+   "title": "system_network_connections",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, state, protocol) (system_network_connections{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, state, protocol) (system_network_connections{host_name=~\"gx10-.*\"})",
+     "series": 22,
+     "points": 6358
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0020",
+   "title": "system_network_dropped",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_network_dropped{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_network_dropped{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 54,
+     "points": 9280
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0021",
+   "title": "system_network_errors",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_network_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_network_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 54,
+     "points": 9280
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0022",
+   "title": "system_network_io",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_network_io{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_network_io{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 54,
+     "points": 9280
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0023",
+   "title": "system_network_packets",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, direction) (rate(system_network_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, direction) (rate(system_network_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 54,
+     "points": 9280
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0024",
+   "title": "system_paging_faults",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, type) (rate(system_paging_faults{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, type) (rate(system_paging_faults{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0025",
+   "title": "system_paging_operations",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, direction, type) (rate(system_paging_operations{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, direction, type) (rate(system_paging_operations{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0026",
+   "title": "system_paging_usage",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, state) (system_paging_usage{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, state) (system_paging_usage{host_name=~\"gx10-.*\"})",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0027",
+   "title": "system_processes_count",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, status) (system_processes_count{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, status) (system_processes_count{host_name=~\"gx10-.*\"})",
+     "series": 12,
+     "points": 2915
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Host: every series",
+   "id": "Panel_S0028",
+   "title": "system_processes_created",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name) (rate(system_processes_created{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name) (rate(system_processes_created{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0041",
+   "title": "GPU power from the energy counter",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name) (rate(dcgm_fi_dev_total_energy_consumption{host_name=~\"$spark\"}[5m])) / 1000",
+     "sent": "sum by (host_name) (rate(dcgm_fi_dev_total_energy_consumption{host_name=~\"gx10-.*\"}[5m])) / 1000",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0029",
+   "title": "dcgm_fi_dev_dec_util",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu) (dcgm_fi_dev_dec_util{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu) (dcgm_fi_dev_dec_util{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0030",
+   "title": "dcgm_fi_dev_enc_util",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu) (dcgm_fi_dev_enc_util{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu) (dcgm_fi_dev_enc_util{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0031",
+   "title": "dcgm_fi_dev_gpu_temp",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu) (dcgm_fi_dev_gpu_temp{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu) (dcgm_fi_dev_gpu_temp{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0032",
+   "title": "dcgm_fi_dev_gpu_util",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu) (dcgm_fi_dev_gpu_util{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu) (dcgm_fi_dev_gpu_util{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0033",
+   "title": "dcgm_fi_dev_mem_copy_util",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu) (dcgm_fi_dev_mem_copy_util{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu) (dcgm_fi_dev_mem_copy_util{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0034",
+   "title": "dcgm_fi_dev_memory_temp",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu) (dcgm_fi_dev_memory_temp{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu) (dcgm_fi_dev_memory_temp{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0035",
+   "title": "dcgm_fi_dev_pcie_replay_counter",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, gpu) (rate(dcgm_fi_dev_pcie_replay_counter{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, gpu) (rate(dcgm_fi_dev_pcie_replay_counter{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0036",
+   "title": "dcgm_fi_dev_power_usage",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu) (dcgm_fi_dev_power_usage{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu) (dcgm_fi_dev_power_usage{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0037",
+   "title": "dcgm_fi_dev_sm_clock",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu) (dcgm_fi_dev_sm_clock{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu) (dcgm_fi_dev_sm_clock{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0038",
+   "title": "dcgm_fi_dev_total_energy_consumption",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device, gpu) (rate(dcgm_fi_dev_total_energy_consumption{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device, gpu) (rate(dcgm_fi_dev_total_energy_consumption{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0039",
+   "title": "dcgm_fi_dev_vgpu_license_status",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu) (dcgm_fi_dev_vgpu_license_status{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu) (dcgm_fi_dev_vgpu_license_status{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "GPU: every DCGM series",
+   "id": "Panel_S0040",
+   "title": "dcgm_fi_dev_xid_errors",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, device, gpu, err_code) (dcgm_fi_dev_xid_errors{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device, gpu, err_code) (dcgm_fi_dev_xid_errors{host_name=~\"gx10-.*\"})",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0042",
+   "title": "About these panels",
+   "type": "markdown",
+   "queries": [],
+   "status": "static"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0043",
+   "title": "Link state, speed and width (1 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, hca) (current_link_speed{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, hca) (current_link_speed{host_name=~\"gx10-.*\"})",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "max by (host_name, hca) (current_link_width{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, hca) (current_link_width{host_name=~\"gx10-.*\"})",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(excessive_buffer_overrun_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(excessive_buffer_overrun_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "max by (host_name, hca, port) (hw_port_state{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, hca, port) (hw_port_state{host_name=~\"gx10-.*\"})",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "max by (host_name, hca, port) (ib_port_state{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, hca, port) (ib_port_state{host_name=~\"gx10-.*\"})",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(link_down_events_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(link_down_events_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(link_downed{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(link_downed{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(link_error_recovery{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(link_error_recovery{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0044",
+   "title": "Link state, speed and width (2 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca, port) (rate(local_link_integrity_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(local_link_integrity_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "max by (host_name, hca) (max_link_speed{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, hca) (max_link_speed{host_name=~\"gx10-.*\"})",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "max by (host_name, hca) (max_link_width{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, hca) (max_link_width{host_name=~\"gx10-.*\"})",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(module_bad_shorted{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(module_bad_shorted{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(module_bus_stuck{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(module_bus_stuck{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(module_high_temp{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(module_high_temp{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(module_unplug{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(module_unplug{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rdu{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rdu{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0045",
+   "title": "Link state, speed and width (3 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca, port) (rate(symbol_error{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(symbol_error{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tdu{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tdu{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "max by (host_name, device_name) (timestamp{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device_name) (timestamp{host_name=~\"gx10-.*\"})",
+     "series": 6,
+     "points": 1734
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(total_success_recovery_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(total_success_recovery_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0046",
+   "title": "InfiniBand-style port counters (1 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_rcv_constraint_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_rcv_constraint_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_rcv_data{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_rcv_data{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_rcv_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_rcv_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_rcv_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_rcv_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_rcv_remote_physical_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_rcv_remote_physical_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_rcv_switch_relay_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_rcv_switch_relay_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_xmit_constraint_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_xmit_constraint_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_xmit_data{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_xmit_data{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0047",
+   "title": "InfiniBand-style port counters (2 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_xmit_discards{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_xmit_discards{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_xmit_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_xmit_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(port_xmit_wait{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(port_xmit_wait{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0048",
+   "title": "RoCE transport (hw_*) (1 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_duplicate_request{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_duplicate_request{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_implied_nak_seq_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_implied_nak_seq_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_lifespan{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_lifespan{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_local_ack_timeout_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_local_ack_timeout_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_np_cnp_sent{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_np_cnp_sent{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_np_ecn_marked_roce_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_np_ecn_marked_roce_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_out_of_buffer{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_out_of_buffer{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_out_of_sequence{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_out_of_sequence{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0049",
+   "title": "RoCE transport (hw_*) (2 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_packet_seq_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_packet_seq_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_req_cqe_error{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_req_cqe_error{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_req_cqe_flush_error{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_req_cqe_flush_error{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_req_remote_access_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_req_remote_access_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_req_remote_invalid_request{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_req_remote_invalid_request{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_req_rnr_retries_exceeded{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_req_rnr_retries_exceeded{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_req_transport_retries_exceeded{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_req_transport_retries_exceeded{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_resp_cqe_error{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_resp_cqe_error{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0050",
+   "title": "RoCE transport (hw_*) (3 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_resp_cqe_flush_error{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_resp_cqe_flush_error{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_resp_local_length_error{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_resp_local_length_error{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_resp_remote_access_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_resp_remote_access_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_rnr_nak_retry_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_rnr_nak_retry_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_roce_adp_retrans{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_roce_adp_retrans{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_roce_adp_retrans_to{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_roce_adp_retrans_to{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_roce_slow_restart{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_roce_slow_restart{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_roce_slow_restart_cnps{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_roce_slow_restart_cnps{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0051",
+   "title": "RoCE transport (hw_*) (4 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_roce_slow_restart_trans{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_roce_slow_restart_trans{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_rp_cnp_handled{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_rp_cnp_handled{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_rp_cnp_ignored{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_rp_cnp_ignored{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_rx_atomic_requests{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_rx_atomic_requests{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_rx_dct_connect{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_rx_dct_connect{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_rx_icrc_encapsulated{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_rx_icrc_encapsulated{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_rx_read_requests{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_rx_read_requests{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(hw_rx_write_requests{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(hw_rx_write_requests{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0052",
+   "title": "PCI and device queue",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(dev_internal_queue_oob{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(dev_internal_queue_oob{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "max by (host_name, device_name) (outbound_pci_stalled_rd{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device_name) (outbound_pci_stalled_rd{host_name=~\"gx10-.*\"})",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(outbound_pci_stalled_rd_events{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(outbound_pci_stalled_rd_events{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "max by (host_name, device_name) (outbound_pci_stalled_wr{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device_name) (outbound_pci_stalled_wr{host_name=~\"gx10-.*\"})",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(outbound_pci_stalled_wr_events{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(outbound_pci_stalled_wr_events{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "max by (host_name, device_name) (rx_pci_signal_integrity{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device_name) (rx_pci_signal_integrity{host_name=~\"gx10-.*\"})",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "max by (host_name, device_name) (tx_pci_signal_integrity{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, device_name) (tx_pci_signal_integrity{host_name=~\"gx10-.*\"})",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0053",
+   "title": "Physical layer receive (1 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_broadcast_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_broadcast_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_buffer_passed_thres_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_buffer_passed_thres_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_bytes_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_bytes_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_corrected_bits_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_corrected_bits_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_crc_errors_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_crc_errors_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_discards_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_discards_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_fragments_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_fragments_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_in_range_len_errors_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_in_range_len_errors_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0054",
+   "title": "Physical layer receive (2 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_jabbers_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_jabbers_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_mac_control_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_mac_control_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_multicast_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_multicast_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_out_of_range_len_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_out_of_range_len_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_oversize_pkts_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_oversize_pkts_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_packets_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_packets_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pause_ctrl_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pause_ctrl_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pcs_symbol_err_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pcs_symbol_err_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0055",
+   "title": "Physical layer receive (3 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_symbol_err_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_symbol_err_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_undersize_pkts_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_undersize_pkts_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_unsupported_op_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_unsupported_op_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0056",
+   "title": "Physical layer transmit",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_broadcast_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_broadcast_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_bytes_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_bytes_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_discards_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_discards_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_errors_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_errors_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_mac_control_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_mac_control_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_multicast_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_multicast_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_packets_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_packets_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_pause_ctrl_phy{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_pause_ctrl_phy{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0057",
+   "title": "Pause and congestion (1 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_congst_umr{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_congst_umr{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_ecn_mark{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_ecn_mark{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_global_pause{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_global_pause{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_global_pause_duration{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_global_pause_duration{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_global_pause_transition{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_global_pause_transition{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_out_of_buffer{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_out_of_buffer{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pause_all{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pause_all{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pause_off{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pause_off{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0058",
+   "title": "Pause and congestion (2 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pause_on{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pause_on{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_congst_umr{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_congst_umr{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_ecn_mark{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_ecn_mark{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_global_pause{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_global_pause{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_global_pause_duration{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_global_pause_duration{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_pause_all{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_pause_all{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_pause_off{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_pause_off{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_pause_on{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_pause_on{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0059",
+   "title": "Pause and congestion (3 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_pause_storm_error_events{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_pause_storm_error_events{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_pause_storm_warning_events{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_pause_storm_warning_events{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0060",
+   "title": "RDMA and vport traffic (1 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_broadcast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_broadcast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_broadcast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_broadcast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_multicast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_multicast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_multicast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_multicast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_rdma_multicast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_rdma_multicast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_rdma_multicast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_rdma_multicast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_rdma_unicast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_rdma_unicast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_rdma_unicast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_rdma_unicast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0061",
+   "title": "RDMA and vport traffic (2 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_unicast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_unicast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_vport_unicast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_vport_unicast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_broadcast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_broadcast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_broadcast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_broadcast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_multicast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_multicast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_multicast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_multicast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_rdma_multicast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_rdma_multicast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_rdma_multicast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_rdma_multicast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0062",
+   "title": "RDMA and vport traffic (3 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_rdma_unicast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_rdma_unicast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_rdma_unicast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_rdma_unicast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_unicast_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_unicast_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_vport_unicast_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_vport_unicast_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(vport_loopback_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(vport_loopback_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(vport_loopback_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(vport_loopback_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0063",
+   "title": "Receive errors and drops (1 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_arfs_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_arfs_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_buff_alloc_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_buff_alloc_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_frame_too_long{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_frame_too_long{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_if_down_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_if_down_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_mac_error{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_mac_error{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_mac_missed{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_mac_missed{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_missed{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_missed{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0064",
+   "title": "Receive errors and drops (2 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_mpwqe_filler_cqes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_mpwqe_filler_cqes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_mpwqe_filler_strides{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_mpwqe_filler_strides{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_oversize_pkts_buffer{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_oversize_pkts_buffer{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_oversize_pkts_sw_drop{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_oversize_pkts_sw_drop{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_runt{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_runt{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_steer_missed_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_steer_missed_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tcam_dropped{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tcam_dropped{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0065",
+   "title": "Receive errors and drops (3 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_unknown_opcode{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_unknown_opcode{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_wqe_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_wqe_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xdp_drop{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xdp_drop{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xdp_tx_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xdp_tx_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xdp_tx_mpwqe{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xdp_tx_mpwqe{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_buff_alloc_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_buff_alloc_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_mpwqe_filler_cqes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_mpwqe_filler_cqes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_mpwqe_filler_strides{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_mpwqe_filler_strides{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0066",
+   "title": "Receive errors and drops (4 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_oversize_pkts_sw_drop{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_oversize_pkts_sw_drop{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_wqe_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_wqe_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_xdp_drop{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_xdp_drop{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0067",
+   "title": "Transmit errors and queue (1 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_aborted{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_aborted{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_all_collision{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_all_collision{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_cqe_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_cqe_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_deferred{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_deferred{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_late_collision{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_late_collision{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_multi_collisions{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_multi_collisions{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_queue_dropped{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_queue_dropped{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0068",
+   "title": "Transmit errors and queue (2 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_queue_stopped{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_queue_stopped{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_queue_wake{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_queue_wake{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_recover{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_recover{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_single_collisions{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_single_collisions{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_drop_bypass_req{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_drop_bypass_req{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_drop_no_sync_data{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_drop_no_sync_data{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_underrun{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_underrun{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xdp_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xdp_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0069",
+   "title": "Transmit errors and queue (3 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xsk_err{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xsk_err{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0070",
+   "title": "Receive offloads: checksum, GRO, LRO, header split (1 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_arfs_add{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_arfs_add{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_arfs_expired{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_arfs_expired{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_arfs_request_in{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_arfs_request_in{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_arfs_request_out{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_arfs_request_out{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_cqe_compress_blks{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_cqe_compress_blks{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_cqe_compress_pkts{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_cqe_compress_pkts{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_csum_complete{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_csum_complete{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0071",
+   "title": "Receive offloads: checksum, GRO, LRO, header split (2 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_csum_complete_tail{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_csum_complete_tail{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_csum_complete_tail_slow{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_csum_complete_tail_slow{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_csum_none{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_csum_none{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_csum_unnecessary{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_csum_unnecessary{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_csum_unnecessary_inner{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_csum_unnecessary_inner{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_gro_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_gro_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_gro_large_hds{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_gro_large_hds{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_gro_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_gro_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0072",
+   "title": "Receive offloads: checksum, GRO, LRO, header split (3 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_gro_skbs{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_gro_skbs{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_hds_nodata_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_hds_nodata_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_hds_nodata_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_hds_nodata_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_hds_nosplit_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_hds_nosplit_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_hds_nosplit_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_hds_nosplit_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_lro_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_lro_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_lro_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_lro_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_octets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_octets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0073",
+   "title": "Receive offloads: checksum, GRO, LRO, header split (4 of 4)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 6,
+     "points": 1734
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_recover{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_recover{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_removed_vlan_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_removed_vlan_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0074",
+   "title": "Receive page pool (1 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_alloc_empty{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_alloc_empty{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_alloc_fast{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_alloc_fast{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_alloc_refill{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_alloc_refill{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_alloc_slow{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_alloc_slow{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_alloc_slow_high_order{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_alloc_slow_high_order{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_alloc_waive{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_alloc_waive{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_recycle_cache_full{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_recycle_cache_full{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_recycle_cached{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_recycle_cached{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0075",
+   "title": "Receive page pool (2 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_recycle_released_ref{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_recycle_released_ref{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_recycle_ring{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_recycle_ring{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_pp_recycle_ring_full{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_pp_recycle_ring_full{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0076",
+   "title": "Receive XDP and XSK (1 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xdp_redirect{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xdp_redirect{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xdp_tx_cqe{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xdp_tx_cqe{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xdp_tx_full{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xdp_tx_full{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xdp_tx_inlnw{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xdp_tx_inlnw{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xdp_tx_nops{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xdp_tx_nops{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xdp_tx_xmit{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xdp_tx_xmit{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_cqe_compress_blks{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_cqe_compress_blks{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0077",
+   "title": "Receive XDP and XSK (2 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_cqe_compress_pkts{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_cqe_compress_pkts{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_csum_complete{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_csum_complete{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_csum_none{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_csum_none{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_csum_unnecessary{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_csum_unnecessary{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_csum_unnecessary_inner{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_csum_unnecessary_inner{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_removed_vlan_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_removed_vlan_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_xsk_xdp_redirect{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_xsk_xdp_redirect{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0078",
+   "title": "Receive kTLS (1 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_ctx{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_ctx{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_decrypted_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_decrypted_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_decrypted_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_decrypted_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_del{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_del{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_resync_req_end{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_resync_req_end{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_resync_req_pkt{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_resync_req_pkt{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_resync_req_skip{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_resync_req_skip{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_resync_req_start{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_resync_req_start{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0079",
+   "title": "Receive kTLS (2 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_resync_res_ok{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_resync_res_ok{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_resync_res_retry{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_resync_res_retry{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(rx_tls_resync_res_skip{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(rx_tls_resync_res_skip{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0080",
+   "title": "Transmit offloads and traffic (1 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_added_vlan_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_added_vlan_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_cqes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_cqes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_csum_none{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_csum_none{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_csum_partial{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_csum_partial{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_csum_partial_inner{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_csum_partial_inner{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_mpwqe_blks{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_mpwqe_blks{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_mpwqe_pkts{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_mpwqe_pkts{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0081",
+   "title": "Transmit offloads and traffic (2 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_nop{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_nop{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_octets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_octets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 6,
+     "points": 1734
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tso_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tso_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tso_inner_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tso_inner_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tso_inner_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tso_inner_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tso_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tso_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xdp_cqes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xdp_cqes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0082",
+   "title": "Transmit offloads and traffic (3 of 3)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xdp_full{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xdp_full{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xdp_inlnw{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xdp_inlnw{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xdp_mpwqe{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xdp_mpwqe{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xdp_nops{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xdp_nops{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xdp_xmit{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xdp_xmit{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0083",
+   "title": "Transmit kTLS (1 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_ctx{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_ctx{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_del{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_del{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_dump_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_dump_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_dump_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_dump_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_encrypted_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_encrypted_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_encrypted_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_encrypted_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_ooo{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_ooo{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_pool_alloc{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_pool_alloc{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0084",
+   "title": "Transmit kTLS (2 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_pool_free{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_pool_free{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_resync_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_resync_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_tls_skip_no_sync_data{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_tls_skip_no_sync_data{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0085",
+   "title": "IPsec (1 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_rx_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_rx_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_rx_drop_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_rx_drop_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_rx_drop_mismatch_sa_sel{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_rx_drop_mismatch_sa_sel{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_rx_drop_pkts{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_rx_drop_pkts{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_rx_drop_sadb_miss{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_rx_drop_sadb_miss{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_rx_drop_sp_alloc{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_rx_drop_sp_alloc{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_rx_pkts{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_rx_pkts{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_tx_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_tx_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0086",
+   "title": "IPsec (2 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_tx_drop_bundle{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_tx_drop_bundle{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_tx_drop_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_tx_drop_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_tx_drop_no_state{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_tx_drop_no_state{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_tx_drop_not_ip{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_tx_drop_not_ip{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_tx_drop_pkts{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_tx_drop_pkts{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_tx_drop_trailer{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_tx_drop_trailer{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ipsec_tx_pkts{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ipsec_tx_pkts{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0087",
+   "title": "MACsec",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(macsec_rx_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(macsec_rx_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(macsec_rx_bytes_drop{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(macsec_rx_bytes_drop{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(macsec_rx_pkts{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(macsec_rx_pkts{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(macsec_rx_pkts_drop{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(macsec_rx_pkts_drop{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(macsec_tx_bytes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(macsec_tx_bytes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(macsec_tx_bytes_drop{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(macsec_tx_bytes_drop{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(macsec_tx_pkts{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(macsec_tx_pkts{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(macsec_tx_pkts_drop{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(macsec_tx_pkts_drop{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0088",
+   "title": "Interrupt channels",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(ch_aff_change{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ch_aff_change{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ch_arm{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ch_arm{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ch_eq_rearm{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ch_eq_rearm{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ch_events{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ch_events{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ch_force_irq{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ch_force_irq{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(ch_poll{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(ch_poll{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0089",
+   "title": "Other device counters (1 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(align_errors{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(align_errors{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(broadcast{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(broadcast{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(multicast{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(multicast{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(multicast_rcv_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(multicast_rcv_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(multicast_xmit_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(multicast_xmit_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xmit_more{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xmit_more{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xsk_cqes{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xsk_cqes{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xsk_full{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xsk_full{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "ConnectX: every device counter",
+   "id": "Panel_S0090",
+   "title": "Other device counters (2 of 2)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xsk_inlnw{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xsk_inlnw{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xsk_mpwqe{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xsk_mpwqe{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(tx_xsk_xmit{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(tx_xsk_xmit{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "sum by (host_name, device_name) (rate(unicast{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate(unicast{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(unicast_rcv_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(unicast_rcv_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    },
+    {
+     "query": "sum by (host_name, hca, port) (rate(unicast_xmit_packets{host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, hca, port) (rate(unicast_xmit_packets{host_name=~\"gx10-.*\"}[5m]))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Collector & scrape",
+   "id": "Panel_S0091",
+   "title": "Scrape targets up, by host and job",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, service_name) (up{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, service_name) (up{host_name=~\"gx10-.*\"})",
+     "series": 6,
+     "points": 1734
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Collector & scrape",
+   "id": "Panel_S0092",
+   "title": "Samples a scrape",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, service_name) (scrape_samples_scraped{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, service_name) (scrape_samples_scraped{host_name=~\"gx10-.*\"})",
+     "series": 6,
+     "points": 1734
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Collector & scrape",
+   "id": "Panel_S0093",
+   "title": "Samples kept after relabeling",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, service_name) (scrape_samples_post_metric_relabeling{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, service_name) (scrape_samples_post_metric_relabeling{host_name=~\"gx10-.*\"})",
+     "series": 6,
+     "points": 1734
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Collector & scrape",
+   "id": "Panel_S0094",
+   "title": "Scrape duration",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, service_name) (scrape_duration_seconds{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, service_name) (scrape_duration_seconds{host_name=~\"gx10-.*\"})",
+     "series": 6,
+     "points": 1734
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Collector & scrape",
+   "id": "Panel_S0095",
+   "title": "Series added a scrape",
+   "type": "line",
+   "queries": [
+    {
+     "query": "max by (host_name, service_name) (scrape_series_added{host_name=~\"$spark\"})",
+     "sent": "max by (host_name, service_name) (scrape_series_added{host_name=~\"gx10-.*\"})",
+     "series": 6,
+     "points": 1734
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Any series",
+   "id": "Panel_S0096",
+   "title": "About this tab",
+   "type": "markdown",
+   "queries": [],
+   "status": "static"
+  },
+  {
+   "tab": "Any series",
+   "id": "Panel_S0097",
+   "title": "$any_series as stored",
+   "type": "line",
+   "queries": [
+    {
+     "query": "{__name__=\"$any_series\", host_name=~\"$spark\"}",
+     "sent": "{__name__=\"rx0_packets\", host_name=~\"gx10-.*\"}",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Any series",
+   "id": "Panel_S0098",
+   "title": "$any_series as a rate (counters)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device_name) (rate({__name__=\"$any_series\", host_name=~\"$spark\"}[5m]))",
+     "sent": "sum by (host_name, device_name) (rate({__name__=\"rx0_packets\", host_name=~\"gx10-.*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  }
+ ]
+}

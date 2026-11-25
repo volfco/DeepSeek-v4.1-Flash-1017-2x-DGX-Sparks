@@ -1,0 +1,17 @@
+tree: 6571e56 + working tree
+zig build test: exit 0
+zig build: exit 0
+check.sh errors: 9 (base 9)
+check_all.sh: 334 error lines (base 331); diff against base:
+43a44
+> ./dsv41_torch.cu: use of undeclared identifier 'max'; did you mean 'fmax'? | const unsigned amax = SHFL ? tf_ds_amax_bits_shfl<16>(max(tf_ds_abs_bits(v0), tf_ds_abs_bits(v1)))
+45c46
+< ./dsv41_torch.cu: call to '__reduce_max_sync' is ambiguous | const unsigned amax = __reduce_max_sync((lane < 16) ? 0x0000ffffu : 0xffff0000u,
+---
+> ./dsv41_torch.cu: call to '__reduce_max_sync' is ambiguous | : __reduce_max_sync((lane < 16) ? 0x0000ffffu : 0xffff0000u,
+47a49,50
+> ./dsv41_torch.cu: default initialization of an object of const type 'const __nv_bfloat16' without a user-provided default constructor | const __nv_bfloat162 pr = *(__nv_bfloat162*)&raw;
+> ./dsv41_torch.cu: default initialization of an object of const type 'const __nv_bfloat16' without a user-provided default constructor | const __nv_bfloat162 pr = *(__nv_bfloat162*)&raw;
+check.sh output identical to base apart from line numbers
+strict pass (stubs-extra/extra.h) against base/check_all_strict.txt:
+  identical

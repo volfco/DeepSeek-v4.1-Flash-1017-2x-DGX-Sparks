@@ -1,0 +1,17 @@
+Done. Kernel patch 0267 is complete.
+
+## Summary
+
+**Commit `6158a6f`** on `kernel-0267` (base `27baa93`), subject exactly as briefed: `0267 dsv41: TF_DS_MARKOV_FUSED (off by default): a greedy draft step's Markov bias miss and tile scoring in one kernel`. Working tree clean.
+
+**Premise holds.** At the served shape (129,280 vocab, TP2 split) a cache miss stages and rereads 64,640 FP16 values = 252.5 KiB per missed stream/step/rank — the brief's number checks out exactly. The bias computation is a kit cubin, so per the contract the fused kernel (`tf_ds_markov_fused_kernel`) reproduces `_bias`+`_score`'s arithmetic from the kit's public source semantics (fetched `bertholomus/TensorFold` markov.py): `fp16(head · fp16(emb))` rank-order FP32 dot → FP16 round (kept) → + logit → tile argmax with the documented tie rule (NaN above everything, ties to the lower index). `_finish`/`_pick`/`PV`/`PI` unchanged; staging rows not written (greedy steps have no reader); sampled passes keep the old path and their staged bias.
+
+**Both deliverables:** (1) host-side hit/miss counter under `TF_DS_ROUND_PROFILE` only (`markov_cache` line, zero device work, graph-safe, free when off); (2) the fused kernel, off by default, fallback arm for anything unsupported.
+
+**Gate (all pass):** `zig build test` 27/27 · cuda syntax check ok (shared stubs fail on the *base* — pre-existing drift per report-0260; used the fixed copy in `h0267/stubs/`) · CPU harness `h0267/run.log`: 170 cases / 729 rows all match against an independent reference (ties, NaN/±inf, misses 1–4 streams, masked tails, served-shape smoke) + 3/3 injected bugs caught.
+
+**Launches:** greedy step 4 → 3 (24 → 18 per 6-step pass at 4 streams).
+
+**Process note:** the driver's `resume-loop.sh` had spawned racing duplicate sessions in my worktree mid-task (it corrupted one harness file transiently); I stopped them, recorded the handshake in `h0267/BRANCH-NOTE.md`, and everything after is single-writer.
+
+**Not checked / risk:** GPU bit-identity and performance are hardware-gate questions only — the fused kernel trades `_bias`'s tensor-core GEMV for CUDA-core dots; if the graphs-on A/B at KEPT=2 loses, drop the switch (the counter stands alone). The dot's "16-at-a-time vs sequential" accumulation equality is assumed (evidenced by the kit's own `markov_check.py`) and documented as the one real rounding point.

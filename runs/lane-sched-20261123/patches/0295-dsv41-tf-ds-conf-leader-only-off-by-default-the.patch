@@ -1,0 +1,255 @@
+From 556093652d12c1fa245c5df2febf531fa06c0b50 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Mon, 23 Nov 2026 13:20:30 -0800
+Subject: [PATCH 3/4] 0295 dsv41: TF_DS_CONF_LEADER_ONLY (off by default) the
+ follower skips the drafter confidence head
+
+Only the leader (rank 0) reads the confidence scores (lanes.holdDrafts into the conf rule's
+draft depth); a follower packs the confidence input (126 KiB at one stream of six steps,
+hidden 5120 + markov_rank 256 fp32), runs the FP32 matvec and downloads scores no reader on
+its rank touches. With the switch a follower's pass ends its GPU work at the Markov loop's
+last collective (the drafts' _pick rides it), skipping the input's packing, the GEMV and the
+scores' download (3 launches a pass under TF_DS_CONF_PACK, 2N+5 without), and reads the
+draft ids back only when a consumer needs them (TF_DS_ENGRAM_SUBMIT_EARLY's stash hashing or
+a profile's pass counters). No effect on rank 0, under TF_DS_CHECK_INVALID (the pack's
+invalid-id flag) or TF_DS_PASS_PROFILE (the .conf phase); the layer_main replay tools keep
+the head outright. Rank-local: an uneven pair stays bit-identical.
+---
+ zig/src/families/dsv41/draft.zig      | 79 +++++++++++++++++++++++++--
+ zig/src/families/dsv41/layer_main.zig |  4 +-
+ zig/src/families/dsv41/model.zig      | 16 +++++-
+ zig/src/families/dsv41/native.zig     |  9 +++
+ 4 files changed, 98 insertions(+), 10 deletions(-)
+
+diff --git a/zig/src/families/dsv41/draft.zig b/zig/src/families/dsv41/draft.zig
+index 3557d74..985ab96 100644
+--- a/zig/src/families/dsv41/draft.zig
++++ b/zig/src/families/dsv41/draft.zig
+@@ -36,6 +36,8 @@ var conf_pack_noted = std.atomic.Value(bool).init(false);
+ var pass_profile_noted = std.atomic.Value(bool).init(false);
+ /// TF_DS_DRAFT_PREFETCH's engagement banner, at the first pass body that forks the prefetch (a graph's capture).
+ var draft_prefetch_noted = std.atomic.Value(bool).init(false);
++/// TF_DS_CONF_LEADER_ONLY's engagement banner, at the first pass that skips the confidence head.
++var conf_leader_noted = std.atomic.Value(bool).init(false);
+ 
+ const Engine = prompt.Engine;
+ const Chunk = prompt.Chunk;
+@@ -79,6 +81,53 @@ pub fn blockFromEnv(base: usize) !usize {
+     return parseBlock(if (std.c.getenv(block_env)) |v| std.mem.span(v) else null, base);
+ }
+ 
++/// TF_DS_CONF_LEADER_ONLY (off by default; rank-local, Model.open only: an uneven pair stays bit-identical): the
++/// drafter confidence head runs on the leader (rank 0) alone. Only the leader reads the scores (lanes.holdDrafts into
++/// the conf rule's draft depth); a follower packs the confidence input, runs the FP32 matvec and downloads scores
++/// nothing on its rank reads. The follower's pass then ends its GPU work at the Markov loop's last collective (the
++/// drafts' _pick rides it), and reads the draft ids back only when a consumer needs them (the early Engram stash).
++pub const conf_leader_env = "TF_DS_CONF_LEADER_ONLY";
++
++/// Whether a rank skips the confidence head and the scores' download (the switch, this rank's role, and the
++/// diagnostics that read the skipped work off): TF_DS_CHECK_INVALID's invalid-id flag is written by the head's pack
++/// gather (keep the checks when enabled), and TF_DS_PASS_PROFILE times its .conf phase. The replay tools
++/// (layer_main.zig) never set the flag and keep the head outright: their window checks read the scores.
++pub fn confLeaderOnly(on: bool, rank: u32, check_invalid: bool, pass_profile_on: bool) bool {
++    return on and rank != 0 and !check_invalid and !pass_profile_on;
++}
++
++/// The confidence head's launches a pass and the KiB its input packing writes (streams * steps rows of hidden +
++/// markov_rank fp32): the work a skip removes, aside from the scores' streams * steps * 4 bytes read back. The packed
++/// path (TF_DS_CONF_PACK) is the invalid flag's memset, one pack and the GEMV; the chain is the memset, a gatherRows
++/// and a toF32 a stream, the widened embs' toF32, two copyRows and the GEMV.
++pub const ConfWork = struct { launches: usize, input_kib: usize };
++
++pub fn confWork(streams: usize, steps: usize, hidden: usize, markov_rank: usize, conf_pack: bool) ConfWork {
++    return .{
++        .launches = if (conf_pack) 3 else 2 * streams + 5,
++        .input_kib = streams * steps * (hidden + markov_rank) * 4 / 1024,
++    };
++}
++
++test "TF_DS_CONF_LEADER_ONLY: a follower with clean diagnostics skips, nothing else does" {
++    for ([_]bool{ false, true }) |check_invalid| {
++        try std.testing.expect(!confLeaderOnly(false, 1, check_invalid, false)); // the switch off: as served
++        try std.testing.expect(!confLeaderOnly(true, 0, check_invalid, false)); // the leader prices its drafts by the scores
++        try std.testing.expect(!confLeaderOnly(true, 1, true, false)); // TF_DS_CHECK_INVALID reads the pack's flag
++        try std.testing.expect(!confLeaderOnly(true, 1, check_invalid, true)); // TF_DS_PASS_PROFILE times .conf
++        try std.testing.expect(confLeaderOnly(true, 1, check_invalid, false) == !check_invalid);
++        try std.testing.expect(confLeaderOnly(true, 3, check_invalid, false) == !check_invalid);
++    }
++}
++
++test "the confidence head's work a pass: 126 KiB packed at one stream of six steps" {
++    const w = confWork(1, 6, 5120, 256, true);
++    try std.testing.expectEqual(@as(usize, 3), w.launches);
++    try std.testing.expectEqual(@as(usize, 126), w.input_kib); // 6 * (5120 + 256) * 4 bytes
++    try std.testing.expectEqual(@as(usize, 7), confWork(1, 6, 5120, 256, false).launches);
++    try std.testing.expectEqual(@as(usize, 504), confWork(4, 6, 5120, 256, true).input_kib);
++}
++
+ test "TF_DS_DRAFT_BLOCK: unset is the checkpoint's block, a value from it to max_draft_block" {
+     try std.testing.expectEqual(@as(usize, 5), try parseBlock(null, 5));
+     try std.testing.expectEqual(@as(usize, 5), try parseBlock("", 5));
+@@ -371,6 +420,9 @@ pub const Drafter = struct {
+     steps: usize = 0,
+     drafts: [max_streams][max_block]i64 = undefined,
+     confs: [max_streams][max_block]f32 = undefined,
++    // TF_DS_CONF_LEADER_ONLY (confLeaderOnly, set at Model.open; false: as served): this rank skips the confidence
++    // head and the scores' download, and downloads the draft ids only when a consumer needs them (pass: want_drafts)
++    conf_leader_only: bool = false,
+ 
+     /// Every buffer for passes of up to max_rows rows and absorbs of up to a ring of rows; the Markov loop's cached
+     /// bias rows (Markov.fill, at load as served) for rank s.rank of s.world.
+@@ -402,6 +454,7 @@ pub const Drafter = struct {
+         dr.steps = 0;
+         dr.graphs = null;
+         dr.pt = null;
++        dr.conf_leader_only = false;
+         dr.pf_mode = .off;
+         dr.pf = null;
+         dr.pf_fork = null;
+@@ -667,7 +720,7 @@ pub const Drafter = struct {
+ 
+     /// BatchDraftGraph.run for N streams (tokens at positions q0 in slots): each stream's `steps` drafts and their
+     /// confidences into drafts / confs. Each slot's rings hold its positions before q0 (absorbed).
+-    pub fn pass(dr: *Drafter, e: *const Engine, ch: *const Chunk, pool: *const Pool, tokens: []const i64, q0: []const i64, slots: []const i64, steps: usize, probe: ?Probe, keyed: ?Keyed) !void {
++    pub fn pass(dr: *Drafter, e: *const Engine, ch: *const Chunk, pool: *const Pool, tokens: []const i64, q0: []const i64, slots: []const i64, steps: usize, probe: ?Probe, keyed: ?Keyed, want_drafts: bool) !void {
+         const N = tokens.len;
+         if (steps == 0 or steps > dr.n_most) return error.BadDraftPass;
+         const n = dr.blockRows(steps);
+@@ -722,17 +775,22 @@ pub const Drafter = struct {
+             dr.pf_out = false; // TF_DS_DRAFT_PREFETCH: an eager pass that failed owes the next one no join
+             return err;
+         };
+-        // one host read: the drafts and the confidences
++        // one host read: the drafts and the confidences (TF_DS_CONF_LEADER_ONLY: a skipping follower reads the
++        // drafts only when a consumer needs them - want_drafts: the early Engram stash or a profile's counters - and
++        // never the scores: dr.conf was never written)
+         try e.s.synchronize();
+         var hc: [max_streams * max_block]f32 = undefined;
+-        try e.d.check(e.d.api.cuMemcpyDtoH_v2(&ho, dr.out, N * ts * 8), "cuMemcpyDtoH");
+-        try e.d.check(e.d.api.cuMemcpyDtoH_v2(&hc, dr.conf, N * steps * 4), "cuMemcpyDtoH");
++        const read_drafts = want_drafts or !dr.conf_leader_only;
++        if (read_drafts) try e.d.check(e.d.api.cuMemcpyDtoH_v2(&ho, dr.out, N * ts * 8), "cuMemcpyDtoH");
++        if (!dr.conf_leader_only) try e.d.check(e.d.api.cuMemcpyDtoH_v2(&hc, dr.conf, N * steps * 4), "cuMemcpyDtoH");
+         if (dr.pt) |t| {
+             try t.mark(e.s, .read);
+             try t.finish();
+         }
+-        for (0..N) |i| for (0..steps) |j| {
++        if (read_drafts) for (0..N) |i| for (0..steps) |j| {
+             dr.drafts[i][j] = ho[i * ts + 1 + j];
++        };
++        if (!dr.conf_leader_only) for (0..N) |i| for (0..steps) |j| {
+             dr.confs[i][j] = hc[i * steps + j];
+         };
+         dr.streams = N;
+@@ -835,6 +893,17 @@ pub const Drafter = struct {
+             }
+         }
+         try Probe.check(probe, .markov, S, dr.out);
++        // TF_DS_CONF_LEADER_ONLY: the follower's confidence head is local work its role never reads - its GPU work ends
++        // at the Markov loop's last collective (the handoff prefetch above is its own next forward's warm-up, its own
++        // switch's work; joinPrefetch below is the body's owed join)
++        if (dr.conf_leader_only) {
++            if (!conf_leader_noted.swap(true, .monotonic)) {
++                const w = confWork(N, steps, c.hidden, c.markov_rank, e.ops.conf_pack_fn != null);
++                std.log.info("dsv41: {s}=1 (rank-local): the follower skips the drafter confidence head, {d} launches and {d} KiB of input a pass (this one: {d} streams x {d} steps); the draft ids still read back for the Engram stash", .{ conf_leader_env, w.launches, w.input_kib, N, steps });
++            }
++            try dr.joinPrefetch(e);
++            return;
++        }
+         // the confidence head: [xc (fp32), the embedding rows the steps read (fp32)] @ conf^T, a stream's first steps rows
+         const rank = c.markov_rank;
+         const w = d + rank;
+diff --git a/zig/src/families/dsv41/layer_main.zig b/zig/src/families/dsv41/layer_main.zig
+index 03d7092..10d7bbf 100644
+--- a/zig/src/families/dsv41/layer_main.zig
++++ b/zig/src/families/dsv41/layer_main.zig
+@@ -787,7 +787,7 @@ fn runRounds(run: *Run, eng: *const prompt.Engine, ch: *prompt.Chunk, caches: *c
+                 }
+             }
+             var dc: DraftCheck = .{ .run = run, .call = bp.call, .layers = c.layers, .after = bp.call, .vis = vis[0..nv] };
+-            dr.pass(eng, ch, &pool, tok, q0, sl, steps, .{ .ctx = &dc, .at = DraftCheck.at }, null) catch |err| {
++            dr.pass(eng, ch, &pool, tok, q0, sl, steps, .{ .ctx = &dc, .at = DraftCheck.at }, null, true) catch |err| {
+                 if (err == error.DraftMismatch) return false;
+                 try w_out.print("{{\"rank\": {d}, \"round\": {d}, \"draft_call\": {d}, \"error\": \"{s}\"}}\n", .{ run.rank, k, bp.call, @errorName(err) });
+                 try w_out.flush();
+@@ -1287,7 +1287,7 @@ fn runDrafted(run: *Run, eng: *const prompt.Engine, ch: *prompt.Chunk, caches: *
+                 }
+             }
+             var dc: DraftCheck = .{ .run = run, .call = bp.call, .layers = c.layers, .after = bp.call, .vis = vis[0..nv] };
+-            dr.pass(eng, ch, &pool, tok[0..nd], q0[0..nd], sl[0..nd], steps, .{ .ctx = &dc, .at = DraftCheck.at }, null) catch |err| {
++            dr.pass(eng, ch, &pool, tok[0..nd], q0[0..nd], sl[0..nd], steps, .{ .ctx = &dc, .at = DraftCheck.at }, null, true) catch |err| {
+                 if (err == error.DraftMismatch) return false;
+                 try w_out.print("{{\"rank\": {d}, \"draft_call\": {d}, \"error\": \"{s}\"}}\n", .{ run.rank, bp.call, @errorName(err) });
+                 try w_out.flush();
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 0a218f1..40628f0 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -594,6 +594,9 @@ pub const Model = struct {
+                 m.pass_timer = t;
+                 m.dr.?.pt = t;
+             }
++            // TF_DS_CONF_LEADER_ONLY: the follower's skip, decided past the diagnostics that turn it off (rank-local:
++            // an uneven pair stays bit-identical - the leader never skips and a follower's scores have no reader)
++            m.dr.?.conf_leader_only = draft.confLeaderOnly(envOnOff(envOf(draft.conf_leader_env)), m.rank, m.ops.check_invalid, pass_profile_on);
+         }
+         errdefer if (m.pass_timer) |t| {
+             t.deinit();
+@@ -1987,7 +1990,7 @@ pub const Model = struct {
+         const dr = &m.dr.?;
+         const pool = &m.dpool.?;
+         for (q0, slots) |q, s| pool.absorbed[@intCast(s)] = @intCast(q);
+-        try dr.pass(&m.eng, &m.ch, pool, tokens, q0, slots, steps, null, keyed);
++        try dr.pass(&m.eng, &m.ch, pool, tokens, q0, slots, steps, null, keyed, m.prof or m.stashWants());
+         if (m.prof) {
+             // a profile's pass counters: step j of stream i reads out[i, j] (the pending token, then the drafts the
+             // pass just read back); the slot table is fixed at load, so the host knows which rows were cached
+@@ -1999,15 +2002,22 @@ pub const Model = struct {
+         }
+     }
+ 
++    /// TF_DS_ENGRAM_SUBMIT_EARLY (0161): whether stashPass reads a pass's draft ids on the host (its gate below: the
++    /// stash's rows hashed through the AIO ring's tables) - the drafter pass reads the ids back for it (its want_drafts).
++    fn stashWants(m: *const Model) bool {
++        const eh = if (m.eh) |*x| x else return false;
++        return m.rd.esh.enabled and eh.aio != null;
++    }
++
+     /// TF_DS_ENGRAM_SUBMIT_EARLY (0161): the drafter pass's return hashes each stream's next window rows - the
+     /// pending token and the drafts it holds (depths[i]; a follower passes the batch's steps: the same superset or
+     /// longer) - into the round's Engram stash (rd.esh, keyed by pool slot), so the round's start can flatten and
+     /// submit them for the windows the stash covers (round.forward), the hashing off the round's critical path.
+     /// No-op without the switch, the Engram tables or the AIO ring (the pool fallback has nothing to move).
+     pub fn stashPass(m: *Model, seqs: []const []const i32, tokens: []const i64, q0: []const i64, slots: []const i64, depths: []const usize, drafts: []const [draft.max_block]i64) void {
++        if (!m.stashWants()) return;
+         const st = &m.rd.esh;
+-        const eh = if (m.eh) |*x| x else return;
+-        if (!st.enabled or eh.aio == null) return;
++        const eh = &m.eh.?;
+         const hasher = eh.hasher;
+         const per = hasher.layers * hasher.cols();
+         const back = hasher.ngram - 1; // the ids before a row its n-grams reach back to
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 39f7373..14ab11b 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -17,6 +17,15 @@
+ //!   TF_DS_DRAFT_MS                              the drafter allowance in ms (float; the served DRAFT_MS 3.5 unless set:
+ //!                                               the measured pass is ~3.9 at one stream, ~7.2 at four, ~11 at eight, so
+ //!                                               set it at the served stream count; a malformed value refuses the start)
++//!   TF_DS_CONF_LEADER_ONLY=1 (or 'on')         the drafter confidence head runs on the leader (rank 0) alone (0295):
++//!                                               a follower skips the confidence input's packing, the FP32 matvec and the
++//!                                               scores' download (purely local work after the pass's last Markov
++//!                                               collective; only the leader reads the scores, for draft depth), and reads
++//!                                               the draft ids back only when TF_DS_ENGRAM_SUBMIT_EARLY's stash or a profile
++//!                                               consumes them. No effect on rank 0, under TF_DS_CHECK_INVALID (the pack's
++//!                                               invalid-id flag) or TF_DS_PASS_PROFILE (the .conf phase); the replay tools
++//!                                               keep the head outright. Rank-local: an uneven pair stays bit-identical
++//!                                               (unset: both ranks compute as served)
+ //!   TF_DS_T26_KEYED_DRAFT=1                     a sampled stream's drafts take the sampler's keyed Gumbel noise (seed, position,
+ //!                                               token id) on the drafter's logits, so they match the target's draws (unset: off;
+ //!                                               greedy streams unchanged; set alike on every rank: ops.zig reads it at load)
+-- 
+2.56.1
+

@@ -1,0 +1,11 @@
+# 0283: the L2 prefetch's pacing and budget, one knob at a time on the new image (the knobs do not exist in
+# production's). Unset is the kit's served 3000 ns / 230 GB/s / 16 MiB. The drafter's prefetch stays off, so each
+# knob moves the forward's prefetch alone. The kernel writes nothing: no arm can move a bit.
+ctl1|tensorfold-dsv41:bench-fused-next-1421187|
+rate180|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_L2_RATE_GBPS=180
+rate270|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_L2_RATE_GBPS=270
+delay0|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_L2_DELAY_NS=0
+delay10k|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_L2_DELAY_NS=10000
+bud8|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_L2_BUDGET_MIB=8
+bud32|tensorfold-dsv41:bench-fused-next-1421187|TF_DS_L2_BUDGET_MIB=32
+ctl2|tensorfold-dsv41:bench-fused-next-1421187|

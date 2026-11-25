@@ -1,0 +1,246 @@
+From 831786ce2ba69fd391a16832959b3deff31f818d Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Mon, 23 Nov 2026 12:33:46 -0800
+Subject: [PATCH 2/4] 0294 dsv41: TF_DS_ROUND_MS_FIT (off by default) the round
+ table re-fit at the live shape
+
+round_ms_fit is the trace's per-layer model evaluated at rows 1..24 (layer_fit.txt, fx1L,
+ranks pooled, 40 target layers: 34.656 ms at 6 rows + 3.1536 ms a row), shipped behind its
+own switch; the default table is unchanged and TF_DS_ROUND_MS still wins when set. The
+refit script and its residual evidence are committed (tools/round_fit.py,
+tools/round_fit_residuals.txt): fx1L and fx1Lb agree to 0.15%, the served table sits a
+near-constant 17-19 ms over the forward (its wall share), and the live walls (todo.md:714)
+imply 25.5 ms of non-forward share at 8 streams and 8.2 ms at 4 - a stream-count term a
+rows-only table cannot carry (depth.zig Rule.overhead), recorded as the open decision.
+---
+ tools/round_fit.py                | 113 ++++++++++++++++++++++++++++++
+ tools/round_fit_residuals.txt     |  38 ++++++++++
+ zig/src/families/dsv41/draft.zig  |  18 +++++
+ zig/src/families/dsv41/model.zig  |   2 +-
+ zig/src/families/dsv41/native.zig |   3 +
+ 5 files changed, 173 insertions(+), 1 deletion(-)
+ create mode 100644 tools/round_fit.py
+ create mode 100644 tools/round_fit_residuals.txt
+
+diff --git a/tools/round_fit.py b/tools/round_fit.py
+new file mode 100644
+index 0000000..4e40d81
+--- /dev/null
++++ b/tools/round_fit.py
+@@ -0,0 +1,113 @@
++#!/usr/bin/env python3
++"""Re-fit the served ROUND_MS table from the trace's per-layer model (0294).
++
++Input: layer_fit.txt (runs/trace-review-20261123/out/layer_fit.txt in the main checkout): per layer, the
++producer interval at 6 rows (us) and its slope (us/row), least squares on rows 2-7, ranks pooled, one column
++group per traced arm (fx1L, fx1Lb, np1L, ns1L; runs/sched-20261122/b2/mech/). The forward of an r-row round is
++the sum over the 40 target layers of (attn@6 + moe@6) + (r - 6) * (attn slope + moe slope): that is the table
++this prints, rows 1..24, at the live shape the trace ran (the 2x-DGX-Spark pair, ranks pooled).
++
++usage: python3 tools/round_fit.py <layer_fit.txt> [--variant fx1L] [--rows 24]
++
++The output is the residual evidence for tools/round_fit_residuals.txt: the per-variant coefficients, the zig
++literal for the shipped table, and residuals against (1) the served round_ms (draft.zig) and (2) the live round
++walls recorded in todo.md:714. The walls minus the fitted forward are the round's non-forward share (host,
++absorb, sampling, the streams' share): the rows-only table cannot carry a stream-count term (depth.zig's
++Rule.overhead prices "a shared round's ms past its forward, by streams"), which is why the two wall anchors
++imply different constants.
++"""
++import re
++import sys
++
++# the served table (draft.zig round_ms) and the live walls (todo.md:714; runs/overnight-20261122 provenance)
++SERVED = [30.0, 35.2, 39.9, 44.9, 48.6, 52.1, 55.6, 59.1, 62.7, 66.3, 69.6, 72.9,
++          75.5, 78.2, 81.3, 84.4, 87.5, 90.6, 93.7, 96.8, 99.9, 103.0, 106.1, 109.2]
++WALLS = [  # (rows, streams, wall ms, source)
++    (16, 8, 91.7, "todo.md:714 (the live eight-stream round)"),
++    (20, 4, 87.0, "todo.md:714 (the measured four-stream round, ~87)"),
++]
++
++def main():
++    args = sys.argv[1:]
++    if not args:
++        sys.exit(__doc__)
++    path, variant, nrows = args[0], "fx1L", 24
++    i = 1
++    while i < len(args):
++        if args[i] == "--variant":
++            variant, i = args[i + 1], i + 2
++        elif args[i] == "--rows":
++            nrows, i = int(args[i + 1]), i + 2
++        else:
++            sys.exit(f"unknown arg: {args[i]}")
++    names, layers, footer = [], [], {}
++    header = ""
++    for line in open(path):
++        s = line.strip()
++        if not s:
++            continue
++        if s.startswith("#"):
++            m = re.match(r"# (\w+): sum over layers at 6 rows: attention ([\d.]+) ms, MoE ([\d.]+) ms;"
++                         r" MoE slope sum ([\d.]+) us/row, attention slope sum ([\d.]+) us/row", s)
++            if m:
++                footer[m.group(1)] = tuple(float(m.group(k)) for k in (2, 3, 4, 5))
++            continue
++        if not header:
++            header = s
++            names = re.findall(r"(\w+) attn@6", header)
++            continue
++        v = []
++        for x in s.split():
++            try:
++                v.append(float(x))
++            except ValueError:
++                pass  # trailing layer tags: "engram", "kv"
++        layers.append(v[1:])  # drop the layer index: per variant, attn@6 slope moe@6 slope places/row
++    if not names or not layers:
++        sys.exit(f"no per-layer rows found in {path}")
++    if variant not in names:
++        sys.exit(f"variant {variant} not in {names}")
++    vi = names.index(variant)
++    col = [row[vi * 5:vi * 5 + 5] for row in layers]
++    attn6 = sum(r[0] for r in col) / 1000.0
++    attn_slope = sum(r[1] for r in col) / 1000.0
++    moe6 = sum(r[2] for r in col) / 1000.0
++    moe_slope = sum(r[3] for r in col) / 1000.0
++    f = footer.get(variant)
++    if f:  # the file's own footer cross-checks the sums
++        assert abs(f[0] - attn6) < 0.01 and abs(f[1] - moe6) < 0.01, f
++        assert abs(f[2] - moe_slope * 1000) < 0.5 and abs(f[3] - attn_slope * 1000) < 0.5, f
++    slope = attn_slope + moe_slope
++    at6 = attn6 + moe6
++
++    def fwd(r):
++        return at6 + (r - 6) * slope
++
++    print(f"# 0294 round_ms re-fit: layer_fit.txt = {path}")
++    print(f"# layers {len(layers)}, variants {names}, shipped variant {variant} (ranks pooled, least squares rows 2-7)")
++    for n in names:
++        c = [row[names.index(n) * 5:names.index(n) * 5 + 5] for row in layers]
++        a6 = sum(r[0] for r in c) / 1000.0
++        m6 = sum(r[2] for r in c) / 1000.0
++        sl = (sum(r[1] for r in c) + sum(r[3] for r in c)) / 1000.0
++        print(f"# {n}: forward at 6 rows {a6 + m6:.3f} ms (attention {a6:.3f} + MoE {m6:.3f}), slope {sl:.4f} ms/row")
++    print(f"# zig literal (rows 1..{nrows}), round_ms_fit:")
++    vals = [round(fwd(r), 1) for r in range(1, nrows + 1)]
++    print("pub const round_ms_fit = [_]f64{ " + ", ".join(f"{v}" for v in vals) + " };")
++    print("# residuals: fitted forward vs the served round_ms (draft.zig) and the live round walls (todo.md:714)")
++    print("# rows  fitted  served  fit-served")
++    for r in range(1, nrows + 1):
++        print(f"# {r:4d}  {fwd(r):6.2f}  {SERVED[r - 1]:6.1f}  {fwd(r) - SERVED[r - 1]:+8.2f}")
++    print(f"# the served table sits {SERVED[5] - fwd(6):.1f} ms over the forward at 6 rows and"
++          f" {SERVED[23] - fwd(24):.1f} over at 24 (a near-constant wall/forward gap; its own slope"
++          f" {SERVED[23] - SERVED[22]:.1f} vs the trace's {slope:.2f} ms/row)")
++    for rows, streams, wall, src in WALLS:
++        print(f"# wall {wall} ms at {rows} rows / {streams} streams ({src}): wall - fitted = {wall - fwd(rows):+.1f} ms"
++              f" (the non-forward share), wall - served = {wall - SERVED[rows - 1]:+.1f} ms")
++    print(f"# the two walls imply {WALLS[0][2] - fwd(WALLS[0][0]):.1f} and {WALLS[1][2] - fwd(WALLS[1][0]):.1f} ms"
++          f" of non-forward share at 8 and 4 streams: the stream-count term a rows-only table cannot carry"
++          f" (depth.zig Rule.overhead). The shipped table is the forward (draft.zig's contract: a round's forward"
++          f" ms by its rows).")
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/round_fit_residuals.txt b/tools/round_fit_residuals.txt
+new file mode 100644
+index 0000000..a53dd6f
+--- /dev/null
++++ b/tools/round_fit_residuals.txt
+@@ -0,0 +1,38 @@
++# 0294 round_ms re-fit: layer_fit.txt = /home/colum/Workspace/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/trace-review-20261123/out/layer_fit.txt
++# layers 40, variants ['fx1L', 'fx1Lb', 'np1L', 'ns1L'], shipped variant fx1L (ranks pooled, least squares rows 2-7)
++# fx1L: forward at 6 rows 34.656 ms (attention 10.322 + MoE 24.334), slope 3.1536 ms/row
++# fx1Lb: forward at 6 rows 34.707 ms (attention 10.333 + MoE 24.373), slope 3.1601 ms/row
++# np1L: forward at 6 rows 37.083 ms (attention 11.952 + MoE 25.130), slope 3.2085 ms/row
++# ns1L: forward at 6 rows 35.184 ms (attention 10.509 + MoE 24.674), slope 3.2213 ms/row
++# zig literal (rows 1..24), round_ms_fit:
++pub const round_ms_fit = [_]f64{ 18.9, 22.0, 25.2, 28.3, 31.5, 34.7, 37.8, 41.0, 44.1, 47.3, 50.4, 53.6, 56.7, 59.9, 63.0, 66.2, 69.3, 72.5, 75.7, 78.8, 82.0, 85.1, 88.3, 91.4 };
++# residuals: fitted forward vs the served round_ms (draft.zig) and the live round walls (todo.md:714)
++# rows  fitted  served  fit-served
++#    1   18.89    30.0    -11.11
++#    2   22.04    35.2    -13.16
++#    3   25.20    39.9    -14.70
++#    4   28.35    44.9    -16.55
++#    5   31.50    48.6    -17.10
++#    6   34.66    52.1    -17.44
++#    7   37.81    55.6    -17.79
++#    8   40.96    59.1    -18.14
++#    9   44.12    62.7    -18.58
++#   10   47.27    66.3    -19.03
++#   11   50.42    69.6    -19.18
++#   12   53.58    72.9    -19.32
++#   13   56.73    75.5    -18.77
++#   14   59.89    78.2    -18.31
++#   15   63.04    81.3    -18.26
++#   16   66.19    84.4    -18.21
++#   17   69.35    87.5    -18.15
++#   18   72.50    90.6    -18.10
++#   19   75.65    93.7    -18.05
++#   20   78.81    96.8    -17.99
++#   21   81.96    99.9    -17.94
++#   22   85.11   103.0    -17.89
++#   23   88.27   106.1    -17.83
++#   24   91.42   109.2    -17.78
++# the served table sits 17.4 ms over the forward at 6 rows and 17.8 over at 24 (a near-constant wall/forward gap; its own slope 3.1 vs the trace's 3.15 ms/row)
++# wall 91.7 ms at 16 rows / 8 streams (todo.md:714 (the live eight-stream round)): wall - fitted = +25.5 ms (the non-forward share), wall - served = +7.3 ms
++# wall 87.0 ms at 20 rows / 4 streams (todo.md:714 (the measured four-stream round, ~87)): wall - fitted = +8.2 ms (the non-forward share), wall - served = -9.8 ms
++# the two walls imply 25.5 and 8.2 ms of non-forward share at 8 and 4 streams: the stream-count term a rows-only table cannot carry (depth.zig Rule.overhead). The shipped table is the forward (draft.zig's contract: a round's forward ms by its rows).
+diff --git a/zig/src/families/dsv41/draft.zig b/zig/src/families/dsv41/draft.zig
+index b9e4d08..3557d74 100644
+--- a/zig/src/families/dsv41/draft.zig
++++ b/zig/src/families/dsv41/draft.zig
+@@ -1005,6 +1005,24 @@ pub fn passSteps(n_streams: usize, slots: usize, drafts: usize, round_rows: usiz
+ 
+ /// The served ROUND_MS table (TF_DS_ROUND_MS unset): a round's forward ms by its rows, and DRAFT_MS.
+ pub const round_ms = [_]f64{ 30.0, 35.2, 39.9, 44.9, 48.6, 52.1, 55.6, 59.1, 62.7, 66.3, 69.6, 72.9, 75.5, 78.2, 81.3, 84.4, 87.5, 90.6, 93.7, 96.8, 99.9, 103.0, 106.1, 109.2 };
++
++/// TF_DS_ROUND_MS_FIT=1 (off by default; Model.open's choice of table): the round table re-fit from the trace's
++/// per-layer model at the live shape (runs/trace-review-20261123/out/layer_fit.txt, fx1L, ranks pooled, 40 target
++/// layers): a round's forward ms by its rows, (attn@6 + moe@6) + (rows - 6) * slope = 34.656 ms at 6 rows and
++/// 3.1536 ms a row. Residuals and the other arms' variants: tools/round_fit.py and tools/round_fit_residuals.txt.
++/// It is the forward (this table's contract); the served round_ms sits a near-constant 17-19 ms over it (the wall
++/// share) and the live walls imply 8-26 ms of non-forward share by stream count, which a rows-only table cannot
++/// carry (depth.zig's Rule.overhead prices "a shared round's ms past its forward, by streams"). The replay tools
++/// (chooseK) keep the served table: the recordings priced rounds with it.
++pub const round_ms_fit = [_]f64{ 18.9, 22.0, 25.2, 28.3, 31.5, 34.7, 37.8, 41.0, 44.1, 47.3, 50.4, 53.6, 56.7, 59.9, 63.0, 66.2, 69.3, 72.5, 75.7, 78.8, 82.0, 85.1, 88.3, 91.4 };
++
++test "round_ms_fit is the trace's forward model at rows 1..24" {
++    try std.testing.expectEqual(round_ms.len, round_ms_fit.len);
++    // 34.656 ms at 6 rows, 3.1536 ms a row (tools/round_fit_residuals.txt), to 0.1 ms
++    try std.testing.expectEqual(@as(f64, 34.7), round_ms_fit[5]);
++    try std.testing.expectEqual(@as(f64, 91.4), round_ms_fit[23]);
++    for (1..round_ms_fit.len) |i| try std.testing.expect(round_ms_fit[i] > round_ms_fit[i - 1]);
++}
+ pub const draft_ms: f64 = 3.5;
+ 
+ /// TF_DS_DRAFT_MS (unset: the served draft_ms above), a float in milliseconds: the drafter allowance every reader of
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 3ab2cca..0a218f1 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -338,7 +338,7 @@ pub const Model = struct {
+             m.debug_split = p;
+         }
+         m.rs = .{};
+-        m.round_ms = o.round_ms orelse &draft.round_ms;
++        m.round_ms = o.round_ms orelse if (envOnOff(envOf("TF_DS_ROUND_MS_FIT"))) &draft.round_ms_fit else &draft.round_ms;
+         if (m.round_ms.len == 0) return error.BadRoundMs;
+         m.draft_ms = try draft.draftMsFromEnv(); // TF_DS_DRAFT_MS: a malformed value refuses startup
+         m.pool_cap = o.pool; // (agree, below, compares it with the other rank's)
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index b85265b..39f7373 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -11,6 +11,9 @@
+ //!                                               they need, the pool's caches by the context)
+ //!   TF_DS_ROUND_MS                              the lane core's round costs by rows (ms, comma separated; the
+ //!                                               served ROUND_MS unless set: a four-node lane's rounds cost less)
++//!   TF_DS_ROUND_MS_FIT=1                        the round table re-fit from the trace's per-layer model at the live shape
++//!                                               (0294; off: the served ROUND_MS; TF_DS_ROUND_MS still wins; residuals:
++//!                                               tools/round_fit_residuals.txt)
+ //!   TF_DS_DRAFT_MS                              the drafter allowance in ms (float; the served DRAFT_MS 3.5 unless set:
+ //!                                               the measured pass is ~3.9 at one stream, ~7.2 at four, ~11 at eight, so
+ //!                                               set it at the served stream count; a malformed value refuses the start)
+-- 
+2.56.1
+

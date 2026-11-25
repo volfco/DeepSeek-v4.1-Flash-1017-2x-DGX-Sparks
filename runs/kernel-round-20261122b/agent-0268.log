@@ -1,0 +1,9 @@
+**Patch 0268 complete.** Premise holds; one commit `cbcbb41` on `kernel-0268`, tree clean.
+
+**What was done**
+- **`TF_DS_DRAFT_QKV_NORM`** (off by default): `Drafter.attention`'s per-stage query RMSNorm + rotation and KV norm + RoPE run as the decoder's one `_q_kv_norm` kit launch — **6 → 3 norm launches per pass** (3 DSpark blocks) at every N=1..4, n=5..7. Files: new pure module `draft_qkv_norm.zig`, `draft.zig` swap with the two-launch fallback arm, `ops.zig` bool wiring, `dsv41.zig` registration.
+- **Premise evidence** (`h0268/kit-q-kv-norm.md`): the public kit source shows `_q_kv_norm` is literally the two kernels' programs fused ("each program the code of the kernel it replaces") with the identical `if slot >= 0` sentinel guard — the drafter's −1 list (`dr.row(5)`) leaves the ring untouched. Kit dispatch at draft rows follows from `aot.zig` matching (no grid in resolution) plus a fixture-class match (consts, dtypes, `xs/os_/ring_size = 1280/1280/576`) at 28 rows.
+- **Gate**: `zig build test` exit 0 (a deliberate-failure probe confirmed the gate is sound); CUDA syntax check ok via the previous round's fixed stubs (the shared stubs fail on the pristine base — same finding as report-0260); `h0268/` harness 20/20, freshly re-run post-review.
+- **Independent reviews** (`h0268/review-code.md`, `review-harness.md`): both "OK with notes, no blockers"; findings dispositioned in `report-0268.md`.
+
+**Skipped / not checked:** kit arithmetic parity and real-kit `aot.json` resolution are GPU-gate-only (the report lists exactly what to byte-compare: `dr.qr`, `dr.xhq`, `dr.kvb`, and the untouched ring); `code-review-graph` isn't available here (the `reviewer` subagent covered both reviews). The main risk: the harness's call-site model must track `draft.zig:751–762` if those lines ever change.

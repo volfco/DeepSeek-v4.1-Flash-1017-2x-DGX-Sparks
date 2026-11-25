@@ -1,0 +1,151 @@
+From a4db035f01222ef4741f5e033891402f106880ab Mon Sep 17 00:00:00 2001
+From: lane-tier0 <lane@tier0>
+Date: Mon, 23 Nov 2026 13:03:43 -0800
+Subject: [PATCH 3/4] 0299 dsv41: clock_fold: the round-clock profile's host
+ fold + the clk init pins (rounds read 0xAAAA fill, every phase 0 us)
+
+The per-phase GPU-clock profiler's fold moves out of Model.verify into
+clock_fold.zig (pure host code) so its state is testable without a GPU:
+the host test constructs the accumulators and one round's clock buffer
+and reads nonzero per-phase us. The pin test names every clk field that
+Model.open and Round.init must assign (both init lists start from
+undefined, so the struct defaults are dead code - the bug class that had
+the served rounds counter reading 0xaaaaaaaaaaaaaaaa with every phase
+dividing to 0 us). Behavior identical: verify calls fold with the same
+buffer and bounds.
+---
+ zig/src/families/dsv41/clock_fold.zig | 93 +++++++++++++++++++++++++++
+ zig/src/families/dsv41/model.zig      | 10 +--
+ 2 files changed, 96 insertions(+), 7 deletions(-)
+ create mode 100644 zig/src/families/dsv41/clock_fold.zig
+
+diff --git a/zig/src/families/dsv41/clock_fold.zig b/zig/src/families/dsv41/clock_fold.zig
+new file mode 100644
+index 0000000..3a8894b
+--- /dev/null
++++ b/zig/src/families/dsv41/clock_fold.zig
+@@ -0,0 +1,93 @@
++//! The round-clock profile's host fold (Model.verify's): one round's raw GPU clock buffer into the process's per-tag
++//! gap sums and counts, and the rounds counted. The buffer is [1 + 2 * Round.max_clocks] u64: the clock count, then
++//! each clock's ns timestamp and its tag (PhaseTimer.Phase or Round.clock_*); the gap from one clock to the next is
++//! attributed to the tag that ends it. Pure host code so a test can construct the profiler state without a GPU.
++const std = @import("std");
++
++/// h = one round's clock buffer as read back from the device. clk_* are the Model's accumulators; every call counts
++/// one round (a round whose buffer holds fewer than two clocks contributes no gaps).
++pub fn fold(clk_ph: *[256]u64, clk_cnt: *[256]u64, clk_rounds: *u64, h: []const u64) void {
++    if (h.len < 3) return;
++    const cap = (h.len - 1) / 2;
++    const n = @min(h[0], cap);
++    for (1..n) |i| {
++        const tag = h[2 + 2 * i] & 0xff;
++        clk_ph[tag] += h[1 + 2 * i] -% h[1 + 2 * (i - 1)];
++        clk_cnt[tag] += 1;
++    }
++    clk_rounds.* += 1;
++}
++
++test "the fold reads nonzero phases from a constructed profiler state (0299: rounds read undefined fill and every phase read 0 us)" {
++    // the profiler state: the Model's three accumulators, starting from their init (undefined fill must not apply)
++    var clk_ph: [256]u64 = @splat(0);
++    var clk_cnt: [256]u64 = @splat(0);
++    var clk_rounds: u64 = 0;
++    // one round's buffer: start @1000 ns, a_in @2500, a_q @2900, tail @6900; the rest is the arena's undefined fill
++    var h: [1 + 2 * 8]u64 = @splat(0xaaaaaaaaaaaaaaaa);
++    h[0] = 4;
++    h[1] = 1000;
++    h[2] = 250; // clock_start
++    h[3] = 2500;
++    h[4] = 11; // a_in
++    h[5] = 2900;
++    h[6] = 12; // a_q
++    h[7] = 6900;
++    h[8] = 252; // clock_tail
++    fold(&clk_ph, &clk_cnt, &clk_rounds, &h);
++    fold(&clk_ph, &clk_cnt, &clk_rounds, &h);
++    try std.testing.expectEqual(@as(u64, 2), clk_rounds);
++    // each gap lands on the tag that ends it, summed over the two rounds
++    try std.testing.expectEqual(@as(u64, 3000), clk_ph[11]); // a_in: 2500 - 1000
++    try std.testing.expectEqual(@as(u64, 800), clk_ph[12]); // a_q: 2900 - 2500
++    try std.testing.expectEqual(@as(u64, 8000), clk_ph[252]); // tail: 6900 - 2900
++    try std.testing.expectEqual(@as(u64, 2), clk_cnt[11]);
++    try std.testing.expectEqual(@as(u64, 0), clk_ph[250]); // the start clock opens no gap
++    try std.testing.expectEqual(@as(u64, 0), clk_cnt[250]);
++    // the printers' per-round us (clk_ph / rounds / 1e3) is nonzero for each phase that ran
++    try std.testing.expectEqual(@as(f64, 1.5), @as(f64, @floatFromInt(clk_ph[11])) / @as(f64, @floatFromInt(clk_rounds)) / 1e3);
++    try std.testing.expectEqual(@as(f64, 0.4), @as(f64, @floatFromInt(clk_ph[12])) / @as(f64, @floatFromInt(clk_rounds)) / 1e3);
++}
++
++test "the fold never reads past the clock count: fill after it and a count past the buffer's cap are both bounded" {
++    var clk_ph: [256]u64 = @splat(0);
++    var clk_cnt: [256]u64 = @splat(0);
++    var clk_rounds: u64 = 0;
++    var h: [1 + 2 * 4]u64 = @splat(0xaaaaaaaaaaaaaaaa);
++    h[0] = 512; // past the four slots this buffer holds
++    h[1] = 10;
++    h[2] = 1;
++    h[3] = 20;
++    h[4] = 2;
++    h[5] = 30;
++    h[6] = 3;
++    h[7] = 40;
++    h[8] = 4;
++    fold(&clk_ph, &clk_cnt, &clk_rounds, &h);
++    try std.testing.expectEqual(@as(u64, 1), clk_rounds);
++    try std.testing.expectEqual(@as(u64, 30), clk_ph[2] + clk_ph[3] + clk_ph[4]); // gaps 10 + 10 + 10, fill never read
++    try std.testing.expectEqual(@as(u64, 3), clk_cnt[2] + clk_cnt[3] + clk_cnt[4]);
++    // one clock alone: counted as a round, no gaps
++    clk_ph = @splat(0);
++    clk_cnt = @splat(0);
++    clk_rounds = 0;
++    h[0] = 1;
++    fold(&clk_ph, &clk_cnt, &clk_rounds, &h);
++    try std.testing.expectEqual(@as(u64, 1), clk_rounds);
++    try std.testing.expectEqual(@as(u64, 0), clk_cnt[2]);
++}
++
++test "the profile's fields are assigned where the bug class bites: Model.open and Round.init start from undefined" {
++    // field-by-field init leaves the struct's defaults dead code, so each clk field's init list must name it (the
++    // served build that lost Model.open's three lines printed rounds as 0xAAAA... and every phase as 0 us)
++    const msrc = @embedFile("model.zig");
++    const at = std.mem.indexOf(u8, msrc, "pub fn open(").?;
++    const body = msrc[at..std.mem.indexOfPos(u8, msrc, at, "const d = ctx.d;").?];
++    for ([_][]const u8{ "m.clk_ph = ", "m.clk_cnt = ", "m.clk_rounds = " }) |f|
++        try std.testing.expect(std.mem.indexOf(u8, body, f) != null);
++    const rsrc = @embedFile("round.zig");
++    const rat = std.mem.indexOf(u8, rsrc, "pub fn init(e: *const Engine").?;
++    const rbody = rsrc[rat..std.mem.indexOfPos(u8, rsrc, rat, "pub fn useShard(").?];
++    for ([_][]const u8{ "rd.clk = ", "rd.clk_marks = ", "rd.clk_shard = ", "rd.clk_ratio = ", "rd.clk_layers = ", "rd.cur_ratio = ", "rd.launches = ", "rd.launch_mark = " }) |f|
++        try std.testing.expect(std.mem.indexOf(u8, rbody, f) != null);
++}
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index f302b74..a430780 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -38,6 +38,7 @@ const prompt_rows = @import("prompt_rows.zig");
+ const expert_prune = @import("expert_prune.zig");
+ const prefill_prof = @import("prefill_prof.zig");
+ const key_prof = @import("key_prof.zig");
++const clock_fold = @import("clock_fold.zig");
+ const pass_profile = @import("pass_profile.zig");
+ const markov_cache = @import("markov_cache.zig");
+ const topk_merge = @import("topk_merge.zig");
+@@ -1786,13 +1787,8 @@ pub const Model = struct {
+                 var h: [1 + 2 * round.Round.max_clocks]u64 = undefined;
+                 const d = m.ctx.d;
+                 try d.check(d.api.cuMemcpyDtoH_v2(&h, m.rd.clk, h.len * 8), "cuMemcpyDtoH");
+-                const n = @min(h[0], round.Round.max_clocks);
+-                for (1..n) |i| {
+-                    const tag = h[2 + 2 * i] & 0xff;
+-                    m.clk_ph[tag] += h[1 + 2 * i] -% h[1 + 2 * (i - 1)];
+-                    m.clk_cnt[tag] += 1;
+-                }
+-                m.clk_rounds += 1;
++                // the fold's host half is clock_fold.zig (its test constructs the profiler state and reads phases)
++                clock_fold.fold(&m.clk_ph, &m.clk_cnt, &m.clk_rounds, &h);
+             }
+         }
+     }
+-- 
+2.56.1
+

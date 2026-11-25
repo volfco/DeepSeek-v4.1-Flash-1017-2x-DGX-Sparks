@@ -1,0 +1,52 @@
+h0276: TF_DS_CACHE_REPLACE_STALE keep-side harness: the real prompt_cache.zig against the independent policy model
+[baseline-live-refresh] switch=on endstate=false tier=false tail_batch=true
+[baseline-live-refresh] step 1: keep at 5 -> insert
+[baseline-live-refresh] step 2: keep at 5 -> refresh
+[baseline-live-refresh] PASS
+[stale-replace] switch=on endstate=false tier=false tail_batch=true
+[stale-replace] step 1: keep at 5 -> insert
+[stale-replace] step 2: mark at 5 .{ .resident = true, .stale = true, .loading = false, .planner = false } (find must miss)
+info: dsv41: TF_DS_CACHE_REPLACE_STALE: a stale kept state is replaced by its fresh copy (first at 5 tokens)
+[stale-replace] step 3: keep at 5 -> replace
+[stale-replace] step 4: keep at 5 -> refresh
+[stale-replace] PASS
+[stale-refresh-off] switch=off endstate=false tier=false tail_batch=true
+[stale-refresh-off] step 1: keep at 5 -> insert
+[stale-refresh-off] step 2: mark at 5 .{ .resident = true, .stale = true, .loading = false, .planner = false } (find must miss)
+[stale-refresh-off] step 3: keep at 5 -> refresh
+[stale-refresh-off] PASS
+[point-guard] switch=on endstate=false tier=true tail_batch=true
+[point-guard] step 1: keep at 5 -> insert
+[point-guard] step 2: mark at 5 .{ .resident = true, .stale = true, .loading = false, .planner = false } (find must miss)
+[point-guard] step 3: keep at 5 -> refresh
+[point-guard] PASS
+[end-stale-replace] switch=on endstate=true tier=false tail_batch=true
+[end-stale-replace] step 1: keep at 5 -> insert
+[end-stale-replace] step 2: mark at 5 .{ .resident = true, .stale = true, .loading = false, .planner = false } (find must miss)
+[end-stale-replace] step 3: keep at 5 -> replace
+[end-stale-replace] step 4: keep at 5 -> refresh
+[end-stale-replace] PASS
+[end-live-refresh-odd-off] switch=on endstate=true tier=false tail_batch=false
+[end-live-refresh-odd-off] step 1: keep at 5 -> insert
+[end-live-refresh-odd-off] step 2: probe at 5: usable(maxInt)=false usable(at=5)=true (the source patch's max-length probe would replace this live state)
+[end-live-refresh-odd-off] step 3: keep at 5 -> refresh
+[end-live-refresh-odd-off] PASS
+[end-live-refresh-even-on] switch=on endstate=true tier=false tail_batch=true
+[end-live-refresh-even-on] step 1: keep at 4 -> insert
+[end-live-refresh-even-on] step 2: keep at 4 -> refresh
+[end-live-refresh-even-on] PASS
+[end-over-notend-off] switch=off endstate=true tier=false tail_batch=true
+[end-over-notend-off] step 1: keep at 5 -> insert
+[end-over-notend-off] step 2: keep at 5 -> replace
+[end-over-notend-off] PASS
+[end-over-notend-on] switch=on endstate=true tier=false tail_batch=true
+[end-over-notend-on] step 1: keep at 5 -> insert
+[end-over-notend-on] step 2: keep at 5 -> replace
+[end-over-notend-on] PASS
+[loading-replaced] switch=on endstate=false tier=false tail_batch=true
+[loading-replaced] step 1: keep at 5 -> insert
+[loading-replaced] step 2: mark at 5 .{ .resident = true, .stale = false, .loading = true, .planner = false } (find must miss)
+[loading-replaced] step 3: keep at 5 -> replace
+[loading-replaced] PASS
+h0276: 10 cases passed, 0 failed; replacements observed 3 (the engagement banner must appear once)
+engagement banners in run.log: 1 (expected 1)

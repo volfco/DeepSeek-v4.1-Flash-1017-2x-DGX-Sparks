@@ -1,0 +1,30 @@
+2026-11-23 07:18-07:24 UTC, from the workstation (the steps of build.sh, run by hand)
+
+tip            kernel-stack-0280 1421187651e867ab66e9622fcf1c245d54390d39 (2bb052f + cb8a4ca 0280, b0715eb 0281, 92dc42f 0282, 1421187 0283)
+base image     tensorfold-dsv41:bench-fused-next-2bb052f  id sha256:c1298c701fc3... on both ranks
+base binaries  tensorfold-native a9ab73007870...  tf-dsv41-lanes ca9809da2457...  (read out of a docker-create container)
+fatbins        20 recovered from the base tensorfold-native; the cross-built tensorfold-native embeds the same 20,
+               byte for byte (cmp); hashes in fatbins.sha256
+               tf-dsv41-lanes (rank 1's executable) embeds 6 of them (dsv41_ops, dsv41_rdma, dsv41_shard, dsv41_torch,
+               torch_movement, torch_pointwise): the cross-built one's 6 equal the base tf-dsv41-lanes's 6 (cmp)
+cross-build    zig 0.17.0, -Dtarget=aarch64-linux-gnu.2.39 -Dcpu=cortex_a725 -Doptimize=ReleaseFast, 2 min 25 s, exit 0
+executables    aeb6ae2f184c1e2037abdf0296b432d8cc53c9ca91f5f01f4f5e97c25283e6ec  tensorfold-native   (30,196,736 bytes)
+               f227acfc4f3299070e807d611de87e658b98a26cb0a832b0ac4f76b337773208  tf-dsv41-lanes      (19,883,352 bytes)
+               both hold the six new variable names (strings); the base's hold none of them
+image          tensorfold-dsv41:bench-fused-next-1421187
+               head   id sha256:15ac91461faa...  the two executables inside match SHA256SUMS
+               worker id sha256:698d4d71b9db...  the two executables inside match SHA256SUMS
+               label tf.patches=ea522d353626 inherited on both (what start.sh accepts for IMAGE=... PREPARE=0)
+after          production container dsv41-1017-exl3-tf still Up on both ranks on bench-fused-next-2bb052f; no stopped
+               or leftover container on either rank
+copies         workstation ~/.cache/k280-stage/build/ (executables, Dockerfile, SHA256SUMS)
+               head        ~/.cache/k280-stage/ctx/ (the build context) and ~/.cache/k280-stage/base/ (the base's two)
+
+note           the base image's tensorfold-native carries "GCC: (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0" in .comment:
+               production's 2bb052f executables were linked inside an Ubuntu 24.04 build stage, not cross-built.
+               This image's are cross-built (clang 22.1.8, zig's glibc 2.39 stubs, -Dcpu=cortex_a725). The kernels are
+               the same bytes; host code generation may differ. Compare arms within this image only.
+
+not done       neither executable has been executed anywhere (no container was run): that they load at all rests on
+               the matching glibc version requirements (GLIBC_2.34 / 2.36, as the base's) and the same NEEDED
+               libraries. build.sh has never run end to end, only its steps by hand.

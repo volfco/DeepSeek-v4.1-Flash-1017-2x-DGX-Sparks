@@ -1,0 +1,401 @@
+{
+ "file": "dashboards-before/7522330756786421760.json",
+ "title": "Host Metrics",
+ "hours": 24.0,
+ "checked_at": "2026-11-23T07:03:00Z",
+ "counts": {
+  "data": 25,
+  "empty": 0,
+  "error": 0,
+  "static": 0
+ },
+ "panels": [
+  {
+   "tab": "Overview",
+   "id": "hm_overview_cpu_busy",
+   "title": "CPU busy",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "100 * (1 - avg(irate(system_cpu_time{state=\"idle\",host_name=~\"$host_name\"}[5m])))",
+     "sent": "100 * (1 - avg(irate(system_cpu_time{state=\"idle\",host_name=~\".*\"}[5m])))",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "hm_overview_load_15m",
+   "title": "Load 15m",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "avg(system_cpu_load_average_15m{host_name=~\"$host_name\"})",
+     "sent": "avg(system_cpu_load_average_15m{host_name=~\".*\"})",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "hm_overview_ram_used",
+   "title": "RAM used",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "100 * sum(system_memory_usage{state=\"used\",host_name=~\"$host_name\"}) / sum(system_memory_usage{host_name=~\"$host_name\"})",
+     "sent": "100 * sum(system_memory_usage{state=\"used\",host_name=~\".*\"}) / sum(system_memory_usage{host_name=~\".*\"})",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "hm_overview_disk_used",
+   "title": "Disk used",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "100 * sum(system_filesystem_usage{state=\"used\",host_name=~\"$host_name\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"}) / sum(system_filesystem_usage{host_name=~\"$host_name\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"})",
+     "sent": "100 * sum(system_filesystem_usage{state=\"used\",host_name=~\".*\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"}) / sum(system_filesystem_usage{host_name=~\".*\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"})",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "hm_overview_hosts_reporting",
+   "title": "Hosts reporting",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "count(count by (host_name) (system_cpu_time{host_name=~\"$host_name\"}))",
+     "sent": "count(count by (host_name) (system_cpu_time{host_name=~\".*\"}))",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "hm_overview_net_throughput",
+   "title": "Net throughput",
+   "type": "metric",
+   "queries": [
+    {
+     "query": "sum(irate(system_network_io{host_name=~\"$host_name\"}[5m]))",
+     "sent": "sum(irate(system_network_io{host_name=~\".*\"}[5m]))",
+     "series": 1,
+     "points": 289
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "hm_overview_cpu_by_host",
+   "title": "CPU busy by host (top 10)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "topk(10, 100 * (1 - avg by (host_name)(irate(system_cpu_time{state=\"idle\",host_name=~\"$host_name\"}[5m]))))",
+     "sent": "topk(10, 100 * (1 - avg by (host_name)(irate(system_cpu_time{state=\"idle\",host_name=~\".*\"}[5m]))))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "hm_overview_memory_by_host",
+   "title": "Memory used by host (top 10)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "topk(10, sum by (host_name)(system_memory_usage{state=\"used\",host_name=~\"$host_name\"}))",
+     "sent": "topk(10, sum by (host_name)(system_memory_usage{state=\"used\",host_name=~\".*\"}))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "hm_overview_network_by_host",
+   "title": "Network I/O by host (top 10)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "topk(10, sum by (host_name, direction)(irate(system_network_io{host_name=~\"$host_name\"}[5m])))",
+     "sent": "topk(10, sum by (host_name, direction)(irate(system_network_io{host_name=~\".*\"}[5m])))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Overview",
+   "id": "hm_overview_disk_io_by_host",
+   "title": "Disk I/O by host (top 10)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "topk(10, sum by (host_name, direction)(irate(system_disk_io{host_name=~\"$host_name\",device=~\"$device\"}[5m])))",
+     "sent": "topk(10, sum by (host_name, direction)(irate(system_disk_io{host_name=~\".*\",device=~\".*\"}[5m])))",
+     "series": 8,
+     "points": 2312
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "CPU",
+   "id": "hm_cpu_busy_by_host",
+   "title": "CPU busy by host",
+   "type": "line",
+   "queries": [
+    {
+     "query": "100 * (1 - avg by (host_name)(irate(system_cpu_time{state=\"idle\",host_name=~\"$host_name\"}[5m])))",
+     "sent": "100 * (1 - avg by (host_name)(irate(system_cpu_time{state=\"idle\",host_name=~\".*\"}[5m])))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "CPU",
+   "id": "hm_cpu_by_state",
+   "title": "CPU by state",
+   "type": "line",
+   "queries": [
+    {
+     "query": "avg by (state)(irate(system_cpu_time{host_name=~\"$host_name\",state!=\"idle\"}[5m]))",
+     "sent": "avg by (state)(irate(system_cpu_time{host_name=~\".*\",state!=\"idle\"}[5m]))",
+     "series": 7,
+     "points": 2023
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "CPU",
+   "id": "hm_cpu_load",
+   "title": "Load 1m / 5m / 15m",
+   "type": "line",
+   "queries": [
+    {
+     "query": "avg by (host_name)(system_cpu_load_average_1m{host_name=~\"$host_name\"})",
+     "sent": "avg by (host_name)(system_cpu_load_average_1m{host_name=~\".*\"})",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "avg by (host_name)(system_cpu_load_average_5m{host_name=~\"$host_name\"})",
+     "sent": "avg by (host_name)(system_cpu_load_average_5m{host_name=~\".*\"})",
+     "series": 4,
+     "points": 1156
+    },
+    {
+     "query": "avg by (host_name)(system_cpu_load_average_15m{host_name=~\"$host_name\"})",
+     "sent": "avg by (host_name)(system_cpu_load_average_15m{host_name=~\".*\"})",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Memory",
+   "id": "hm_memory_by_state",
+   "title": "Memory by state",
+   "type": "area-stacked",
+   "queries": [
+    {
+     "query": "sum by (state)(system_memory_usage{host_name=~\"$host_name\"})",
+     "sent": "sum by (state)(system_memory_usage{host_name=~\".*\"})",
+     "series": 6,
+     "points": 1734
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Memory",
+   "id": "hm_memory_used_pct_by_host",
+   "title": "Memory used % by host",
+   "type": "line",
+   "queries": [
+    {
+     "query": "100 * sum by (host_name)(system_memory_usage{state=\"used\",host_name=~\"$host_name\"}) / sum by (host_name)(system_memory_usage{host_name=~\"$host_name\"})",
+     "sent": "100 * sum by (host_name)(system_memory_usage{state=\"used\",host_name=~\".*\"}) / sum by (host_name)(system_memory_usage{host_name=~\".*\"})",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Memory",
+   "id": "hm_memory_free_by_host",
+   "title": "Memory free by host",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name)(system_memory_usage{state=\"free\",host_name=~\"$host_name\"})",
+     "sent": "sum by (host_name)(system_memory_usage{state=\"free\",host_name=~\".*\"})",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Disk",
+   "id": "hm_disk_fs_used_pct_current",
+   "title": "Filesystem used % (current)",
+   "type": "table",
+   "queries": [
+    {
+     "query": "100 * sum by (host_name, mountpoint)(system_filesystem_usage{state=\"used\",host_name=~\"$host_name\",mountpoint=~\"$mountpoint\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"}) / sum by (host_name, mountpoint)(system_filesystem_usage{host_name=~\"$host_name\",mountpoint=~\"$mountpoint\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"})",
+     "sent": "100 * sum by (host_name, mountpoint)(system_filesystem_usage{state=\"used\",host_name=~\".*\",mountpoint=~\".*\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"}) / sum by (host_name, mountpoint)(system_filesystem_usage{host_name=~\".*\",mountpoint=~\".*\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"})",
+     "series": 28,
+     "points": 8092
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Disk",
+   "id": "hm_disk_fs_used_pct",
+   "title": "Filesystem used %",
+   "type": "line",
+   "queries": [
+    {
+     "query": "100 * sum by (host_name, mountpoint)(system_filesystem_usage{state=\"used\",host_name=~\"$host_name\",mountpoint=~\"$mountpoint\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"}) / sum by (host_name, mountpoint)(system_filesystem_usage{host_name=~\"$host_name\",mountpoint=~\"$mountpoint\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"})",
+     "sent": "100 * sum by (host_name, mountpoint)(system_filesystem_usage{state=\"used\",host_name=~\".*\",mountpoint=~\".*\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"}) / sum by (host_name, mountpoint)(system_filesystem_usage{host_name=~\".*\",mountpoint=~\".*\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"})",
+     "series": 28,
+     "points": 8092
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Disk",
+   "id": "hm_disk_fs_free",
+   "title": "Filesystem free",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, mountpoint)(system_filesystem_usage{state=\"free\",host_name=~\"$host_name\",mountpoint=~\"$mountpoint\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"})",
+     "sent": "sum by (host_name, mountpoint)(system_filesystem_usage{state=\"free\",host_name=~\".*\",mountpoint=~\".*\",device!~\"/dev/loop.*|tmpfs|nsfs|squashfs|overlay\"})",
+     "series": 28,
+     "points": 8092
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Disk",
+   "id": "hm_disk_read",
+   "title": "Disk read",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device)(irate(system_disk_io{direction=\"read\",host_name=~\"$host_name\",device=~\"$device\",device!~\"loop.*\"}[5m]))",
+     "sent": "sum by (host_name, device)(irate(system_disk_io{direction=\"read\",host_name=~\".*\",device=~\".*\",device!~\"loop.*\"}[5m]))",
+     "series": 65,
+     "points": 18785
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Disk",
+   "id": "hm_disk_write",
+   "title": "Disk write",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device)(irate(system_disk_io{direction=\"write\",host_name=~\"$host_name\",device=~\"$device\",device!~\"loop.*\"}[5m]))",
+     "sent": "sum by (host_name, device)(irate(system_disk_io{direction=\"write\",host_name=~\".*\",device=~\".*\",device!~\"loop.*\"}[5m]))",
+     "series": 65,
+     "points": 18785
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Disk",
+   "id": "hm_disk_queue",
+   "title": "Disk queue (weighted io time)",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name, device)(irate(system_disk_weighted_io_time{host_name=~\"$host_name\",device=~\"$device\",device!~\"loop.*\"}[5m]))",
+     "sent": "sum by (host_name, device)(irate(system_disk_weighted_io_time{host_name=~\".*\",device=~\".*\",device!~\"loop.*\"}[5m]))",
+     "series": 65,
+     "points": 18785
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Network",
+   "id": "hm_network_received",
+   "title": "Received by host",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name)(irate(system_network_io{direction=\"receive\",host_name=~\"$host_name\"}[5m]))",
+     "sent": "sum by (host_name)(irate(system_network_io{direction=\"receive\",host_name=~\".*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Network",
+   "id": "hm_network_transmitted",
+   "title": "Transmitted by host",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (host_name)(irate(system_network_io{direction=\"transmit\",host_name=~\"$host_name\"}[5m]))",
+     "sent": "sum by (host_name)(irate(system_network_io{direction=\"transmit\",host_name=~\".*\"}[5m]))",
+     "series": 4,
+     "points": 1156
+    }
+   ],
+   "status": "data"
+  },
+  {
+   "tab": "Network",
+   "id": "hm_network_by_direction",
+   "title": "I/O by direction",
+   "type": "line",
+   "queries": [
+    {
+     "query": "sum by (direction)(irate(system_network_io{host_name=~\"$host_name\"}[5m]))",
+     "sent": "sum by (direction)(irate(system_network_io{host_name=~\".*\"}[5m]))",
+     "series": 2,
+     "points": 578
+    }
+   ],
+   "status": "data"
+  }
+ ]
+}

@@ -1,0 +1,110 @@
+glm: GLM_INDEX_CUT (off by default): glm_index_select stops at a complete radix bin
+
+NOT LANDED: no local check exists for Metal or for the GLM family's host Zig (see ../SURVEY.md section 2).
+Base: 2bb052f (applies to kernel-sweep-0290 as well). Apply with: git apply <this file>
+Evidence: ../hmetal-glm/ (a CPU emulation of the old and new kernel text).
+The one binder of GlmSelectArgs is forward.zig's setValue in selectKeys (state.zig's `sel` field names the struct
+in a comment but nothing binds or reads it). tools/zig/lean_check.py: no finding added (checked on the patched files).
+
+diff --git a/zig/kernels/metal/glm_glue.metal b/zig/kernels/metal/glm_glue.metal
+--- a/zig/kernels/metal/glm_glue.metal
++++ b/zig/kernels/metal/glm_glue.metal
+@@ -339,8 +339,8 @@
+ }
+ 
+ // Row r's key list: its TOP best blocks (ties: lower block) as keys in block order, its tail, -1 to `width` (a radix select).
+ struct GlmSelectArgs {
+-  uint p0, top, width, s_stride, i_stride;
++  uint p0, top, width, s_stride, i_stride, cut; // cut (GLM_INDEX_CUT): stop the select at a complete radix bin
+ };
+ 
+ // Exclusive prefix sum over a 1024-thread threadgroup (32 simdgroups), `part` 32 slots of scratch.
+@@ -370,7 +371,7 @@
+   const device float* s = scores + size_t(row) * a.s_stride;
+   device int* out = indices + size_t(row) * a.i_stride;
+   threadgroup atomic_uint hist[256];
+-  threadgroup uint shared_prefix[1], shared_need[1];
++  threadgroup uint shared_prefix[1], shared_need[1], shared_done[1];
+   threadgroup uint counts[32];
+   uint prefix = 0, need = a.top;
+   if (a.top < a.blocks) {
+@@ -386,17 +387,21 @@
+       threadgroup_barrier(mem_flags::mem_threadgroup);
+       if (t == 0) {
+         uint acc = 0, digit = 0;
++        bool full = false;
+         for (int d = 255; d >= 0; d--) {
+           const uint c = atomic_load_explicit(&hist[d], memory_order_relaxed);
+-          if (acc + c >= need) { digit = uint(d); break; }
++          if (acc + c >= need) { digit = uint(d); full = need != 0u && acc + c == need; break; }
+           acc += c;
+         }
+         shared_prefix[0] = prefix | (digit << shift);
+         shared_need[0] = need - acc;
++        shared_done[0] = (g.cut != 0u && full) ? 1u : 0u;
+       }
+       threadgroup_barrier(mem_flags::mem_threadgroup);
+       prefix = shared_prefix[0];
+       need = shared_need[0];
++      // a complete bin: every key at or above this prefix is taken (`need` is the bin's whole population)
++      if (shared_done[0] != 0u) break;
+     }
+   }
+   // blocks above the threshold key, plus the first `need` equal to it in block order: each thread a run of blocks
+diff --git a/zig/src/families/glm/engine.zig b/zig/src/families/glm/engine.zig
+--- a/zig/src/families/glm/engine.zig
++++ b/zig/src/families/glm/engine.zig
+@@ -82,6 +82,7 @@
+     load_seconds: f64 = 0,
+     gpu: [2]f64 = .{ 0, 0 }, // the last command buffer's GPU start and end (host seconds)
+     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
++    index_cut: bool = false, // GLM_INDEX_CUT=1: the key select stops at a complete radix bin (off by default)
+     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
+     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
+ 
+@@ -102,6 +103,7 @@
+         e.residency = null;
+         e.gpu = .{ 0, 0 };
+         e.fused_route = if (std.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
++        e.index_cut = if (std.c.getenv("GLM_INDEX_CUT")) |v| v[0] == '1' else false;
+         e.draft_vocab = if (std.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
+         e.committed = 0;
+         e.ep = null;
+@@ -292,7 +294,7 @@
+     }
+ 
+     pub fn ctx(e: *Engine) fwd.Ctx {
+-        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .draft_vocab = e.draft_vocab };
++        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .index_cut = e.index_cut, .draft_vocab = e.draft_vocab };
+     }
+ 
+     /// A command buffer ordered after the last one this engine committed.
+diff --git a/zig/src/families/glm/forward.zig b/zig/src/families/glm/forward.zig
+--- a/zig/src/families/glm/forward.zig
++++ b/zig/src/families/glm/forward.zig
+@@ -27,6 +27,7 @@
+     skip: u32 = 0, // a profile's knock-outs: launch classes left out (Class bits)
+     pskip: u32 = 0, // a profile's knock-outs by launch (Part bits)
+     fused_route: bool = true, // the core route (two launches); false: the Python family's cast, router and top-k
++    index_cut: bool = false, // GLM_INDEX_CUT=1: glm_index_select stops at a complete radix bin (the same key lists)
+     draft_vocab: u32 = 154880, // the MTP head's tokens: the vocabulary's first this many
+     m_row: u32 = 0, // the MTP head's logits row in m_logits (a rank log keeps each depth's in its own row)
+     segs: []const Seg = &.{}, // a shared window's streams in row order (empty: every row is `s`'s)
+@@ -96,7 +97,7 @@
+ 
+ pub const Rows = extern struct { rows: i32, width: i32, x_stride: i32, y_stride: i32, eps: f32 };
+ const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32 };
+-const SelectArgs = extern struct { p0: u32, top: u32, width: u32, s_stride: u32, i_stride: u32 };
++const SelectArgs = extern struct { p0: u32, top: u32, width: u32, s_stride: u32, i_stride: u32, cut: u32 };
+ 
+ pub fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
+     inline for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, first + i);
+@@ -355,7 +356,7 @@
+     e.dispatchGroups(size((most + 7) / 8, n, 1), size(256, 1, 1));
+     e.setPipeline(k.index_select);
+     bind(e, 0, .{ scores, indices });
+-    e.setValue(SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth() }, 2);
++    e.setValue(SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth(), .cut = @intFromBool(x.index_cut) }, 2);
+     e.dispatchGroups(size(n, 1, 1), size(1024, 1, 1));
+ }
+ 

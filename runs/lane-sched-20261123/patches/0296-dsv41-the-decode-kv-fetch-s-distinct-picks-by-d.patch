@@ -1,0 +1,301 @@
+From 87e92a230ce0af20bc87007b6b76e5f2fa1bdaa8 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Mon, 23 Nov 2026 14:33:26 -0800
+Subject: [PATCH 4/4] 0296 dsv41: the decode KV fetch's distinct-picks-by-depth
+ counter under TF_DS_ROUND_PROFILE
+
+Instrumentation only (no new switch, no behavior change): every decode fetch's distinct picks
+across the window's rows - the row count a decode union fetch would carry instead of rows x kk -
+counted with the prompt union's own kernels (shard_ops.unionCount, shard.UnionRef's host model)
+and tallied by the round's depth (its context bucket, floor-log2 bands), one JSON line a run in
+the round profile (kv_pick_union, cumulative: native's /metrics print and the batch driver's
+--profile). Sizes the decode KV union fetch against its 0.22-0.32 ms/forward ceiling; the gate
+for the union-fetch patch brief is distinct / picks under a half at depth 32768 and 131072
+(runs/trace-review-20261123/RESULTS.md section 4). A fetch of a selection counted already in
+the round (a run's later layers: the same FetchKey) copies that count; the counts stay on the
+device and are read back after the round's own sync, the ring probes' pattern. Off unless the
+round profile is on (Model.useClock sets the gate).
+---
+ zig/src/families/dsv41/lanes.zig      |   1 +
+ zig/src/families/dsv41/lanes_main.zig |   4 +
+ zig/src/families/dsv41/model.zig      |  11 +++
+ zig/src/families/dsv41/native.zig     |   6 ++
+ zig/src/families/dsv41/round.zig      | 133 ++++++++++++++++++++++++++
+ 5 files changed, 155 insertions(+)
+
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 19a4afb..2087b38 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -1567,6 +1567,7 @@ fn chunkRows(start: usize, len: usize) usize {
+                 p.ring_copy += @intFromFloat(q[2] * q[3]);
+                 p.ring_n += @intFromFloat(q[3]);
+             };
++            m.tallyPickUnions(); // (0296: the decode fetch's union counts, read back like the ring probes)
+         };
+         const V = m.vocab;
+         for (windows, out, 0..) |w, *o, k| {
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 7238955..dbcc3e4 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -448,6 +448,10 @@ pub fn main(init: std.process.Init) !u8 {
+         try w.print("{{\"rank\": 0, \"profile\": {{\"rounds\": {d}, \"rows_a_round\": {d:.2}, \"step_ms\": {d:.2}, \"send_ms\": {d:.3}, \"enqueue_ms\": {d:.2}, \"forward_ms\": {d:.2}, \"absorb_ms\": {d:.2}, \"logits_ms\": {d:.2}, \"sample_ms\": {d:.2}, \"passes\": {d}, \"streams_a_pass\": {d:.2}, \"pass_ms\": {d:.2}, \"pass_send_ms\": {d:.3}, \"ring_stage_ms\": {d:.3}, \"ring_flight_ms\": {d:.3}, \"ring_copy_ms\": {d:.3}, \"prefills\": {d}, \"prefill_ms\": {d:.1}}}}}\n", .{ p.rounds, ms(p.rows * 1000000, p.rounds), ms(step_ns, core.steps), ms(p.send, p.rounds), ms(p.enqueue, p.rounds), ms(p.forward, p.rounds), ms(p.absorb, p.rounds), ms(p.logits, p.rounds), ms(p.sample, p.rounds), p.passes, ms(p.pass_streams * 1000000, p.passes), ms(p.pass, p.passes), ms(p.pass_send, p.passes), ms(p.ring_stage, p.ring_n), ms(p.ring_flight, p.ring_n), ms(p.ring_copy, p.ring_n), p.prefills, ms(p.prefill, p.prefills) });
+         try w.flush();
+         try printClock(w, 0, m);
++        if (m.rd.pick_unions.on) { // (0296: the decode fetch's distinct picks by depth, one line a run)
++            try dsv41.round.printPickUnions(&m.rd, w, 0);
++            try w.print("\n", .{});
++        }
+         try printKvShard(w, 0, m);
+         try printPrune(w, 0, m);
+         try printExpertBytes(w, 0, m);
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 40628f0..b8d3b03 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -1830,6 +1830,7 @@ pub const Model = struct {
+ 
+     /// The rounds' GPU clocks (a profile): the forward's start and each stretch's ends, for its gaps.
+     pub fn useClock(m: *Model, marks: u8) !void {
++        m.rd.pick_unions.on = true; // (0296: the decode fetch's distinct-picks-by-depth counter rides the profile)
+         m.rd.clk_marks = marks == 1 or marks == 3;
+         m.rd.clk_shard = marks == 4; // the sharded attention's parts alone (round.PhaseTimer.shardMark)
+         m.rd.clk_ratio = if (marks == 3) 2 else null;
+@@ -1887,6 +1888,16 @@ pub const Model = struct {
+         }
+     }
+ 
++    /// 0296 (the round profile): the decode fetch's distinct-picks-by-depth counts read back after the round's own
++    /// sync (updateHot's own pattern), tallied by the round's depth. Cumulative since start: nothing resets the bands.
++    pub fn tallyPickUnions(m: *Model) void {
++        const u = &m.rd.pick_unions;
++        if (!u.on or u.host.len == 0) return;
++        const d = m.ctx.d;
++        if (d.api.cuMemcpyDtoH_v2(u.host.ptr, u.slots, u.host.len * @sizeOf(round.PickUnions.Slot)) != 0) return;
++        u.tally(m.rd.bucket, m.rd.r);
++    }
++
+     /// 0178 (TF_DS_PROMPT_ENDSTATE): the end state's extras' bytes - each drafter stage's rows for the slot, then the
+     /// prompt's last row's logits (the zero-row resume's first token comes from them).
+     pub fn endBytes(m: *const Model) usize {
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index 14ab11b..b3c0289 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -556,6 +556,12 @@ fn printRoundProfile(ctx: *anyopaque) void {
+         std.log.info("{s}", .{out.written()});
+         out.clearRetainingCapacity();
+     }
++    // 0296: the decode fetch's distinct picks by depth (one line a run; the counter is Model.useClock's own rider)
++    if (m.rd.pick_unions.on) {
++        round.printPickUnions(&m.rd, w, 0) catch return;
++        std.log.info("{s}", .{out.written()});
++        out.clearRetainingCapacity();
++    }
+     // the caveat rides with the numbers in the log: a line read in isolation must not look like an unprofiled truth
+     w.print("{{\"rank\": 0, \"profile_note\": \"attribution only: the round profile syncs the GPU every round; figures include the sync and are not the unprofiled round cost\"}}", .{}) catch return;
+     std.log.info("{s}", .{out.written()});
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index d6065c7..ff627cc 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -371,6 +371,8 @@ pub const Round = struct {
+     fetch_key: ?FetchKey = null,
+     idx_layer: usize = 0,
+     cur_src: usize = 0,
++    // 0296 (the round profile, TF_DS_ROUND_PROFILE): the decode fetch's distinct picks by depth (PickUnions)
++    pick_unions: PickUnions = .{},
+     // owner decode's own-head pass (and its early query stage) on a stream of their own (KvShard.overlap): the pass's
+     // split partials, the fork and the two joins (the query stage's, before its collect; the pass's, before the outputs'
+     // collect, as the pass writes every xhwo row)
+@@ -431,6 +433,11 @@ pub const Round = struct {
+         rd.fetch_key = null;
+         rd.idx_layer = 0;
+         rd.cur_src = 0;
++        // 0296: the per-fetch union counts' slots (the profile's gate does not change the allocation's shape)
++        rd.pick_unions = .{};
++        rd.pick_unions.slots = try a.take(w.layers.len * @sizeOf(PickUnions.Slot));
++        rd.pick_unions.host = try gpa.alloc(PickUnions.Slot, w.layers.len);
++        @memset(rd.pick_unions.host, .{});
+         rd.ss = null;
+         rd.ss_fork = null;
+         rd.ss_jq = null;
+@@ -1440,6 +1447,47 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+ /// place at their fixed size (one NCCL group). The same schedule on both ranks whoever holds the rows, every buffer
+ /// the round's own (graph-safe); each row reads the replicated bytes in the replicated order (shard.zig's and
+ /// shard_ring.zig's tests).
++/// 0296 (the round profile, TF_DS_ROUND_PROFILE): the decode fetch's distinct picks across the window's rows - the
++/// row count a decode KV union fetch would carry instead of rows * kk - tallied by the round's depth (its context
++/// bucket). Instrumentation only: counts, one line a run (printPickUnions), invisible to every output and to no
++/// schedule decision. The count is the prompt union's own (shard_ops.unionCount, shard.UnionRef's host model), kept
++/// on the device and read back after the round's own sync (Model.tallyPickUnions), the ring probes' pattern.
++pub const PickUnions = struct {
++    /// One fetch's record: the distinct picks its count found (0: the round fetched nothing at this layer) and its kk.
++    pub const Slot = struct { count: i32 = 0, kk: u32 = 0 };
++    /// A depth band's sums: the fetches at it, the picks they carried (rows x kk, summed) and their distinct picks.
++    pub const Band = struct { fetches: u64 = 0, picks: u64 = 0, distinct: u64 = 0 };
++    pub const bands_len: usize = 32;
++
++    on: bool = false, // the round profile's own gate (Model.useClock); off: nothing runs and nothing allocates
++    marks: u64 = 0, // ch.sf_cum (int32 [mark_rows]): the union's marks, the prompt fetch's own buffer
++    mark_rows: usize = 0, // its rows; a round's bucket past them skips the count (no room to mark)
++    sums: u64 = 0, // ch.sf_sums (int32 [scan_segs + 1]): where unionCount leaves the count for the tally
++    slots: u64 = 0, // Slot [layers] on the device, zeroed at every round's start (forward)
++    host: []Slot = &.{}, // the same records on the host (the HtoD source at a fetch, the DtoH target at the tally)
++    key: ?FetchKey = null, // the selection counted already this round; a later fetch of it copies the count
++    fresh: usize = 0, // the slot of the round's last fresh count (the copy source)
++    bands: [bands_len]Band = @splat(.{}),
++
++    /// The depth band (floor log2) of a round's context bucket; bucketFor's buckets are exact powers of two, so the
++    /// band's lower bound is the bucket itself at the go/no-go depths (32K: 15, 128K: 17).
++    pub fn bandOf(bucket: usize) usize {
++        return @min(bands_len - 1, 63 - @as(usize, @clz(@as(u64, bucket | 1))));
++    }
++
++    /// The round's fetched slots into their depth band: a slot with count 0 (no fetch there) is skipped.
++    pub fn tally(u: *PickUnions, bucket: usize, rows: usize) void {
++        for (u.host) |s| {
++            if (s.count <= 0) continue;
++            const kk: usize = s.kk;
++            const b = &u.bands[bandOf(bucket)];
++            b.fetches += 1;
++            b.picks += rows * kk;
++            b.distinct += @intCast(s.count);
++        }
++    }
++};
++
+ /// TF_DS_KV_FETCH_REUSE's key: the KV source layer, the index layer whose selection rd.cidx holds, the picks a row.
+ pub const FetchKey = struct {
+     src: usize,
+@@ -1479,6 +1527,55 @@ pub fn fetchReuseOn() bool {
+     return std.mem.eql(u8, std.mem.span(v), "1");
+ }
+ 
++/// 0296 (the round profile): one decode fetch's distinct picks across the window's rows, for the tally by depth
++/// (PickUnions). The count runs on the fetch's own stream with the prompt union's kernels: the marks (ch.sf_cum,
++/// zeroed here in the stream's order) marked and scanned, the count left in ch.sf_sums at its last entry. A fetch of
++/// a selection counted already this round (a run's later layers: the same FetchKey) copies that count instead of
++/// recounting. Counts only, best-effort: a failed count leaves the slot empty and the tally skips it.
++fn pickUnionNote(e: *const Engine, rd: *Round, idx: u64, kk: usize, li: usize) void {
++    const u = &rd.pick_unions;
++    if (!u.on or kk == 0 or li >= u.host.len) return;
++    const bucket = rd.bucket;
++    if (u.marks == 0 or bucket == 0 or bucket > u.mark_rows) return;
++    const key: FetchKey = .{ .src = rd.cur_src, .idx = rd.idx_layer, .kk = kk };
++    const fresh = if (u.key) |k| !k.eql(key) else true;
++    u.key = key;
++    const dst = u.slots + li * @sizeOf(PickUnions.Slot);
++    u.host[li] = .{ .count = 0, .kk = @intCast(kk) };
++    prompt.upload(e, dst, &u.host[li], @sizeOf(PickUnions.Slot)) catch return;
++    if (fresh) {
++        u.fresh = li;
++        e.d.check(e.d.api.cuMemsetD32Async(u.marks, 0, bucket, e.s.handle), "cuMemsetD32Async") catch return;
++        shard_ops.unionCount(&e.kv.?.k, e.s, idx, kk, kk, rd.r, u.marks, bucket, u.sums) catch return;
++        e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(dst, u.sums + shard_ops.scan_segs * 4, 4, e.s.handle), "cuMemcpyDtoDAsync") catch return;
++    } else {
++        e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(dst, u.slots + u.fresh * @sizeOf(PickUnions.Slot), 4, e.s.handle), "cuMemcpyDtoDAsync") catch return;
++    }
++}
++
++/// 0296: the distinct-picks-by-depth line (one line a run, cumulative since process start like the profile's). The
++/// gate for a decode union fetch: distinct / picks under a half at depth 32768 and 131072 (the band's lower bound is
++/// the round's context bucket at bucketFor's powers of two), runs/trace-review-20261123/RESULTS.md section 4.
++pub fn printPickUnions(rd: *const Round, w: anytype, rank: u32) !void {
++    const u = &rd.pick_unions;
++    var fetches: u64 = 0;
++    var picks: u64 = 0;
++    var distinct: u64 = 0;
++    for (u.bands) |b| {
++        fetches += b.fetches;
++        picks += b.picks;
++        distinct += b.distinct;
++    }
++    try w.print("{{\"rank\": {d}, \"kv_pick_union\": {{\"fetches\": {d}, \"picks\": {d}, \"distinct\": {d}, \"by_depth\": [", .{ rank, fetches, picks, distinct });
++    var first = true;
++    for (u.bands, 0..) |b, i| {
++        if (b.fetches == 0) continue;
++        try w.print("{s}{{\"depth\": {d}, \"fetches\": {d}, \"picks\": {d}, \"distinct\": {d}}}", .{ if (first) "" else ", ", @as(usize, 1) << @intCast(i), b.fetches, b.picks, b.distinct });
++        first = false;
++    }
++    try w.print("]}}}}", .{});
++}
++
+ fn fetchDecode(e: *const Engine, rd: *Round, a: tri_attn.Attn, ratio: usize, li: usize) !void {
+     const c = e.c;
+     const R = rd.r;
+@@ -1502,6 +1599,7 @@ fn fetchDecode(e: *const Engine, rd: *Round, a: tri_attn.Attn, ratio: usize, li:
+         try tri_attn.sparseAttn(e.t, b);
+         return;
+     };
++    pickUnionNote(e, rd, a.idx, kk, li);
+     const sl = shard.decodeSlots(e.kv.?.sh.rank, R, K, cb, sb);
+     try shard_ops.fetch(&e.kv.?.k, e.s, .{
+         .codes = a.comp.fp4.codes,
+@@ -1593,6 +1691,7 @@ fn ownerDecode(e: *const Engine, rd: *Round, a: tri_attn.Attn, ratio: usize, li:
+     try e.comm.allGather(a.q, rd.qall, R * hl * hd, .bf16, e.s);
+     try rd.mark(e, .sh_q);
+     // the picks of the rows this rank holds, none for the others'
++    pickUnionNote(e, rd, a.idx, kk, li);
+     try shard_ops.fetch(&kv.k, e.s, .{ .cb = hd / 2, .sb = hd / 16, .idx = a.idx, .ks = kk, .kk = kk, .rows = R, .own = own, .copy = false, .dk = 0, .out = rd.fidx, .kos = kk, .how = .mask });
+     try rd.mark(e, .sh_fetch);
+     var mine = a;
+@@ -1654,6 +1753,7 @@ fn ownerRing(e: *const Engine, rd: *Round, a: tri_attn.Attn, ratio: usize, li: u
+         try sendQueries(e, rd, a.q, false, li);
+         try rd.mark(e, .sh_q);
+     }
++    pickUnionNote(e, rd, a.idx, kk, li);
+     try shard_ops.fetch(&kv.k, e.s, .{ .cb = hd / 2, .sb = hd / 16, .idx = a.idx, .ks = kk, .kk = kk, .rows = R, .own = rd.sgl(.own), .copy = false, .dk = 0, .out = rd.fidx, .kos = kk, .how = .mask });
+     try rd.mark(e, .sh_fetch);
+     var mine = a;
+@@ -2021,6 +2121,13 @@ pub fn forward(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches
+     rd.has_cand = false;
+     rd.has_cblk = false;
+     rd.kk = 0;
++    // 0296: the union counts' per-round state (the marks are the prompt fetch's own; the slots zero for the tally)
++    rd.pick_unions.key = null;
++    rd.pick_unions.fresh = 0;
++    rd.pick_unions.marks = ch.sf_cum;
++    rd.pick_unions.sums = ch.sf_sums;
++    rd.pick_unions.mark_rows = ch.sf_cum_rows;
++    if (rd.pick_unions.on) e.d.check(e.d.api.cuMemsetD32Async(rd.pick_unions.slots, 0, w.layers.len * 2, e.s.handle), "cuMemsetD32Async") catch {};
+     try setGlue(e, rd, rows);
+     rd.smode = .off;
+     rd.sring = false;
+@@ -2407,6 +2514,32 @@ test "TF_DS_CHECK_INVALID: a round's raw ring slots are distinct, a repeat is re
+     try std.testing.expect(firstSharedSlot(&.{7}) == null);
+ }
+ 
++test "pick unions: a round's fetched slots tally by the depth band of its bucket" {
++    var u: PickUnions = .{};
++    u.host = try std.testing.allocator.alloc(PickUnions.Slot, 3);
++    defer std.testing.allocator.free(u.host);
++    u.host[0] = .{ .count = 512, .kk = 512 };
++    u.host[1] = .{}; // no fetch at that layer
++    u.host[2] = .{ .count = 300, .kk = 256 };
++    u.tally(32768, 4);
++    const b = u.bands[PickUnions.bandOf(32768)];
++    try std.testing.expectEqual(@as(u64, 2), b.fetches);
++    try std.testing.expectEqual(@as(u64, 4 * (512 + 256)), b.picks);
++    try std.testing.expectEqual(@as(u64, 812), b.distinct);
++    try std.testing.expectEqual(@as(u64, 0), u.bands[0].fetches);
++    // a second round at another depth lands in its own band
++    u.tally(131072, 2);
++    try std.testing.expectEqual(@as(u64, 2), u.bands[PickUnions.bandOf(131072)].fetches);
++    try std.testing.expectEqual(@as(u64, 2), b.fetches);
++}
++
++test "pick unions: the depth band is the bucket's floor log2" {
++    try std.testing.expectEqual(@as(usize, 15), PickUnions.bandOf(32768));
++    try std.testing.expectEqual(@as(usize, 17), PickUnions.bandOf(131072));
++    try std.testing.expectEqual(@as(usize, 14), PickUnions.bandOf(30000)); // TF_DS_IDX_BUCKET_FINER's finer buckets land below
++    try std.testing.expectEqual(@as(usize, 10), PickUnions.bandOf(1024));
++}
++
+ test "context buckets as graph.py makes them" {
+     try std.testing.expectEqual(@as(usize, 1024), bucketFor(1, 1 << 20));
+     try std.testing.expectEqual(@as(usize, 4096), bucketFor(2230, 1 << 20));
+-- 
+2.56.1
+

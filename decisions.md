@@ -842,3 +842,155 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
 - `runs/overnight-20261122/placebound`: exact 39/39 in all arms; rounds −0.41% mean, four-stream cells −0.25/−0.91/
   −2.15%. Deployed 10:42–10:44 UTC (IMAGE swap + `TF_DS_PLACE_BOUND_ALL=1`), validated 8/8. Undo:
   `cp ~/dsv41-env-backups/.env.bak-20261122-pre-0264 .env && ./start.sh restart`. Exported to `zig/patches/0264`.
+
+## 2026-11-23: CUDA kernel microbenchmark process and GB10 hardware guide (`docs/`)
+
+- Scope: minor (documentation / engineering process). Files: `docs/cuda-kernel-microbenchmark-process.md`, `docs/gb10-hardware-performance-guide.md`, `continue.md`.
+- Choices considered: (1) minimal `tools/fused_bench` runbook only; (2) repo-grounded GB10 SOP + rubric; (3) expanded playbook with worked repo examples + companion GB10 hardware performance guide (selected by operator); (4) playbook + new starter templates/Justfile scripts.
+- Decision: publish a two-document pair — an expanded GB10 `sm_121` process playbook covering pinned compilation (`-O3 -arch=sm_121 --fmad=false --ftz=false`), byte-parity/sanitizer gates, tiered block microbenchmarking (CUDA-graph + ablations → `clock64()`/`%globaltimer` probes → `ncu` SASS PC sampling/stalls), and SASS opcode optimality evaluation, paired with a standalone GB10 hardware performance & kernel design guide synthesized from verified `runs/*` measurements — and reference both in `continue.md`.
+- Why: centralizes all empirical GB10 `sm_121` hardware ceilings, opcode behaviors, counter quirks, and bit-exactness contracts so future kernel work avoids repeating measured regressions (e.g., half-warp masked `REDUX`, strided 64B stores, warp-aggregated `ATOMS`, emulated `sm_121` FP4 intrinsics, stream-0 DMA races) without adding new scripts or harnesses to maintain.
+
+## 2026-11-23: two-lane campaign — tier-0 blockers and the scheduler cluster (scoping)
+
+- Scope: major (campaign scoping and delegation). Operator decisions recorded here: (1) lane 2 builds only the
+  scheduler-cluster items (block-row clamp, `TF_DS_DRAFT_MS` + `round_ms` re-fit, follower confidence skip) plus the
+  distinct-picks counter — not the Engram overlap or the tier-2 fusions; (2) **no production restarts this session —
+  stage everything, only short local tests for initial signal**; (3) the k280 hardware window runs exactly as staged
+  (no greedy/traced/from-source arms added to it).
+- Choices considered: lane-2 scope — scheduler cluster (selected) vs +Engram pending-row landing/FAST (larger ceiling
+  ~1-2% but host-threading and landing-storage lifetime risk, and its acceptance baseline is the owed slow-cell
+  experiment) vs all tier-1 vs tier-1+2 fusions (fusions need standalone epilogue timing first). GPU window — no
+  restarts (selected) vs lane-1-owned pair window vs idle-window microbenches vs one combined window later. k280
+  content — run exactly as staged (selected) vs extended arms first vs passprof+run.sh only.
+- Implementation topology (lane board): lane A `tier0` owns the indexer/profiler seam (patches 0297-0299,
+  `runs/k280/**`, the `runs/overnight-20261122` scoring scripts, Justfile) in worktree `~/Workspace/tfref-tier0`;
+  lane B `sched` owns the drafter/scheduler seam (patches 0293-0296) in `~/Workspace/tfref-sched`; both branch from
+  `1421187` (`kernel-stack-0280` tip) so new patches inherit `TF_DS_PASS_PROFILE` for gating. `todo.md`,
+  `continue.md`, `decisions.md`, `to-benchmark.md`, `zig/patches/**`, `start.sh` and `.env` are parent-only writes
+  this session (lanes report, parent consolidates) so the two lanes cannot collide on `zig/patches/README.md` or the
+  notes files. Each lane: build + short tests -> fresh read-only reviewer -> fix pass.
+- Decision: every new patch off by default behind its own `TF_DS_*` switch (series rule); patch numbers split
+  0293-0296 (lane B) and 0297-0299 (lane A) so exports are disjoint; micro-benchmarking is host-side evidence (work
+  counts, host tests, CPU-emulation parity) plus staged GPU scripts, since no GPU window is opened.
+- Why: the 2026-11-23 re-score showed the apparent kernel wins were metric artifacts, so the blockers (0206 key
+  parity, the CLOCK_MARKS defaults bug, the unwritten k280 gate) must clear before any timing claim is believed; the
+  scheduler cluster carries the only percent-scale exact-by-construction ceilings that need no new mechanism
+  (~1.5% four-stream / ~5% eight-stream for the block-row clamp, one measured -2.65% precedent for the re-fit).
+
+## 2026-11-23: 0293 premise correction — block-row clamp is not bit-exact (minor scope)
+
+- The sched lane's premise check falsified the ds41 item's claim that clamping the drafter pass to `N * steps` block
+  rows is "bit-exact by construction (rows are causal in attention)". The drafter's block attention is **non-causal**:
+  every block row attends every block row of its stream (`draft.zig:695` pick fill includes `k > j`; `draft.zig:912`
+  comment; upstream `dspark.py` "non-causal query-block forward"). Rows past `steps` feed the scored rows through
+  every stage's intra-block attention, so the full clamp changes drafts and confidences and its byte-compare gate
+  would fail.
+- Choices considered: (A) abort 0293; (B) full stage-row clamp behind a switch with the gate relaxed to
+  reply-hash/verify-token comparison (ceiling ~1.5% four-stream / ~5% eight-stream, but not exact-by-construction,
+  draft-depth concurrency caveat applies); (C) bit-exact subset only — clamp the vocabulary-head and
+  confidence-pack inputs to the first `steps` rows per stream (optionally subsumed by 0265 `TF_DS_DRAFT_HEAD_SCORED`);
+  (B deferred to the window).
+- Decision (operator, 2026-11-23): **C only** — safe subset; B declined and recorded as an open decision in
+  `runs/lane-sched-20261123/0293.md`. No B code in any form.
+- Why: the campaign's adopt rule is exact plus neutral-or-faster; B is the only scheduler item that is not
+  exact-by-construction and would need its own relaxed gate and concurrency caveats. The larger consequence is a
+  ranking correction: the block-row clamp's 1.5-5% ceiling was mostly the non-causal stages, so the safely
+  recoverable share is the head/confidence rows (and 0265 already measured -0.025 ms a pass at one stream).
+
+## 2026-11-23: two-lane campaign outcome — patches 0293-0299z staged out of series (major)
+
+- Scope: major (patches + process). Lanes: `tier0` (blockers) in `~/Workspace/tfref-tier0` and `sched`
+  (scheduler cluster) in `~/Workspace/tfref-sched`, both based on `1421187`. Records:
+  `runs/lane-tier0-20261123/` (0a, 0a-closeout, 0b, 0c, REVIEW, REPORT, `patches/`) and
+  `runs/lane-sched-20261123/` (0293-0296, REVIEW, REPORT, `patches/`).
+- Result: tier0 **0297** `TF_DS_KEYS_PROFILE` + **0298** `kitKey`/`key_kit_flip` + **0299** `clock_fold` +
+  **0299z** (the review's F3 fix); sched **0294** (`TF_DS_DRAFT_MS` + `chooseK` clamp + `TF_DS_ROUND_MS_FIT`,
+  two commits) + **0295** `TF_DS_CONF_LEADER_ONLY` + **0296** distinct-picks counter. **0293 produced no patch**
+  (already built as 0265; premise falsified). Every patch off by default or profile-riding.
+- **Staging decision: the seven patches stay in the lane directories, NOT in `zig/patches/`.** They are based on
+  `1421187` = `TF_REF` + `0001`-`0283`, but the exported series stops at **0264** (0265-0283 were never
+  exported), and `zig/Dockerfile` applies `zig/patches/*.patch` in filename order. Appending 0297 after 0264
+  would jump the chain across 19 unexported patches and break the build. They enter the series when 0265-0283
+  are exported (or when the lane is rebased onto the current series tip), whichever comes first.
+- Choices considered for staging: append to `zig/patches/` (breaks the ordered chain — rejected), fold into
+  `patches-parked/0206` (only 0298's runtime half belongs there — deferred to the re-roll), keep in the lane
+  dirs (selected), commit to a branch (no branch policy exists for the recipe repo).
+- **0298 is dead code until parked 0206 adopts it**: the fix is the encoding spec (`kitKey`) plus pins; the
+  runtime half is the two kernel stores + `foldKeys` line in the re-rolled 0206, and the re-roll must also carry
+  REVIEW F1's one-line `key_prof` class fix (`if (keys_done) .fold else .kit`).
+- **J1 accepted as a recorded caveat:** the unswitched `chooseK` clamp fix alters replay `window_ok` outcomes
+  for recordings made at >= 24-row rounds (expectations produced under the flat clamp now read
+  `window_equal: false`). Served 16-row rounds are unaffected.
+- **0299z placement:** kept as its own patch (the round-count fix above the degenerate-buffer guard), not
+  squashed into 0299, so the review's F3 fix is separately revertable.
+- Why: the campaign's adopt rule is exact plus neutral-or-faster and nothing here has been on hardware. The
+  blockers are now answerable in one window (Stage A localize / Stage B probe byte parity / Stage C bundle gate
+  for the IDX_FUSED divergence; `runs/k280/window.sh` + `just k280-window` for the 0280-0283 suite), and the
+  scheduler cluster's remaining value is the 0294 knob + re-fit, measured apart.
+
+## 2026-11-25: telemetry collector ships the engine's own log lines (minor scope)
+
+- Scope: minor (config on both Sparks; no engine code, no engine restart). Record:
+  `runs/observe-20261125/REPORT.md`; reapplied with `just observe-engine-logs`.
+- Choices considered for getting per-request records into the store: (A) the `journald` docker log driver plus the
+  collector's existing journald receiver (needs a `start.sh` change and an engine restart, and mixes engine lines
+  into the syslog stream); (B) an engine change emitting the `done` fields as counters/histograms (clean, but a
+  patch + image + deploy gate); (C) a `filelog` receiver on the container's json-file log (selected).
+- Decision: **C**, shipping every engine line rather than a `done`-only filter. The filter was tried first and
+  passed everything anyway (the engine prefixes lines with `[tensorfold] `); the volume is ~2 MB a day a rank, and
+  rank 1's warnings and errors were previously invisible, so filtering bought nothing.
+- The collector now runs as root. `/var/lib/docker/containers` is `0710 root:root`, so the glob needs **readdir**;
+  `SupplementaryGroups=root` was tried first and failed, root also clears the pre-existing `/var/log/boot.log` denial.
+- Also removed the worker's `tensorfold` scrape job: rank 1 is the follower and serves no `/metrics`, so it had been
+  `up=0` on every scrape since 2026-11-11 and wrote a warning twice a minute.
+- **Correction recorded:** `requests_total` was never "scraped but not stored". The engine renders it only when its
+  reply list is non-empty, and the list is filled only by a hook installed when auth is enabled — production runs
+  with no API keys, so the family does not exist. Per-client separation therefore also needs keys enabled; every
+  `done` line carries an empty key label today.
+- Why: this is the instrument the 2026-11-24 attribution said was missing (the content split of the live acceptance
+  gap), and it costs no window and no rebuild. `queue_s`/`restore_s` arriving with it also splits queueing from a
+  slow prefill, which TTFT alone cannot do.
+
+## 2026-11-25: capacity window — the box saturates at 8 streams; row budget is not the lever
+
+- Scope: **major** (capacity ceiling, production `PARALLEL` bound, and the `ROUND_ROWS` question). Evidence:
+  `runs/capacity-20261125/REPORT.md`, four suites on production's own image, all arms bit-exact.
+- Choices considered for the row budget: keep 16 (do nothing) / 32 / 48. **Decision: keep 16.** Round 32 is
+  neutral within the 1.1% control band and 48 is −10%; the extra rows cost exactly what the extra drafts earn, so
+  the "drafts 2–5 are free in the drafter" premise in `todo.md` is false. No patch, no window.
+- Choices considered for the stream count: keep 8 / raise to 13 / raise to 16. **Decision: keep 8, and record 13 as
+  the hard ceiling.** Aggregate throughput is 98.4 / 104.8 / 108.8 tok/s at 8/13/16 streams (+10.7% for 2× lanes)
+  while per-stream halves. The round is row-bound, so more lanes buy almost nothing. The live 422 s mean TTFT with
+  35 waiting is a throughput wall, not a lane shortage — raising `PARALLEL` would add queueing, not throughput.
+- **Defect found:** `draft.max_rows = max_streams*5 = 80` (`draft.zig:38`) against `model.zig:565`'s
+  `streams*DRAFT_BLOCK > max_rows` refusal means production's `DRAFT_BLOCK=6` caps the server at **13** streams,
+  while `start.sh` advertises `PARALLEL` up to 16. 14/15/16 fail at startup with `DraftBlockTooWide`. The first s16
+  attempt failed this way on all four arms. Config-only workaround: `DRAFT_BLOCK=5` at 16 streams. Follow-up in
+  `todo.md`: tie `start.sh`'s `PARALLEL` bound to the block size so the server cannot be configured into a startup
+  failure.
+- **Incidental:** the 0017 16-row split ran on hardware for the first time and held bit-exactness on every arm
+  (exact + sampled panels), so `ROUND_ROWS` above 16 is safe to sweep in future.
+- Remaining lever: **acceptance rate**, not the row budget — tokens per round is pinned near 12–17 whatever the
+  rows or streams. That is the M3 draft-triage question (item 6).
+
+## 2026-11-25: M3 draft triage closed — no signal in a mid-depth hidden-state probe (major scope: a lever retired)
+
+- Scope: **major** (a named decode lever, M3, is retired; the engine gains an off-by-default probe-dump patch). Evidence:
+  `runs/m3-20261125/REPORT.md`; engine branch `probe-dump` (`27090ee` + `535b40d`), image `bench-probe-dump`.
+- Question (M3's own step 0): can a linear probe on a layer-13 or layer-19 hidden state predict "this draft row will
+  be rejected" at **95% precision / 50% recall**? If not, drop M3.
+- Choices considered: (A) run the study as specified — done; (B) skip it as too hard — rejected, it was the largest
+  unmeasured bit-exact decode lever; (C) infer from the existing `conf:` arm's −0.5% — that alone was not decisive.
+- **Decision: M3 is closed. It fails its criterion at both layers.** Layer 13 AUC 0.621, layer 19 AUC 0.651, against
+  a free positional baseline of 0.588 / 0.590 (~40k draft rows, honest round split). No threshold reaches 95%
+  precision at either layer; even a leaky row split reached it only at 0.2% recall.
+- Why: the target is a sampling outcome at a *different* row (row r dies when row r−1's pick misses its draft), and
+  row r's hidden state does not encode row r−1's draw. Rows after the first break are dead by construction, which is
+  why position alone scores 0.59. So the `conf:` arm's −0.5% was never a probe-quality problem: the signal is absent.
+- Consequence: **do not build the `file:` probe path** (`TriageProbeUnsupported` stays). `0177`'s dead-row mechanism
+  stays built and unarmed; production is unchanged. The decode lever is acceptance (workload-dependent) and
+  contention, not drafting.
+- Kept anyway, because it is a reusable instrument and the next probe idea should not rebuild it: the probe-dump patch
+  (off by default, no new CUDA kernel, rank-gated, unit-tested) plus `capture.sh`/`train.py`. `runs/m3-20261125/README.md`
+  records the two traps that cost a window (the smoke test opening the dump before the workload, and `find -xdev`
+  skipping the `/spill` bind mount).

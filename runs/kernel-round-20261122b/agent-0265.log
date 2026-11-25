@@ -1,0 +1,14 @@
+**Checkpoint — kernel patch 0265 complete.**
+
+**Premise: holds.** Markov (`_score`, noise/spec hooks) and confidence read only the first `steps` rows per stream of `dr.xc`/`dr.local`; the head projects `N*blockRows(steps)`. The head's EXL3 `glinear` dispatch is independent of M (plan per layer shape, M-independent grid; `smem = wk*min(m,8)*128*4` identical at 20→12 rows), so per-row results are row-count invariant at the dispatch level.
+
+**Delivered** — commit `c04f020` on `kernel-0265` (parent `27baa93`), one commit, clean tree:
+- `zig/src/families/dsv41/draft_head_scored.zig` (new pure switch module), `draft.zig` (packed arm: per-stream kit `_collapse` + one `_rmsnorm` + one head GEMM at `M=N*steps`, `lrow` stride to all readers), `ops.zig`, `dsv41.zig`. No `.cu` change.
+- Served batch (N=4, block 5, steps=3): head rows **20 → 12** (517,120 fp32 = 1.97 MiB/rank/pass avoided), launches 4 → 7. Engages iff `steps ≤ 4` (all 3–4-live-stream passes; shallow 1–2-stream passes).
+- Off path byte/launch-identical (reviewer verified call by call); packed arm falls back under a probe (the checker hashes the whole recorded buffer), on the 2D drafter, and when `steps == n`.
+
+**Gate (all green):** `zig build test` uncached 27/27 steps, 826/826 tests (one documented flake in the first truncated run, clean reruns); cuda syntax check ok (shared stubs fail on the base itself — round-local fixed stubs in `h0265/stubs/`); CPU harness `h0265/` — 150 layouts (144 matrix incl. 120 shallow + 6 served-width), 0 failures, 3 injected bugs caught. Independent reviewer subagent: OK with notes, both notes applied.
+
+**Report:** `runs/kernel-round-20261122b/report-0265.md` (reader/row-index table, invariance evidence, policy engagement, decision log).
+
+*Skipped/risks:* per-row bit-identity inside the precompiled `linear_grouped` cubin and the net timing (+3 launches vs −8 rows at the ~9 µs/row marginal) can only be settled by the hardware gate's `dr.local` on/off byte-compare and a graphs-on A/B.

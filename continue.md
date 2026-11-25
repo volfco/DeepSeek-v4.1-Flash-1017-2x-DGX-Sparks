@@ -2,6 +2,98 @@
 
 **Current state (2026-11-23 05:20 UTC): production runs image `tensorfold-dsv41:bench-fused-next-2bb052f` (`kernel-stack-0278` = 10c9866 + 0278 + 0279) with `TF_DS_TAPS_PACKED=1`, `TF_DS_IDX_PICK_WIDE=1`, `NCCL_MAX_CTAS=4`, plus `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2`. Deployed 05:20 UTC: exact 39/39, sampled identical, validate ok. Undo: `.env.bak-20261123-pre-2bb052f` (before that `-pre-mc4`, `.env.bak-20261122-pre-10c9866`).**
 
+**CUDA kernel process & GB10 hardware reference:** Follow [the CUDA kernel compilation, block microbenchmarking, and opcode evaluation process](docs/cuda-kernel-microbenchmark-process.md) for any new or modified CUDA kernel (`sm_121`, `--fmad=false --ftz=false`, byte-parity & sanitizer gate, tiered CUDA-graph/ablation → `clock64()`/`%globaltimer` → `ncu` SASS stall attribution, and opcode optimality criteria), backed by [the GB10 (`sm_121`) hardware performance & kernel design guide](docs/gb10-hardware-performance-guide.md) (measured ceilings, opcode behaviors, counter quirks, and bit-exactness rules).
+
+## Prefill/decode interference measured (2026-11-25)
+
+The first cell with a cold prefill beside decoding streams. 7 decoders at 8K depth, one 131,072-token cold
+prefill launched 1.5 s into their decode, 9 knob pairs + a no-prefill control, all exact IDENTICAL. [Report](runs/mixed-20261125/REPORT.md)
+
+- **One cold 128K prefill costs the decoders 62% of throughput** at production's 250/5: 9.37 vs 24.40 tok/s
+  per decoder, 251 vs 95.5 ms per round. That is the first direct measurement of the live interference and
+  it sits at the top of the 1.7–3.4× band the live logs implied.
+- **`TF_DS_PREFILL_SLICE` is inert.** 5/10/20 identical at every interval.
+- **`TF_DS_PREFILL_INTERLEAVE_MS` is a priority dial, not a win.** 250 ms keeps the prefill at 1662 tok/s
+  (81% of its 2,040–2,100 solo) and starves decoders (49% of solo); 1000 ms reverses it (decoders 13.27
+  tok/s, 70% of solo; prefill 1231 tok/s, 60%). 500/5 is dominated: prefill 1367 (18% worse than 250) with
+  decoders 9.24 (no better than 250's 9.37).
+- **The knob cannot fix the loss.** Even the best arm leaves decoders 46% below the no-prefill control, and
+  decoders' `cached` stayed 6144 in every arm — so the loss is structural bandwidth/queue contention, not
+  scheduling granularity and not cache eviction. A structural fix (eviction reservation / lookahead 0191,
+  or not co-scheduling cold prefills with decodes) is the only lever left.
+- **Adopt nothing.** Production's 250/5 is prefill-optimal and correct while TTFT binds (422 s mean, 113/153
+  clients gone at 600 s). 1000 ms only makes sense for a decode-heavy queue with TTFT headroom.
+- **Open:** the 250→500→1000 decoder curve is flat-then-jump (9.37 / 9.24 / 13.27) and unexplained; it needs
+  the traced attribution the [drafter-degradation report](runs/drafter-degradation-20261124/REPORT.md) §3
+  already asks for.
+
+## k296 recorded (2026-11-25): a suite that ran on 2026-11-24 and was in no doc
+
+`runs/k296/` (2026-11-24 01:09–02:06 UTC, image `bench-fused-next-87e92a2` = 1421187 + 0294–0296) had a full RESULTS.md and six
+arms of artefacts but appeared in no document, and it contradicted four open items. Now folded into `todo.md`:
+
+- **0295 `CONF_LEADER_ONLY`: exact, neutral — adoptable under the exact-and-neutral rule.** Its saving is follower GPU work,
+  invisible to any rank-0 metric.
+- **0294 `ROUND_MS_FIT`: no win** (probe −0.15%, one-stream forward +1.5 to +3.3%). **`DRAFT_MS`: inert** at the served
+  shapes. **And the knob's unit is per-head-step (~0.65 ms at one stream), not the whole pass** — every reader multiplies
+  it by drafts/steps/held_levels, so the staged `draftms39`/`draftms72` arms would have been ~5× too dear.
+- **0296 union-fetch gate: FAILED** (`distinct/picks` 0.582 at 32K, 0.612 at 128K in both controls, above the ½ rule) —
+  do not brief the union fetch. The counter stays as instrumentation.
+- Also useful: its control arms prove the cross-built image's off path is exact, which retires the "the new executables have
+  never been executed" doubt the 2026-11-23 staging note carried.
+- **Process lesson:** a suite whose verdicts live only in its own directory is lost. `runs/k296/` was untracked and
+  unrecorded while `todo.md` still said "awaiting the window" for all three patches.
+
+## M3 draft triage closed: no signal (2026-11-25)
+
+The largest unmeasured bit-exact decode lever in the record, now measured and **retired**. M3's step 0: can a linear probe on a
+layer-13 or layer-19 hidden state predict "this draft row will be rejected" at 95% precision / 50% recall? [Report](runs/m3-20261125/REPORT.md)
+
+- **No.** Layer 13 AUC **0.621**, layer 19 AUC **0.651**, against a free positional baseline of 0.588 / 0.590
+  (~40k draft rows, honest round split). **No threshold reaches 95% precision at either layer**; even a leaky row
+  split reached it only at 0.2% recall.
+- **Why:** the target is a sampling outcome at a *different* row (row r dies when row r−1's pick misses its draft),
+  and row r's hidden state does not encode row r−1's draw. Rows after the first break are dead by construction,
+  which is what position alone captures. So the existing `conf:` arm's −0.5% was never a probe-quality problem.
+- **Consequence:** do not build the `file:` probe path; `0177`'s dead-row mechanism stays built and unarmed;
+  production unchanged. The decode lever is acceptance (workload-dependent) and contention, not drafting.
+- Kept as a reusable instrument (off by default): engine branch `probe-dump` (`27090ee` + `535b40d`), image
+  `bench-probe-dump`, `runs/m3-20261125/{build.sh,capture.sh,capture.py,train.py}`. Two traps recorded there: the
+  startup smoke test opens the dump before the workload (never `rm` it after a restart), and `find -xdev` skips the
+  `/spill` bind mount.
+
+## Staged for the next hardware window (2026-11-23, two-lane campaign — NOT on hardware)
+
+Two delegated lanes finished 2026-11-23 with seven patches staged **out of series** (they are based on `1421187` =
+`TF_REF` + `0001`-`0283`, but the exported series stops at 0264, so they must not be appended to `zig/patches/` yet —
+`zig/Dockerfile` applies that directory in filename order). Records: [tier0](runs/lane-tier0-20261123/REPORT.md) ·
+[sched](runs/lane-sched-20261123/REPORT.md). Decision: `decisions.md` 2026-11-23.
+
+**Tier 0 (blockers).** `runs/lane-tier0-20261123/patches/`:
+
+| Patch | Switch | What | Window gate |
+|---|---|---|---|
+| `0297` | `TF_DS_KEYS_PROFILE` | the pruned selection's width + key-encoding class (`kit`/`fold`) on a `key_profile` line | Stage A: unfixed `TF_DS_IDX_FUSED` bundle → expect 4/39 DIFFERENT and `fold` records only inside 16,384 < width <= 65,536 |
+| `0298` | none (dead until parked 0206 adopts it) | `kitKey`/`key_kit_flip`: the key fold writes the kit's `_score_keys` (signed-order) encoding | Stage B: fix folded into re-rolled 0206 → 39/39 IDENTICAL + `probe.py` keys **and** `tmax` byte parity vs the kit |
+| `0299` + `0299z` | rides `TF_DS_ROUND_PROFILE`/`TF_DS_CLOCK_MARKS` | `clock_fold.zig` host fold + clk-init pins; 0299z fixes the round count above the degenerate-buffer guard | graphs-on profile reads nonzero phases |
+| scoring | — | per-round distributions (`work.py` samples; `table_gpu.py` mean/median/p95/p99; `arms.sh` `*.frames.txt`) | every future suite scores this way |
+| `runs/k280/window.sh` + `just k280-window` | — | the staged 0280-0283 suite, README order, gated on `restored: validate rc=0` | run with production idle (~3.5 h) |
+
+**Scheduler cluster.** `runs/lane-sched-20261123/patches/`:
+
+| Patch | Switch | What | Note |
+|---|---|---|---|
+| `0294` | `TF_DS_DRAFT_MS`, `TF_DS_ROUND_MS_FIT` | the drafter allowance knob (unset keeps 3.5) + the trace-fitted round table (`34.656 ms @ 6 rows + 3.1536 ms/row`); `chooseK`'s clamp fixed to the tail slope | measure knob and re-fit **apart**; J1: wide-round (>= 24-row) replay expectations shift |
+| `0295` | `TF_DS_CONF_LEADER_ONLY` | the follower skips the drafter confidence head (output-invariant) | gate: reply/rounds/accepted equal + follower draft IDs, depths, stashed rows identical |
+| `0296` | rides `TF_DS_ROUND_PROFILE` | distinct picks by depth per fetch | brief the decode KV union fetch only if `distinct/(rows*512) < 1/2` at 32K/128K |
+
+**0293 produced no patch** — the drafter block-row clamp is **not** bit-exact (non-causal block attention; rows past
+`steps` feed the scored rows). Its approved safe subset is already 0265 `TF_DS_DRAFT_HEAD_SCORED`, whose commit
+`c04f020` is not an ancestor of `1421187` (series call). Operator declined the full clamp 2026-11-23.
+
+**Test state:** both lanes' full `zig build test` green (the first attempts' failures were the known load-flake family,
+verified green standalone: 75/75 lanes/stream, 23/23 tokenizer, 530/530 dsv41); focused tests green for every patch.
+
 ## Status summary (2026-11-23 05:30 UTC)
 
 **Production:** `bench-fused-next-2bb052f`, which is recipe-0264 `27baa93` + 0272–0275 + 0278 + 0279. The `.env` switches are `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2`, `TAPS_PACKED`, `IDX_PICK_WIDE` and `NCCL_MAX_CTAS=4`. The exact reference is `runs/deploy-10c9866-20261122/exact.json`; every deploy since has been IDENTICAL against it.
@@ -35,14 +127,17 @@
 - Spill restore after a restart is 1.5 s for 300K and 2.7 s for 600K, against 152 s / 332 s cold (`runs/k278/`).
 - NCCL carries only all-gathers and send/recv, so its knobs can't move bits.
 
+**New at 06:30 UTC:** the [audit review below](#audit-review-and-re-score-of-rounds-02590279-2026-11-23-0630-utc) corrects several round-time records above (0264, k265, k269's noise floor) and adds four candidates. Read it before trusting a `forward_ms a round` number.
+
 **Open, in rough priority order:**
 1. **Pool-pressure cache replay.** About 100 distinct ~22K documents fill the 2.1M-position pool, then revisit the early ones. It exercises staleness and spill-restore under memory pressure, and times restore against recompute. `runs/cache-20261122/replay.py` with `K=100 WORDS=16000 R=2`.
 2. **`top_k` -1/0/>56 with concurrent sampled streams:** correctness and slow-path check.
-3. **More than 4 concurrent streams** (8, 16): total-throughput scaling; no suite has gone past 4.
+3. ~~**More than 4 concurrent streams** (8, 16): total-throughput scaling; no suite has gone past 4.~~ **CLOSED 2026-11-25 (capacity window): the box saturates at 8 streams.** 8→13→16 streams gives 98.4→104.8→108.8 tok/s aggregate (+10.7%) while per-stream falls 12.3→8.1→6.8 tok/s and TTFT rises ~2.4×. Round cost is row-bound, so extra lanes convert to extra rows rather than throughput. `ROUND_ROWS` 32/48 at 8 streams is neutral/−10% — the "drafts 2–5 are free" premise is false. Two constraints found: `DRAFT_BLOCK=6` caps the server at 13 streams (`max_rows=80`, `model.zig:565`), and 16 streams needs `DRAFT_BLOCK=5`. The live 422 s TTFT with 35 waiting is therefore not fixable by raising `PARALLEL`; the remaining lever is acceptance rate (M3 triage). [Capacity report](runs/capacity-20261125/REPORT.md) (Correction, 07:27 UTC: the November 21–22 `run_suite.py` suites have a `dec8` cell, and live traffic ran 8 streams with 35 waiting on November 23; see "OpenObserve review results".)
 4. **Operator decisions (not exact against the current reference, per decisions §0121):**
    - 4,096-row prompt passes (bertholomus, +3–10% prefill);
    - `TF_DS_EXACT_RESUME` for multi-turn (~1 s TTFT a turn).
-5. **Low value, parked:**
+5. **k280 measured 2026-11-25: adopt 0281's Markov cache at 4,096 rows and 0282's `dpf1` prefetch — after a from-source control.** Both clear their gates within the cross-built image: 0281 `pass_ms` −0.20/−0.22 ms (−5.0%, miss 52.2%→24.2%, both controls, drafts IDENTICAL 19/19); 0282 `dpf1` −0.18/−0.17 ms (−4.2%, no forward cost). 2048 rows misses the 0.15 ms gate at −0.13/−0.14 ms but is 6.7× the control spread; `dpf2` is a wash on forward+pass and should not be adopted. **The blocker is the measurement's own caveat:** the image's executables are cross-built while production's came from a GCC 13.3 from-source build, so a win against a slower in-image control may not transfer. Either add a from-source control arm or rebuild 0281/0282 from source before deploying. [main report](runs/k280/main/REPORT.md) · [passprof](runs/k280/passprof/)
+6. **Low value, parked:**
    - per-rank prefetch budget (≤0.4% at 1 stream);
    - deferred 0266/0267 microbenchmarks;
    - idx selection past 65,536 blocks (hierarchical).
@@ -53,6 +148,205 @@
 - Local commits since `25581bd` are not pushed.
 - Uncommitted edits to `todo.md` and `runs/suite-fused-next2-20261121/query128/bench.py` predate this session; they were left alone.
 
+
+## Audit review and re-score of rounds 0259–0279 (2026-11-23 06:30 UTC)
+
+A review of [the fused-kernel audit](docs/fused-kernel-rebenchmark-audit.md) and of every suite since 0259, from the saved runs and the engine worktrees. Nothing was run on the pair. **Verdict: no large kernel win was missed. The patches remove microseconds from a 42.8 ms cycle, and the suites' round-time metric had artifacts that produced the apparent wins and losses.** Four candidates came out of it (round 0280–0283, below).
+
+### A decode cycle, and what each patch could remove
+
+- **Cycle identity (measured).** One-stream cycle = `forward_ms` + one drafter `pass_ms` (+ `absorb_ms` 0.26, `logits_ms` 0.05). k265 ctl1: 38.27 + 4.17 ms. The sampled probe reads 42.55 ms a round (tetris, `decode_s` / rounds). `draftFn` runs the pass synchronously before the next verify (`lanes.zig:1823–1828`); passes ≈ 1.006 × rounds. Nothing else is hidden: no row leaves a positive residual.
+- **The drafter pass is absent from the stage ceiling table below** (that table covers the forward only). It is about 10% of a one-stream cycle and serial.
+
+| Patch | Where it runs | Best case a cycle | Basis |
+|---|---|---|---|
+| 0259 `KV_FETCH_REUSE` | 30 of 38 exchanges a round | 0.16–0.71 ms realized | measured; wall −0.3 to −1.6% in all six cells |
+| 0260 `CONF_PACK` | once a pass, in the pass graph | 1.8 µs | 4 launches × 0.457 µs measured in-graph node floor |
+| 0261 `TOPK_MERGE` | once a sampled round, head stretch | not recorded | no selector timing; the whole head stage is 1.16 ms |
+| 0264 `PLACE_BOUND_ALL` | once a layer | 0 at 1 row, R − 1 places a layer | not timed alone |
+| 0265 `DRAFT_HEAD_SCORED` | once a pass, only when steps ≤ 4 | 9–18 µs at one stream | estimate; its 9 µs a row slope rests on row counts that are not in `p2g0.json` |
+| 0266 `COMPRESS2_PAIR_ONCE` | **3 layers a round** (2, 8, 14), not 40 | ≤ 0.3 µs | `comp_wkv` layers only (`weights.zig:659`) |
+| 0268 `DRAFT_QKV_NORM` | 3 a pass | 1.4 µs | launch floor |
+| 0269 `DRAFT_TAPS_DIRECT` | once a round, eager absorb | ~5 µs | derived; all of `absorb_ms` is 0.26 ms |
+| 0270 `PROMPT_PICKS_ONCE` | chunks with `kk % 16 != 0` | **0 on a 2,048-row chunk** | `kk` is 512 once a chunk ends past 1,024 tokens |
+| 0271 `RESUME_ASSEMBLE` | never | 0 | `EXACT_RESUME` is refused at startup with spill, `KV_SHARD` and `PREFILL_SLICE`, all armed |
+| 0277 (not built) | 2 launches a round | 6–10 µs | estimate |
+| 0278 `TAPS_PACKED` | once a prompt, decoder chunk | ~44 µs a prompt | derived; see "Unexplained" |
+| 0279 `IDX_PICK_WIDE` | once a round past 262K tokens | 1–4 µs | estimate |
+
+### Scoring artifacts in the `arms.sh` suites
+
+1. **`forward_ms_per_round` cells are quantized.** `workload.py:84,99` differences a lifetime mean that the engine prints to 0.01 ms, times lifetime rounds. From k265 on, the probe runs before the workload (~6–7K lifetime rounds), so a 97-round cell is off by up to ±0.6 ms.
+   - k265 4K×1 on the host metric: controls 33.88 / 33.87, 0265 33.30 / 33.26, 0268 33.29 / 33.17 (the "−1.75% / −1.89%").
+   - The same cells on the GPU clock (`tail` alone): 33.45 / 33.44, 33.48 / 33.46, 33.40 / 33.24.
+   - Identical-code pairs over 48 one-stream cells: p90 2.06% on the host metric, 0.64% on the GPU clock (medians 0.33% / 0.28%). k269's "±2–3% a cell" noise floor is mostly this artifact.
+   - **Use `per_round.tail[0]` (µs; the forward's stretches on the GPU clock), and read `wait[0]` separately as host stalls. Both are already in every arm's cell JSON since the recipe lineage. `runs/overnight-20261122/table_gpu.py <OUT> --control a,b --test c,d` scores a suite this way** (one-stream cells a round, multi-stream cells as total forward and wall, then `pass_ms` / `absorb_ms` from the profile lines; it falls back to the host metric on images with no clock). The note further down that the clock-mark profiler is broken is about per-phase marks, which this review did not check; the stretch-level `wait` / `tail` values are sane (lifetime `tail` + `wait` = `forward_ms` − 0.02 ms).
+2. **Per-round time at four streams is confounded by round count.** The same 1,280 tokens take 149–157 rounds between control arms at 128K×4, and each extra round costs about 30 ms of total forward. Compare `rounds × tail` or `wall_s`.
+3. **Probe tok/s is stepped.** `suite_probe.py` divides tokens by the server's `decode_s`, printed to 0.1 s: 0.6% steps on a 16 s row, 1% on a 10 s row. That is why 128.0 repeats across eight arms. The client-timed probe (k269 onward) avoids it.
+4. **Forward metrics cannot see drafter-pass patches** (0260, 0265, 0267, 0268). The profile line's `pass_ms` can, at 0.01 ms.
+5. **Real one-off events remain.** Host stalls of 70–100 ms show as `wait` (k269 ctl1 4K×1 992 µs a round, r271a 32K×1 776, nccl mc4a 4K×1 703). Whole cells run 0.5–0.9 ms a round slow on the GPU clock with no code change (kall all3a 4K×1, k272 ctl2 4K×1, k272 128K×1 in ctl1 / ctl2 / tr16a, sweep1 gargmax 128K×1). Cause not found. A per-round median would remove both; only means are saved.
+6. **Evidence gaps.** `arms.sh` saves banner counts, never the text, so no first-engagement shape is on record. The banner counts in `k260-gate` and `placebound` are 0259's banner (the default pattern), present in controls too. Every arm runs with `TF_DS_ROUND_PROFILE=1`.
+
+### Re-scored results (GPU clock at 4K / 32K / 128K × 1, test vs control mean; `pass_ms` test vs control)
+
+| Patch | Forward, GPU clock | Pass or other direct metric | Reading |
+|---|---|---|---|
+| 0264 | +0.88 / +0.17 / −0.19% | wall over six cells +0.25% | **neutral, not −0.41%** |
+| 0265 | +0.06 / −0.10 / −0.23% | pass 4.15 / 4.11 vs 4.17 / 4.14 | −0.025 ms a pass |
+| 0266 | −0.03 / +0.01 / −0.27% | pass 4.17 / 4.14 | nothing |
+| 0268 | −0.38 / −0.01 / −0.39% | pass 4.15 / 4.12 | −0.02 ms a pass |
+| 0265+0266+0268 | +0.10 / +0.05% (4K cell hit a slow episode) | pass 4.13 / 4.14 vs 4.16 / 4.14 | −0.015 ms a pass |
+| 0267 | +0.69 / +0.70 / +1.06% (k267); +0.73 / +0.87 / +0.56% (kall all4) | pass 6.33 / 6.34 vs 4.20 / 4.20 | see "Unexplained" |
+| 0269 | −0.20 / −0.13 / +0.19% | absorb 0.25 / 0.25 vs 0.26 / 0.26; the A/A arms also read 0.25 | nothing |
+| 0270 | −0.15 / +0.38 / +0.45% | `prefill_ms` 724.0 / 725.5 vs 725.3 / 725.9 | nothing |
+| 0271 (A/A) | −0.33 / +0.41 / +0.06% | n/a | the resolution of this table |
+| `GREEDY_ARGMAX` | −0.01 / +0.11 / +0.91 ms a round | n/a | the recorded "+1.2%" is one 128K cell |
+
+Not covered: 0260 (no profile lines saved in `k260-gate`), 0261 (no on/off run on sampled traffic exists), and the four-stream cells (round-count variation).
+
+### Corrections to earlier records
+
+- **0264 was adopted on a confounded number.** Its "−2.15% at 128K×4" compares on arms at 156 / 156 rounds with off arms at 148 / 151. Total forward was +2.1% and wall +1.2% (15.92 / 15.91 vs 15.63 / 15.81 s) with the switch on. It is exact and neutral, so it stays under the adopt-neutral rule; do not cite a gain. [Arms](runs/overnight-20261122/placebound/)
+- **k265's −1.8% at 4K×1 never existed**, so kall did not fail to reproduce it.
+- **0259 is real** by wall in all six cells, about 1%.
+- **0266's launch saving** applies at 3 layers a round; report-0266 says 40.
+- **0270's "76 → 16 launches a chunk"** describes a cold 127-token chunk. A 2,048-row chunk skips the pad in both arms.
+- **0267's launch count** omits the cross-rank gather in every Markov step (`tri_markov.zig:162–165`).
+
+### Unexplained
+
+- **0267, the forward got slower too.** The greedy loss is +2.75 to +3.66 ms a round on every probe row. About 3 ms of it is outside the forward, in the drafter pass (lifetime `pass_ms` +2.13 ms is diluted by sampled passes, where the arm does not engage). The other 0.2–0.4 ms is in the forward that follows: its GPU-clock time is above both controls in all 12 one-stream arm-cells of k267 and kall, against a 0.28% identical-code median. So a change inside the pass moved the next forward by about 0.25 ms. Cause unknown; cache state at the pass-to-forward boundary is the hypothesis (it is the only evidence for candidates 3 and 4 below). The penalty does not track drafts verified (prose 1.48 drafts a round, +3.4 ms; go 5.79, +3.2 ms), so it is per pass. [Probe rows](runs/overnight-20261122/k267/)
+- **0278, the gain is about 1,400 times the work removed.** The whole patch is the `tap()` write stride plus dropping three `copyRows` and reading `ch.taps` in `absorb`, all on the decoder chunk, once a prompt (encoder-only chunks return at layer 20, `model.zig:1626–1636`; taps are layers 37–39). That is about 44 µs. Measured: TTFT at 32K 15.489–15.504 s against 15.531–15.586 s in the eight control-equivalent runs (−63.5 ms, both test arms above all eight), and at 96K −102 ms and −434 ms (the two test arms differ by 332 ms). Something may be real, but it is not the stated mechanism. Worth a prefill phase profile with the switch on and off before quoting "+0.5%". Engine commit `a8c95b7` in `~/Workspace/tfref-kstack4` · [Arms](runs/k278/)
+
+### Amendments to the audit document
+
+57 of its 62 line-level source claims check out against the worktrees and none is wrong.
+- **Ranking.** Its three "first hardware window" items have ceilings near 0.1% (0261 early exit, an estimate: no selector timing exists), 0.01–0.05% (0269's two 384-byte uploads) and nothing at serving level (0198, 2.6–3.3 µs a call on 128-row prompt chunks).
+- **0261.** The fallback draw kernel (`dsv41_ops.cu:1570–1602`) runs the same eight passes over 129,280 columns on rank 0, so an early exit belongs in both arms. The top-k exchange is an NCCL all-gather (`round.zig:2191`) while the full-logit exchange takes the RDMA ring up to 17 rows (`prompt.zig:153`), so fewer bytes need not mean faster. **Worth doing from the audit's design: shipped 0261 against the fallback on sampled requests, scored on the GPU clock. It needs no build and has never been done.**
+- **0269.** The absorb synchronize runs every round in the served order (`TF_DS_ABSORB_AFTER_PICK` is off), not only under the profiler. The three-view proposal needs a 16-byte-aligned `SLOT_OF` pointer; a view starting at an odd row is not, and the archived kit manifest has no unaligned variant.
+
+### The drafter pass (4.11–4.18 ms at one stream; breakdown measured 2026-11-23, attribution 2026-11-24 — see "Drafter degradation attribution" below)
+
+- **Structure** (`draft.zig:570–714`, `tri_markov.zig:120–165`): three or four small uploads, one graph replay, a synchronize and two device-to-host copies. The graph holds three EXL3 stages (attention with grouped linears, a cross-rank gather, MoE at top 3 of 128 plus the shared expert, a second gather), then the **target's own vocabulary head on every block row** (a second full head read a cycle), then `steps` Markov iterations of `_bias`, `_score`, `_finish`, a cross-rank gather and `_pick`, then the confidence head. That is 11–12 collectives a pass.
+- **No L2 prefetch in the pass** (`draft.zig:10`: left out of the port). In the forward the prefetch is worth 5.3% (`PREFETCH=0`: 4.338 s vs 4.12 s; attention producer 240 → 198 µs a layer, MoE 559 → 537 µs).
+- **Pass time by block width** (rowcost `FIX_K` arms, exactly 1.00 stream a pass): 3.51 ms at K=0 (five block rows), 3.75–3.90 ms at K=1–6 (six rows once `KEPT=2` widens). November 15 read 3.43 ms at a smaller step mix; like-for-like at 5 rows / 5 steps / greedy / 1 stream it is **3.43 → 3.51 ms, +0.05–0.08 ms**, inside the ±0.05 ms same-work repeat band (`runs/drafter-degradation-20261124/REPORT.md` §0). Do not read 3.43 → 4.21 as a regression.
+- **Markov bias cache: 256 rows, hard-coded** (`tri_markov.zig:23`, the kit's `TF_DS_MARKOV_CACHE` default; list in `markov_tokens.zig`). Miss rate 51.7% (k267) and 53.3% (kall ctl1: 23,386 hits, 26,648 misses, 7,173 passes, so 7.0 lookups and 3.7 misses a pass). A miss step recomputes the row against the Markov head, 64,640 × 256 fp16 = 33.1 MB a rank. The cached set changes a step's time, never a draft (`markov_tokens.zig:4`).
+- **Offline hit rates on the frozen corpus** (`runs/overnight-20261122/corpus.json`, natural text, not model output): the served list hits 49.2%, matching the served counter. Held-out frequency lists hit 61% (512), 72% (1,024), 81% (2,048), 88% (4,096). The served list plus a per-reply LRU of 256 hits 66–73%. A cached row is 126 KB a rank.
+
+### Candidates (all exact by construction; 1–3 staged, none on hardware)
+
+1. **Break down the pass — BUILT as 0280, never executed.** A phase timer for the pass under `TF_DS_ROUND_PROFILE=2 GRAPHS=0`, plus a steps histogram and miss steps a pass. The 2026-11-23 trace review already gives a stage breakdown from saved ring traces (`trace/out/pass_breakdown.txt`); 0280 is the in-engine cross-check and runs first in `runs/k280/passprof.sh`.
+2. **Enlarge the Markov bias cache — BUILT as 0281 (`TF_DS_MARKOV_CACHE`), armed in `runs/k280/run.sh`.** A miss step costs 133–153 µs and a pass has 3.2 of them (measured from the ring traces, see "Trace review results"), so the saving is 0.20–0.33 ms a pass at the offline hit rates, 0.16–0.26 ms at 0281's own held-out rates. 0267 tried to make the miss cheaper; this makes misses rarer and needs no kernel. Gate: `pass_ms` falls ≥0.15 ms against both controls with drafts unchanged.
+3. **L2 prefetch inside the pass — BUILT as 0282 (`TF_DS_DRAFT_PREFETCH`), armed in `runs/k280/run.sh`.** Ceiling ≤0.18 ms a pass by analogy with the forward's 5.3%; the `dpf2` hand-off arm must be scored on forward + pass.
+4. **Sweep the forward's prefetch constants** (3 µs delay, 230 GB/s pace, 16 MiB budget: the kit's values, hard-coded at `ops.zig:410–420` and `round.zig:1787`, never swept here; B2 traced the rank imbalance to this prefetch).
+5. **Time 0261 on and off on sampled requests** (no build).
+
+### Round 0280–0283 (STAGED 2026-11-23 07:35 UTC; nothing launched, nothing run on a GPU)
+
+Four timing-only commits on `kernel-stack-0280` (worktree `~/Workspace/tfref-kstack5`, base production `2bb052f`), no CUDA source changed, tree clean. **Image `tensorfold-dsv41:bench-fused-next-1421187` is built on both ranks** (production's image plus the two cross-built executables; the base's 20 fatbins embedded byte for byte). The review session confirmed the image on the head and production still up on `2bb052f`, and re-ran `zig build test` and `zig build` at the tip: both exit 0. The worker's copy rests on the agent's checksum record (`runs/k280/build/proof.json`). **The new executables have never been executed.** [Briefs and reports](runs/kernel-round-20261123b/) · [Suite](runs/k280/README.md)
+
+| Patch | Commit | Switch | What it is |
+|---|---|---|---|
+| 0280 | `cb8a4ca` | `TF_DS_PASS_PROFILE=1` (+ counters under any `TF_DS_ROUND_PROFILE`) | the pass's phase times (`pass_phases_ms`, eager), and `pass_counts`: steps histogram (buckets 1–8), miss steps a pass, block rows, zero-initialized `markov_cache` |
+| 0281 | `b0715eb` | `TF_DS_MARKOV_CACHE=<rows>` (unset 256; 256–4,096) | more cached Markov bias rows; the first 256 are today's list in today's order (pinned by a host test) |
+| 0282 | `92dc42f` | `TF_DS_DRAFT_PREFETCH=1\|2` | the paced L2 prefetch inside the pass: three sites a stage; `2` adds the hand-off of the forward's first reads |
+| 0283 | `1421187` | `TF_DS_L2_DELAY_NS`, `TF_DS_L2_RATE_GBPS`, `TF_DS_L2_BUDGET_MIB` (unset 3000 / 230 / 16) | the prefetch's pacing and budget, rank-local; the drafter's prefetch takes the same values |
+
+- **0281's list is a general-text ranking, and its hit rates are lower than the review's estimate.** The served kit ships no ranking (cubins only), so the 3,840 ids after the served 256 come from ExLlamaV3's public calibration files (half code, half English), not fitted to any benchmark prompt. Held out on `corpus.json`: 54.4% at 512, 61.3% at 1,024, 67.7% at 2,048, 76.5% at 4,096 (the review's corpus-fitted lists read 61 / 72 / 81 / 88%). With the measured miss cost that is an estimated 0.16–0.18 ms a pass at 2,048 rows and 0.23–0.26 ms at 4,096.
+- **0281 and memory.** 4,096 rows take 473 MiB more a rank. The head shows about 6 GiB available with production up, and memguard kills below 2.5 GiB.
+- **0281's gate.** Output tokens cannot move whatever the cache holds, so the exact panel does not test it. `runs/k280/gate_drafts.py` compares per-request rounds, accepted/drafted and sha against control (it passes the saved k272 and k267 arms and fails the D1 drafter arms, as it should).
+- **0282 details.** Site 1 sits behind `wq_b`, where the forward forks (`round.zig:1216`). The served six-row pass reads the cuBLAS fp32 gate copy, not `gate_w` (the kit has drafter gates at 5, 10 and 15 rows only), so site 2 prefetches whichever the pass will read. Value `2` makes the pass wait at its end for the hand-off launch (up to about 76 µs), so score it on forward + pass; the traces give no evidence for the hand-off.
+- **Compare arms within the new image only.** Production's `tensorfold-native` came from a from-source build (GCC 13.3 `.comment`); the new image's executables are cross-built, so host code generation may differ. Every staged suite has its controls on the new image.
+- **Staged, in the order to run them** (each restarts production and restores and validates it at the end; start the next only after `restored: validate rc=0`):
+  1. Copy to the head as single files: `runs/k280/` (README, arms, scripts, `work.py`, `gate_drafts.py`, `topk-*`) and `runs/overnight-20261122/{arms.sh,table_gpu.py}`. The exact `rsync` lines are in `runs/kernel-round-20261123b/REPORT.md`.
+  2. `runs/k280/passprof.sh` (about 20 min): the pass breakdown under `TF_DS_PASS_PROFILE=1`, and the executables' first run. It should reproduce the trace review's breakdown.
+  3. `runs/k280/run.sh` (about 1 h 45 min): `ctl1, mc2048a, mc4096a, dpf1a, dpf2a, ctl2, dpf2b, dpf1b, mc4096b, mc2048b`, sampled probe and sampled workload cells.
+  4. `runs/k280/l2-run.sh` (about 50 min): rate 180 / 270, delay 0 / 10000, budget 8 / 32 against two controls.
+  5. `runs/k280/topk-run.sh` (about 50 min, production's own image): shipped 0261 against the fallback on sampled rounds.
+  6. Gate and score: `python3 runs/k280/gate_drafts.py runs/k280/main --control ctl1,ctl2 --test ...`, then `python3 runs/overnight-20261122/table_gpu.py runs/k280/main --control ctl1,ctl2 --test mc2048a,mc2048b` (and the other pairs). `pass_ms` is the first number to read.
+- **Unverified until those run:** that the executables load; any speed effect; that drafts are unchanged under 0281 and 0282 on hardware; that the kit's `_score` reads cache slots above 255 correctly; that a pass graph captures and replays with a second stream (0282); the scripts end to end (only `bash -n` and a parse were done).
+
+
+### Three more agents launched 2026-11-23 06:36–06:37 UTC (all DONE)
+
+- **Kernel pattern sweep: DONE 07:28 UTC**, see "Kernel pattern sweep results" below. [Report](runs/kernel-sweep-20261123/REPORT.md) · [Brief](runs/kernel-sweep-20261123/BRIEF.md)
+- **Trace review: DONE 07:17 UTC**, see "Trace review results" below. [Results](runs/trace-review-20261123/RESULTS.md) · [Brief](runs/trace-review-20261123/BRIEF.md)
+- **OpenObserve review: DONE 07:27 UTC**, see "OpenObserve review results" below. [Results](runs/observe-review-20261123/RESULTS.md) · [Coverage](runs/observe-review-20261123/COVERAGE.md) · [Brief](runs/observe-review-20261123/BRIEF.md)
+
+### Trace review results (2026-11-23 07:17 UTC)
+
+Read-only analysis of the saved ring traces (12 rank-pairs: `k272/tr16{a,b}`, `b2/mech`, `b2/rowsplit`). 22 scripts and their outputs are beside [the results](runs/trace-review-20261123/RESULTS.md). Absolute times are from the greedy, short-context mech arms on image `10c9866` (their steady cycle is 39.86 ms), so shares of the 42.8 ms cycle are approximate. The Markov figures were re-derived independently by the review session and agree.
+
+- **The drafter pass has a breakdown now (measured).** A one-stream, six-step pass is about 3.9 ms of GPU time: vocabulary head 1.08 ms, three MoE stages 1.29 ms, three attention stages 0.68 ms, Markov steps 0.49 ms, twelve ring transfers 0.23–0.26 ms. Another 0.39 ms sits between the forward's last transfer and the pass (absorb, pick, uploads) and 0.10 ms between the pass and the forward.
+- **A Markov bias miss costs 133–153 µs (measured).** The per-step interval is cleanly bimodal: 9.8 µs on a hit, 142–162 µs on a miss, which is one 33 MB head read at bus speed. The slow mode falls on the same ring sequence in all four arms and both ranks (906 of 906 steps), so it is the token. 3.2 misses a six-step pass, 0.44–0.49 ms, about 1.1% of a cycle. At four streams one head read serves every missing row, but a step is slow 96–100% of the time. **This prices 0281 without the idle-window microbenchmark: 0.20–0.33 ms a pass at the offline hit rates (inferred), so it deserves an arm.**
+- **The slow cells are stalls at the Engram layer-1 cut (position measured, cause inferred).** In `tr16a` the 32K × 1 and 128K × 1 cells run 0.94 and 0.62 ms a round slower than in `tr16b` with no code change. All of the first and about 80% of the second sits at the Engram layer-1 gather, the first transfer of the forward's second graph stretch: rank 1 arrives late (producer 674 against 202 µs), rank 0 waits in the ring. 31 of 34 sampled forward stalls above 0.5 ms in a whole arm are at this position. The round's Engram hash, submit and reads must fit inside stretch 0, which is layer 0 alone, about 1.1 ms (`round.zig:2068, 2075, 2355`). The stalled host is rank 1's, so rank 0's `tail` shows it as GPU time. Only one of the slow cells listed above has a trace; that the others are the same is inferred. **Next step, no build:** the two cells five times each with the trace on, in three arms: control, `TF_DS_ENGRAM_SUBMIT_EARLY=1` (0161, exists, off in production), and NVMe power-state latency tolerance 0.
+- **Rank skew at the gathers is random and costs about four times the B2 figure (measured).** B2's signed median was 2–5 µs; the mean absolute producer difference is 17–23 µs a hidden gather, uncorrelated between two runs of the same tokens (r = 0.02–0.07). The 71 plain gathers of a forward take 0.58 ms above the standalone floor (0.35 ms with `PREFETCH=0`, 0.50 ms with `SIDE=0`). How much is recoverable is unknown. Score the 0283 sweep with `ring_cost.py` on a 1-in-4 trace as well as round time.
+- **Smaller items, 0.2–0.9% each:** the decode KV fetch sends every window row's 512 picks separately (0.39 ms a forward; a distinct-pick counter by depth is the next step); a sampled round's tail is 79–122 µs longer than a greedy round's although the greedy one ships 1.3–1.8 MB over the ring (the NCCL top-k exchange; run `runs/k280/topk-run.sh` first); keyed draft noise costs 24 µs a Markov step; 0.14–0.21 ms of the hand-offs is unattributed.
+- **The forward does not start cold after the pass**, as far as these traces show: layers 1–3 equal later layers and do not move with the preceding Markov step's hit or miss. 0282's ceiling is at most 0.18 ms, by analogy only. k267's +0.25 ms cannot be tested (no trace with 0267 on). Prefetch is worth 35–42 µs at plain attention layers, 43–67 µs at KV layers, 11–24 µs at MoE, and hurts nowhere.
+- **No periodicity** at 32 or 64 forwards. The 70–100 ms host stalls appear in no trace. One more verified row costs 3.15 ms (2.96 MoE + 0.19 attention).
+- **Crash dumps in the saved logs:** one real segfault with a stack (`combo4/bisect-to0184` and `to0185b`, an undefined pointer in `moe`, fixed by that suite's `0184z`); none in the November 22–23 suites.
+- **Not answerable from these traces:** which kernel inside an interval is slow, what rank 1's host does during a stall, graph capture against replay, pick overlap at depth, the NCCL exchange's own cost, four-stream detail. Every trace is `10c9866`; production is `2bb052f`.
+
+
+### OpenObserve review results (2026-11-23 07:27 UTC)
+
+From the lab's OpenObserve only (no ssh, no request to the engine). The live dashboards were re-fetched by the review session and match the saved definitions.
+
+- **What is stored.** 200 `tensorfold:*` series from the head only (`gx10-eb0e`), 28 host `system_*`, 12 `dcgm_fi_dev_*` and 2,643 ConnectX series from both Sparks (the worker is `gx10-235f`), two log streams. **The scrape interval is 30 s**, not the 60 s in `decisions.md`. The engine's `done` lines do not reach OpenObserve; per-request records were rebuilt from scrape intervals in which exactly one request finished. 811 engine restarts since November 10.
+- **Live traffic is thin in the current epoch.** After removing suites, deploy checks and harness lifetimes: 15,856 unattributed requests on older images, 1,198 from November 18 22:21, 2,738 on the fused image from November 21 07:38, **none** across the four epochs from November 22 06:01 to November 23 05:16 (suites ran throughout), and 399 on `2bb052f` in its first 1.9 hours. "Unattributed" is presumed client traffic; nothing in the data names a client.
+- **Verdicts, live against benchmarked:**
+
+| Benchmarked | Live | Verdict |
+|---|---|---|
+| One-stream round, short prompt: 42.6 ms at 5.5 drafted rows | 38.8 ms, +3.9% against the benchmark's line at the same drafted rows (n=1) | matches |
+| The same at depth (the probe has no deep rows) | +4 to +10% now (n=4); on the fused image +7.5% at 8–64K, +9.5% at 64–200K, +12.3% past 200K (n=280) | **deviates +8–12%**, likely context depth |
+| One-stream tok/s: 105–135 code-like, 59–60 prose | 74.6–110.1 now (n=5); median 78 on the fused image (n=280) | **about 40% under the code-like rows**, mostly tokens a round: 3.1 live against 4.2–6.1 |
+| Four streams: 220 tok/s (sampled Tetris burst), 116–119 (`dec4` cell) | about 123 tok/s, 84 ms a round | matches `dec4`; 44% under the Tetris burst |
+| Eight streams: 136–138.5 tok/s, about 87 ms a round (`dec8` cell) | 91.7 ms a round (+5%) | matches on the round |
+| Cold prefill 2,105–2,118 tok/s at 32K | 2,104 on 30,206 tokens; 2,051 on 15,434 | matches at 32K |
+| Resumed 8K turn about 1.1 s to first token | 1.28 s (n=90), tails prefill at about 1,620 tok/s | matches; resumed turns prefill 22% under the cold headline |
+| Pair health | `pair_failed`, `service_refused`, preemptions all 0 | matches |
+
+- **So the round time and prefill hold up; the headline tok/s does not describe the live mix.** The probe's code-like prompts accept more drafts a round than real requests do. A probe row built from the live mix (3.1 tokens a round, deeper contexts) is the missing benchmark.
+- **Seen live, covered by no benchmark:**
+  - **Queueing behind eight streams.** On November 23 05:31–06:22 UTC, 178 requests with one identical 3,718-token prompt arrived together: up to 8 running and 35 waiting, mean time to first token 422 s, and 113 of 153 ended by client disconnect (21 of the 22 that can be timed ended at 600 s). No file in the repository records it; it may be an unlogged load test.
+  - **Prefill and decode interfere.** While cold passes of 166K–192K tokens ran, other streams' rounds stretched from about 92 ms to 155–312 ms and the passes ran at about 1,680 tok/s instead of 2,040–2,100.
+- **Correction:** "no suite has gone past 4 streams" (open item 3 above) is wrong; the November 21–22 `run_suite.py` suites have a `dec8` cell.
+- **Dashboards, updated in place** (every original panel unchanged, new tabs appended): Tensorfold 89 → 161 panels, 6 → 14 tabs, all 200 engine series (149 before), with a "Benchmark vs live" tab; DGX Sparks 21 → 119 panels, 1 → 6 tabs, every host and DCGM series and the 321 device-level ConnectX counters (the 2,322 per-queue ones through a name box). Queries were checked through the API; how the panels render in a browser was not seen. Undo: `cd runs/observe-review-20261123 && . scripts/o2env.sh && python3 -I scripts/dash_api.py restore dashboards-before/7522360476127199234.json` (Tensorfold) and `.../7522324382660689920.json` (DGX Sparks).
+- **Missing from the store:** `tensorfold:requests_total{key,status}` is scraped but not stored, and it is the only series that would tell clients apart; rank 1 has no `/metrics` endpoint, and the worker's collector has failed to scrape a `tensorfold` target every 30 s since November 11; the `done` line and the round profile (`forward_ms`, `pass_ms`, `rows_a_round`) are log-only. `COVERAGE.md` gives the cheapest route for each.
+- **Do not commit `dashboards-before/` or `dashboards-after/` as they are:** the exports carry the owner's login email. No credential is in any file (checked by scanning for it). The agent reported that the password appeared once in its own tool output, so it is in this machine's session transcript.
+
+### Kernel pattern sweep results (2026-11-23 07:28 UTC)
+
+Branch `kernel-sweep-0290` in `~/Workspace/tfref-ksweep`, base `2bb052f`, three commits, tree clean. The review session re-ran `zig build test` and `zig build` at the tip `c5c257f`: both exit 0. **Nothing was timed and nothing went through nvcc or Apple's compiler.** Each patch adds a new kernel symbol looked up only when its switch is on, so the off path runs on today's fatbin; **a switch set against today's fatbin fails at load, so these need an nvcc build for `sm_121` before any arm.**
+
+| Patch | Commit | Switch | What it does | Harness (old source against new) |
+|---|---|---|---|---|
+| 0290 | `6571e56` | `TF_DS_DRAW_CUT=1` | 0261's `tf_ds_topk_select_kernel` and the fallback `tf_ds_draw_rows_kernel` stop their radix select at a complete bin (0254's pattern) | 1,310 cases, 0 failures; 2.4–2.5 of 8 digit passes on Gaussian-like rows, 6.4 on heavily tied rows |
+| 0291 | `c58b41e` | `TF_DS_QD_PAIR_SHFL=1` | the pair query's half-warp maximum by four width-16 shuffles instead of a masked reduction | 498 cases, all 65,536 bf16 encodings, 0 failures. **Removes no work**; adopt only on a standalone win |
+| 0292 | `c5c257f` | `TF_DS_BLOCK_MAX8=1` | the pool's block maxima in two aligned 16-byte loads (0213's body in the grid kernel) | 890 cases, 0 failures |
+
+- **Staged, not landed:** `runs/kernel-sweep-20261123/unverified/0001-glm-index-select-cut.patch` (`GLM_INDEX_CUT=1`, the Metal `glm_index_select` stops at a complete bin). No local check exists for Metal; its evidence is a C++ emulation of the old and patched text, 573 cases, 0 failures.
+- **Survey:** 68 sites across every kernel file. dsv41 CUDA 25 (4 landed, 3 do not transfer, 5 transfer and are not applied), other CUDA 11, Metal 32 across GLM, Nemotron, Flash Next, Qwen 3.5, Kimi, `ops/` and `core/` (1 staged, the rest listed). [Survey](runs/kernel-sweep-20261123/SURVEY.md) · [Patterns](runs/kernel-sweep-20261123/PATTERNS.md)
+- **The catalogue dropped three of the brief's entries on the evidence:** "write in the consumer's layout" has no attributable gain (0278's is unexplained, 0260 and 0269 are neutral); the launch-grid bound was re-scored neutral (0264); the warp integer maximum holds only for whole-warp groups.
+- **Rejected with reasons:** `tf_ds_topk_i64_kernel` (writes the k-th key last and feeds a kit cubin); the tile exit in the 0279 pick (the newest block is pinned to +inf, so the k-th pick is always in the last occupied tile, which closes the audit's 0279 idea); the unrotated-warp guard on `tf_ds_fused_rope_qd_kernel` (already measured neutral); `torch_ops/topk.cu` (its output order depends on the exact k-th key).
+- **Largest thing found and not applied:** the gate-weight widen at `prompt.zig:1710` moves 11.8 MB a layer a bulk prompt chunk for a constant; caching it costs about 315 MB a rank. Also owed: the 8-wide bf16 widen in the same prefill stage, `tf_ds_block_argmax_v`, Nemotron's `sample.cu` `top_keys`.
+- **Each landed patch still owes:** an nvcc build, register and stack counts, GPU parity of the new symbol, the exact panel; then 0290 selector-only timing and a histogram of the digit it stops at on real logits (it rides the `runs/k280/topk-run.sh` pair), 0291 and 0292 standalone timings. Stacking with 0280–0283 is untested; a textual conflict in `ops.zig` is possible.
+
+
+## Drafter degradation attribution (2026-11-24)
+
+Question put to it: live decode is ~40% under the code-like benchmark rows and the pass reads 3.43 (Nov 15) → 3.9 (traces) → 4.16–4.21 ms (served). **Verdict: neither is a regression. Claim 1 is workload mix; claim 2 is a policy widening plus suite composition. No hardware window was spent and none is needed.** [Report](runs/drafter-degradation-20261124/REPORT.md) — read-only, every figure re-read from a run record.
+
+- **The four pass numbers are two spans.** 3.43, 3.51–3.90 and 4.11–4.26 are all `pass_ms` (host timer around `m.pass`: uploads + graph replay + synchronize + two D2H). The trace's ~3.9 ms is GPU tiles that *include* the 0.39 ms absorb/pick/uploads hand-off and *exclude* the ~0.10 ms tail. Comparable only after normalizing block rows, Markov steps, streams a pass and sampled keying.
+- **Equal-work delta: +0.05–0.08 ms a pass** (5 rows / 5 steps / greedy / 1 stream: Nov 15 3.43 → `fk0` 3.51), i.e. +0.12–0.19% of the 42.8 ms cycle, −0.15 to −0.25 tok/s at 128. Below the ±0.05 ms same-work repeat band and far under the 0.28–0.64% pair-gate floor. `CONF_PACK` (production) is an unpriced offsetting saving against it.
+- **The apparent +0.78 ms decomposes:** +0.24–0.39 ms deliberate policy widening (0192 `DRAFT_BLOCK=6` + `KEPT=2`: 5 → 6 block rows and Markov steps, plus the kit→cuBLAS gate at 6 rows, `draft.zig:769–775`; the `fk1`–`fk6` gradient is the widened share rising with the pin) and +0.26–0.36 ms suite composition (sampled keyed noise +0.15 ms a pass, streams a pass 1.36–1.43). The widening is net-positive where it engages (+2.5–3.1% tok/s on Tetris/code, `runs/draft-block-20261118/`).
+- **Acceptance is content, not a defect.** At one build and config the probe spans **1.8 (prose, 0.51–0.54 acceptance) to 6.1 (go, 0.875) tokens a round** (`k265/ctl1.probe.json`); live's 3.1 at 64% acceptance sits inside that band. Split of the 3.1 → 4.2 gap: **80–100% prompt-dependent, 0–20% policy-tunable (`DRAFT_BLOCK=7`, Tetris only), 0% regression.** Depth explains 8–12% of the tok/s shortfall separately (round time +7.5/+9.5/+12.3% by band).
+- **Disproven as causes:** D1 drafter weights (same weights both sides; rounds higher on 16/16 rows in both arms), triage/confidence gating (unarmed; `CONF_PACK` byte-identical; `CONF_LEADER_ONLY` output-invariant), the Markov cache (changes step time, never a draft, `markov_tokens.zig:4`), no-L2-prefetch-in-the-pass as a *regression* (`draft.zig:10` is identical at `8ff4797` and `2bb052f`), 0267's +0.25 ms carryover (not in the `2bb052f` lineage, not armed), and any pass-code change since Nov 15 (diff = block rows, the 6-row gate, `confPack`; `tri_markov.zig` byte-identical).
+- **What it cannot answer:** the content split of the acceptance gap (no per-request series stored; `requests_total{key,status}` is scraped but not kept), the equal-work delta below ~0.3 ms, which input the widening gate reads (`r.follow.len` vs verified rows), the sampled/multi-stream split of the suite mean (lifetime `pass_ms`, no per-cell field), and whether a Markov hit from a 441–473 MiB cache stays as cheap as from today's 31.6 MiB.
+- **Carried forward:** the one worth-buying window is the staged `runs/k280/run.sh` (0281 + 0282, ~1h45m, no new build). Confirm H1 if `pass_ms` falls ≥0.15 ms with drafts unchanged and the miss rate ~52% → ~32% (2,048) / ~24% (4,096); confirm H2 at ≥0.08 ms; score `dpf2` on forward + pass. An optional `TF_DS_DRAFT_BLOCK=5` arm would give Nov 15's equal-work baseline directly. [Priced experiment](runs/drafter-degradation-20261124/REPORT.md) §3 · [todo](todo.md)
+
+## Earlier status bullets (November 22–23)
 
 - **Superseded 21:25 UTC by 10c9866 (see below). Earlier production: `tensorfold-dsv41:bench-fused-next-27baa93` from 10:44 UTC**, with `TF_DS_KV_FETCH_REUSE=1 TF_DS_CONF_PACK=1 TF_DS_TOPK_MERGE=1 TF_DS_PLACE_BOUND_ALL=1` plus the earlier switches. **It is byte-for-byte what `zig/patches/` builds** (`recipe-0264`; the export chain is verified). Validated 8/8.
 - **Undo, one step at a time:** `cp ~/dsv41-env-backups/.env.bak-20261122-pre-0264 .env && ./start.sh restart` goes back to recipe-0261 (`086e8cb`). Earlier steps: `-pre-recipe` (`69335b8`, the fused-next lineage + 0259), `-pre-kvreuse` (`84806bb`), `-pre-fnext` (before today).
@@ -335,7 +629,7 @@ The final kernel was fastest at every measured shape in both standalone GB10 run
 
 **Measured on the pair, November 20 (18:38–19:09 UTC): the rework is bit-identical and speed-neutral; nothing fused is faster.** One image (`bench-fused-rework-20261120`: production source + reworked 0193/0194 + 0195/0197/0198, no 0196), one switch per arm. With `TF_DS_DRAFT_TRIAGE=conf:0.2`, adding `TF_DS_FUSED_ROUTE=1` gave 39/39 identical exact cases, unchanged long-reply hashes and the same speed (the merged launch runs on every layer while triage is on). It passes because the original fusion was dropped, not repaired, and it does nothing under production's switches (no triage). **0197 alone causes the 1024-token greedy Tetris reply change** (`053b9e`, 195 rounds); 0195 and 0198 change no hashes, but nothing shows whether their fused paths ran. Every arm is within ~0.5% of the two controls (off vs off2 differ ~0.6%, the resolution floor); triage alone is ~0.5% below both. This bracket left prune stats enabled and PDL off. Production restored and validated; nothing deployed. [Results](runs/fused-bench-20261120/RESULTS.md)
 
-DeepSeek-V4.1-Flash on two DGX Sparks, TensorFold EXL3 TP2. Use the [best runtime configuration and challenger history](best-runtime.md), [deployment recipe](README.md), [measurement definitions](docs/measurements.md), [benchmark matrix](to-benchmark.md) and [decision record](decisions.md).
+DeepSeek-V4.1-Flash on two DGX Sparks, TensorFold EXL3 TP2. Use the [best runtime configuration and challenger history](best-runtime.md), [deployment recipe](README.md), [measurement definitions](docs/measurements.md), [CUDA kernel microbenchmark & opcode process](docs/cuda-kernel-microbenchmark-process.md), [GB10 hardware performance guide](docs/gb10-hardware-performance-guide.md), [benchmark matrix](to-benchmark.md) and [decision record](decisions.md).
 
 **Quality at deep context, November 20: not the configuration.** A reported "intelligence degradation" in a live agent session at ~533K tokens (69.6% of a 768K client window) was investigated. `.env` and the image are unchanged since the November 19 lead-reader deploy. A planted-recall probe (eight vault codes at 2–98% of a natural-text prompt, then their order and sum) gave identical token hashes with `TF_DS_ENGRAM_LEAD` on and off at 4K, 64K, 256K and 530K, and a cache-resumed 530K equalled the cold one. Greedy, production failed only at 530K and the repo baseline (all tuning keys off, ABLIT kept) at 256K and 530K, both by reasoning to the token cap. At the clients' sampling (T=1.0, top_p 0.95, top_k 20, five explicit seeds, 8,192-token cap) production recalled all eight codes and the sum at 530K on 5 of 5 seeds but swapped mid-context entries on every seed; 256K was 4 of 5 (one dropped the last entry); 64K was 3 of 5, the other two reasoning to the cap. A reproduced 64K runaway had the right answer within ~2,000 characters, then "verified the order" by transcribing the corpus until the cap: over-verification, not a short loop, so upstream PR #138's `LOOP_GUARD` probably would not catch it. Production was restored and validated after each restart; nothing was changed. **If this comes up again:** check the prompt depth and whether the bad replies ended on `max_tokens` (the done lines) before suspecting switches; judge quality at T=1.0 with explicit per-request seeds (without one the seed is keyed on the prompt, so repeats are identical), never greedy (upstream MiaAI-Lab#54: this model loops at T=0 on items that pass at T=1.0); suggest a thinking budget or lower `reasoning_effort` for runaways. Rerun with `runs/depth-quality-20261120/sampled.sh` on the head (waits for 120 s idle, no restart). **Not measured:** the repo baseline at sampled settings (the one open comparison; it isolates the lossy T13 prune) and more than five seeds per depth. [Results](runs/depth-quality-20261120/RESULTS.md) · [Upstream review](runs/depth-quality-20261120/RESULTS.md#caveat-from-upstream-greedy-decoding-loops-on-this-model)
 

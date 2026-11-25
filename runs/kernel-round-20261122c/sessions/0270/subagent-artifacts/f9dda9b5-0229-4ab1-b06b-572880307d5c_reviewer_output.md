@@ -1,0 +1,1 @@
+Let me check for the harness/report deliverables outside the worktree, wholesale `ch.*` writes, and the 0265 banner pattern this round mandates:

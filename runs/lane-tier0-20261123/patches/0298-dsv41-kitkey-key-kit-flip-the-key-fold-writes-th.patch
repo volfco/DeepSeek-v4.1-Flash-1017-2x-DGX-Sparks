@@ -1,0 +1,97 @@
+From f863532a2a8d0705b0e75300dbf85a310b2a6d4d Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Mon, 23 Nov 2026 11:14:12 -0800
+Subject: [PATCH 2/4] 0298 dsv41: kitKey/key_kit_flip: the key fold writes the
+ kit's _score_keys encoding (the 0206 fix's spec)
+
+The proven mechanism (0297's localization test): the kit's _score_keys writes keys that order as signed i64 for
+topk_select_pruned's torch top-k; the fused key fold (0206) writes scoreKey's, which differ in exactly the top bit
+(the measured 0x00000000ffffffff vs 0x80000000ffffffff at score 0.0 column 0) and order as unsigned. A signed
+compare of the folded keys reverses every negative-vs-nonnegative pair and changes the pruned picks at the fold's
+engagement window (16,384 < width <= 65,536 in the follow-up tree) - the four long-prompt mismatches.
+
+keyKit is the kit's encoding for a score/column and key_kit_flip the bit between the two; the fold's two stores
+(rd.keys and rd.tmax, in the parked 0206 patch) must write kitKey's. No runtime caller in this tree: the fold lands
+with 0206, and this is the encoding and compare order it must reproduce exactly.
+---
+ zig/src/families/dsv41/idx_fused.zig | 43 +++++++++++++++++++++++-----
+ 1 file changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 29b5cb9..75bfd7d 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -79,6 +79,21 @@ pub fn scoreKey(x: f32, j: usize) u64 {
+     return key ^ 0x8000000000000000;
+ }
+ 
++/// The bit that separates the two key encodings: `scoreKey` XORs it (the fused pool's radix select compares its keys
++/// unsigned and needs the score order there), the kit's `_score_keys` writes the same key without it (its keys order as
++/// signed for topk_select_pruned's torch top-k). The fold must write the kit's encoding (below) into the keys buffer
++/// the kit's selection reads; writing scoreKey's there reverses the negative-vs-nonnegative picks (the test section).
++/// Measured on the follow-up probe row (runs/fused-followup-20261121/RESULTS.md): score 0.0 at column 0 is
++/// 0x00000000ffffffff from the kit's kernel, 0x80000000ffffffff from scoreKey - the same low word and ordered bits,
++/// this bit alone differing.
++pub const key_kit_flip: u64 = 0x8000000000000000;
++
++/// The kit's `_score_keys` key for a score at a column (its encoding: the keys order as signed i64). The key fold
++/// (0206's, at round.zig's pruned selection site) must write these, not `scoreKey`'s: the bit-identity fix.
++pub fn kitKey(x: f32, j: usize) u64 {
++    return scoreKey(x, j) ^ key_kit_flip;
++}
++
+ /// The block maxima (tf_ds_block_max_kernel's rule): an amax over each block of `bsize` scores (a NaN wins, the NaN is
+ /// quiet 0x7fc00000), the row's newest block (floor((vis - 1) / bsize), floor division on negatives) +inf.
+ pub fn blockMaxima(score: []const f32, width: usize, bsize: usize, vis: i64, out: []f32) void {
+@@ -190,6 +205,24 @@ test "scoreKey matches the -0/+0 rule and orders scores like signed integers" {
+     try std.testing.expect(scoreKey(0.0, 0) > scoreKey(-std.math.inf(f32), 0));
+ }
+ 
++test "kitKey is _score_keys' encoding: 0.0 at column 0 is 0x00000000ffffffff, and the order is signed" {
++    // the follow-up probe row's measured pair: the same low word and ordered bits, only the flip differing
++    try expectEqual(@as(u64, 0x00000000ffffffff), kitKey(0.0, 0));
++    try expectEqual(@as(u64, 0x80000000ffffffff), scoreKey(0.0, 0));
++    try expectEqual(scoreKey(1.0, 2) ^ key_kit_flip, kitKey(1.0, 2));
++    try expectEqual(kitKey(-0.0, 3), kitKey(0.0, 3)); // the -0 to +0 rule travels with the score
++    // the consumer's signed compare on the kit's keys IS the score order (the fix's "compare order"): NaN above +inf
++    // above finite above -inf, and a tie to the lower column
++    try std.testing.expect(keyLess(kitKey(-std.math.inf(f32), 0), kitKey(0.0, 0)));
++    try std.testing.expect(keyLess(kitKey(0.0, 0), kitKey(std.math.inf(f32), 0)));
++    try std.testing.expect(keyLess(kitKey(std.math.inf(f32), 0), kitKey(@bitCast(@as(u32, 0x7fc00000)), 0)));
++    try std.testing.expect(keyLess(kitKey(-5.0, 0), kitKey(5.0, 0)));
++    try std.testing.expect(keyLess(kitKey(1.0, 1), kitKey(1.0, 0)));
++    // unsigned is scoreKey's order (the pool's radix select) and reverses the kit's - the two consumers' encodings
++    try std.testing.expect(kitKey(5.0, 0) < kitKey(-5.0, 0));
++    try std.testing.expect(scoreKey(5.0, 0) > scoreKey(-5.0, 0));
++}
++
+ test "blockMaxima: NaN wins, the newest block is pinned, short blocks are padded -inf" {
+     var s = [_]f32{ 1, 2, 3, @as(f32, @bitCast(@as(u32, 0x7fc00000))), -std.math.inf(f32), 4, 5, 6, 7 };
+     var bmax: [3]f32 = undefined;
+@@ -262,12 +295,8 @@ test "key negative-column rule: a column at or past every is -1 in the list and
+ // 8,192-block fused cap at the served block size): exactly the failing window. Below the floor the pool takes candFast
+ // (no fold), above the ceiling the unfused sequence keeps the kit's `_score_keys` - both write the kit's encoding.
+ 
+-/// The kit's `_score_keys` key for a score at a column: `scoreKey` without the top-bit flip (the follow-up probe row's
+-/// measured encoding: 0.0 at column 0 -> 0x00000000ffffffff, scoreKey's 0x80000000ffffffff with only the flip
+-/// differing).
+-fn kitOf(x: f32, j: usize) u64 {
+-    return scoreKey(x, j) ^ 0x8000000000000000;
+-}
++/// The kit's `_score_keys` key for a score at a column is `kitKey` (above): the follow-up probe row measured it as
++/// 0.0 at column 0 -> 0x00000000ffffffff, scoreKey's 0x80000000ffffffff with only the flip differing.
+ 
+ /// The consumer's pair rule: the pruned selection's signed compare (torch.topk on int64).
+ fn keyLess(a: u64, b: u64) bool {
+@@ -371,7 +400,7 @@ test "the fold's flipped keys change the pruned picks across the sign bit (the f
+             // both producers: the fold's scoreKey keys and unsigned tile maxima, the kit's keys and signed tile maxima
+             for (score, 0..) |x, j| {
+                 fold[j] = scoreKey(x, j);
+-                kit[j] = kitOf(x, j);
++                kit[j] = kitKey(x, j);
+             }
+             for (0..nt) |t| {
+                 const lo = t * 64;
+-- 
+2.56.1
+

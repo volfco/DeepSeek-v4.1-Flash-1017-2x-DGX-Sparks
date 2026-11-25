@@ -1,0 +1,13 @@
+15:08:55 resume 1
+**Patch 0268 complete.** Commit `cbcbb41b791506c81ed2273c4cbbaa192b1dd1f3` on `kernel-0268` (base `27baa93`, one commit, 4 files, 134+/3−, tree clean), report at `runs/kernel-round-20261122b/report-0268.md`.
+
+**Decision summary**
+- **Premise holds.** The kit source (`kernels.py`, evidence in `h0268/kit-q-kv-norm.md`) shows `_q_kv_norm` is literally the two drafter kernels fused — *"each program the code of the kernel it replaces"* — and its kv program keeps the same `if slot >= 0` guard, so the −1 sentinel (`dr.row(5)`) leaves the ring untouched. The brief's `draft.zig:506/532` hints point at `absorb`/`absorbMany`, which have no query side; the swap belongs in `Drafter.attention`'s pair (matches "one launch per draft block, three per pass").
+- **Implementation**: `TF_DS_DRAFT_QKV_NORM` (off by default) — `attention()` runs the decoder's one `tri_norm.qKvNorm` per DSpark block instead of `rmsnormRot` + `kvNormRope` (6 → 3 norm launches per pass at every N=1..4, n=5..7), with the two separate launches as the fallback arm (`lay.wq_a.n > 2048` keeps it real). Pure module `draft_qkv_norm.zig` pins the argument map and ring rule; `ops.zig` holds only the bool (no kernel to look up — a documented deviation).
+- **Gate**: `zig build test` exit 0 (27/27); CUDA syntax check `ok` via the previous round's stubs (the shared stubs fail on the pristine base — same finding as report-0260); harness `h0268/` 20/20 on the real wrappers over the full matrix; two independent reviews (OK with notes, no blockers) with all findings dispositioned in the report.
+
+**GPU gate must still settle** (stated in the report): byte-compare `dr.qr`, `dr.xhq`, `dr.kvb`, and the ring between the two arms — the joint is a different cubin even though its programs are the same code — then the 39-case panel and a graphs-on A/B.
+
+Skipped/known limits: the real kit's `aot.json` isn't on this workstation (dispatch shown from the fixture variant class + matching rules); the harness's call-site model must track `draft.zig:751–762` if those lines ever change; `code-review-graph` is not available here (reviewer subagents used instead).
+15:13:07 pi exited rc=0
+15:13:07 committed f4d53bc 0268 dsv41: TF_DS_DRAFT_QKV_NORM (off by default): the drafter's query and KV normalization run as the decoder's one qKvNorm launch

@@ -1,0 +1,18 @@
+== splice (the kernel's exact source) ==
+wrote fused_kernel_current.inc 1949 bytes
+== build (-O2) ==
+== run ==
+h0271: 2432 layouts (2216 at the served ring), 0 mismatches
+== mutation checks (each must fail cases) ==
+-- mutation: fresh_off_by_one
+wrote fused_kernel_current.inc 1953 bytes [mutant fresh_off_by_one]
+mutation fresh_off_by_one: caught (2432 failing checks)
+-- mutation: pos_plus_one
+wrote fused_kernel_current.inc 1955 bytes [mutant pos_plus_one]
+mutation pos_plus_one: caught (2432 failing checks)
+-- mutation: bad_slot
+wrote fused_kernel_current.inc 1955 bytes [mutant bad_slot]
+mutation bad_slot: caught (2354 failing checks)
+== restore the unmutated kernel ==
+wrote fused_kernel_current.inc 1949 bytes
+h0271: ok

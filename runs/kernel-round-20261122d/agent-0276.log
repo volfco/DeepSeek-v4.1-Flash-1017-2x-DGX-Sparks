@@ -1,0 +1,22 @@
+19:03:17 start
+## Checkpoint — kernel patch 0276 complete
+
+**Commit:** `7b7e4e14c3902408697a67d34ff8a37779fd4fc3` on `kernel-0276` (parent `27baa93`), subject exactly as briefed:
+`0276 core: TF_DS_CACHE_REPLACE_STALE (off by default): keeping a state the cache already holds replaces a stale duplicate` — 7 files, +145 lines, working tree clean.
+
+**What it does:** with `TF_DS_CACHE_REPLACE_STALE=1`, `keepWith`'s duplicate arm drops a kept state the family let go (stale rows / dropped snap / loading / planner-held, `e.point == null`) and saves the fresh copy instead of refreshing a dead entry. Off path is byte-identical. Decode path untouched — cache policy only.
+
+**Key re-derivation** (documented in code + report): the source patch's `maxInt(u32)` staleness probe misjudges *live end states* against our `Lanes.usable` (the `is_end`/tail-batch capability gate isn't staleness). `probeLen(full_end, at)` probes full-end entries at their own length; the harness case `end-live-refresh-odd-off` demonstrates the divergence (`usable(maxInt)=false, usable(at)=true`) and the fix.
+
+**Gates (all run at commit time):**
+1. `zig build test` exit 0 (plus full `zig build` — covers `lanes_main.zig`, which tests don't); one run hit the documented `lane_host.test.prefill` flake, reruns clean.
+2. CUDA syntax check: identical 9-error stub set vs base (no `.cu` touched).
+3. h0276 harness: real `prompt_cache.zig` vs an independent policy model — 10 cases/22 steps match (stale replace/refresh, tier point-guard, full_end vs not, loading, off-path parity); engagement banner exactly once in `run.log` (`dsv41: TF_DS_CACHE_REPLACE_STALE: a stale kept state is replaced by its fresh copy (first at 5 tokens)`).
+
+**Independent review:** verdict *approve*; its minor/nit findings (inert arm without tier/exact/endstate — the brief-scoped-out "usable half"; sticky `shared`/`group` not carried on replace; refuse-after-replace keeps nothing; the `lanes_main` identical-resend end-keep corner) are all recorded and reflected in `report-0276.md`.
+
+**Left open (in the report's Known gaps):** hardware-gate measurement of the prefill-launch reduction when the arm engages; `probeLen` re-check if `Lanes.usable` grows new gates; optionally porting the "usable half" for off-tier KV-shard deployments.
+
+**Skipped / not checked:** no GPU work (none in scope); real `Lanes` placement internals beyond the `stale`/`usable` contract are modelled, not executed; a save failure after a replacement keeps nothing (known, source-equivalent, documented rather than tested).
+20:26:55 pi exited rc=0
+20:26:55 committed 7b7e4e1 0276 core: TF_DS_CACHE_REPLACE_STALE (off by default): keeping a state the cache already holds replaces a stale duplicate

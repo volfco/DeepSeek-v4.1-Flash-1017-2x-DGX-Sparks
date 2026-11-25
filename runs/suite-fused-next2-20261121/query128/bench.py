@@ -25,9 +25,9 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def embedded_fatbin(binary):
+def embedded_fatbin(binary, name="fatbin_dsv41_torch"):
     symbols = subprocess.check_output(["nm", "-S", str(binary)], text=True)
-    symbol, = (line for line in symbols.splitlines() if "fatbin_dsv41_torch" in line)
+    symbol, = (line for line in symbols.splitlines() if f'"{name}"' in line)
     address, size = (int(field, 16) for field in symbol.split()[:2])
     segments = subprocess.check_output(["readelf", "-lW", str(binary)], text=True)
     for line in segments.splitlines():

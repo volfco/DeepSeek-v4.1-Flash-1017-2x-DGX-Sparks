@@ -1,0 +1,21 @@
+**Patch 0268 complete.** Premise held, implemented, gated, committed, reported.
+
+## Result
+
+- **Commit `f4d53bc87f3123577dc84c98ac72320581f833a6`** on `kernel-0268` (base `27baa93`) — exactly one commit, subject byte-identical to the brief's export format, working tree clean. 4 files, +134/−3.
+- **Switch `TF_DS_DRAFT_QKV_NORM`** (off by default): `Drafter.attention`'s per-stage `_rmsnorm_rot` + `_kv_norm_rope` pair runs as the decoder's one `_q_kv_norm` kit launch (`tri_norm.qKvNorm`, the call at `round.zig:1209`) — **6 → 3 norm launches per pass** at every N=1..4 × n=5..7 shape (3 DSpark blocks). Off path is byte/launch-identical; the fallback arm also covers `wq_a.n > 2048`.
+- **Premise evidence**: the public kit source shows `_q_kv_norm` is the two kernels' programs fused verbatim ("each program the code of the kernel it replaces") with the same `if slot >= 0` sentinel guard, so the drafter's all−1 `dr.row(5)` leaves the ring untouched (`h0268/kit-q-kv-norm.md`). Kit dispatch at draft rows follows from `aot.zig` variant matching ignoring grid plus an exact fixture-class match (consts, dtypes, `xs/os_/ring_size = 1280/1280/576`). The brief's line hints (506/532) pointed at `absorb`/`absorbMany`, which have no query side — the item's "one launch per draft block, three per pass" identifies `attention()`; noted in the report.
+
+## Gate (all pass)
+
+1. `zig build test` — exit 0 (a failure probe confirmed the gate surfaces real failures as exit 1).
+2. CUDA syntax check — `cuda syntax check: ok` via the previous round's fixed stubs; the shared stubs fail on the pristine base itself (same finding as report-0260; no `.cu` touched).
+3. `h0268/` CPU harness — 20/20, `run.log` regenerated after review fixes: real `tri_norm` wrappers vs the two separate launches across the full matrix with/without LoRA (all 19 args, grids, consts, sentinel, fixture class, ordering, launch counts). Kernel arithmetic parity is GPU-gate only, with the exact byte-compare list in the report.
+
+## Reviews
+
+Two independent reviewer subagents (`h0268/review-code.md`, `review-harness.md`): **OK with notes, no blockers**. S2/S3 harness findings fixed (LoRA-dimension comment, vacuous-pass guard, kv-eps check); the `max_d` duplication nit left as-is and logged. A reviewer created the first commit despite its review-only brief; its garbled message was amended in place — still exactly one commit.
+
+`report-0268.md` carries the hash, files, launch-count table, gate results, decisions, and the GPU-gate gap list (byte-compare `dr.qr`/`dr.xhq`/`dr.kvb` + untouched ring, then the 39-case panel and a graphs-on A/B).
+
+*Skipped/not checked: no GPU — cubin bit-identity and real-kit `aot.json` resolution are hardware-gate items; `code-review-graph` is not installed here (reviewer subagents substituted).*

@@ -1,0 +1,124 @@
+== h0272: TF_DS_RING_TRACE CPU-emulation harness ==
+worktree: /home/colum/Workspace/tfref-k0272
+-- call-site wiring (the kernels must call every record helper exactly where the brief lists it)
+ok: rdma_gather.cu and dsv41_shard.cu call claim/publish/entry/flag/done at the listed points
+-- splice: extract the shipped record logic
+spliced 5124 bytes from /home/colum/Workspace/tfref-k0272/zig/kernels/cuda/dsv41/ring_trace_rec.cuh
+-- compile and run the record-ring emulation against the independent reference
+case sampling-n1 (n=1 cap=8 rounds=3 x 5 gathers, drains after 3)
+  ok: drain after round 3: 8 kept of 15 expected, 7 dropped, fields match
+case sampling-n2 (n=2 cap=8 rounds=3 x 5 gathers, drains after 3)
+  ok: drain after round 3: 7 kept of 7 expected, 0 dropped, fields match
+case sampling-n7 (n=7 cap=8 rounds=4 x 6 gathers, drains after 4)
+  ok: drain after round 4: 3 kept of 3 expected, 0 dropped, fields match
+case wraparound-middrain (n=2 cap=4 rounds=8 x 5 gathers, drains after 4 8)
+  ok: drain after round 4: 4 kept of 10 expected, 6 dropped, fields match
+  ok: drain after round 8: 4 kept of 10 expected, 6 dropped, fields match
+case wraparound-n1 (n=1 cap=4 rounds=4 x 4 gathers, drains after 2 4)
+  ok: drain after round 2: 4 kept of 8 expected, 4 dropped, fields match
+  ok: drain after round 4: 4 kept of 8 expected, 4 dropped, fields match
+case unsampled-same-slot (n=2 cap=4)
+  ok: unsampled q=9 left sampled records 8 and 10 intact
+case round-cell (n=1 cap=64, 3 rounds x 4 gathers)
+  ok: every record carries the round number live at its claim
+case prev-per-stream (n=2 cap=16, interleaved streams)
+  ok: records carry their own stream's previous gather's completion
+h0272 trace_emu: ok
+-- the summarizer on a synthetic two-rank trace with known injected delays
+wrote ./synth_rank0.jsonl and ./synth_rank1.jsonl (400 sampled sequences a rank, n=16, injected: rank0 producer-late +50000ns on attn_gather, rank1 proxy-late +30000ns everywhere)
+op=attn_gather rank=0
+  collect_flag             n=   80  p50=14392 ns  p95=18206 ns
+  copy                     n=   80  p50=2919 ns  p95=3700 ns
+  doorbell_flag            n=   80  p50=19853 ns  p95=24667 ns
+  producer                 n=   80  p50=52080 ns  p95=52446 ns
+  proxy_completion_flag    n=   80  p50=1162 ns  p95=1413 ns
+  proxy_doorbell_post      n=   80  p50=405 ns  p95=476 ns
+op=attn_gather rank=1
+  collect_flag             n=   80  p50=14274 ns  p95=18071 ns
+  copy                     n=   80  p50=2964 ns  p95=3632 ns
+  doorbell_flag            n=   80  p50=20565 ns  p95=24626 ns
+  producer                 n=   80  p50=1936 ns  p95=2437 ns
+  proxy_completion_flag    n=   80  p50=1216 ns  p95=1477 ns
+  proxy_doorbell_post      n=   80  p50=30407 ns  p95=30492 ns
+op=engram rank=0
+  collect_flag             n=   80  p50=14810 ns  p95=18585 ns
+  copy                     n=   80  p50=3042 ns  p95=3621 ns
+  doorbell_flag            n=   80  p50=20547 ns  p95=24738 ns
+  producer                 n=   80  p50=2017 ns  p95=2466 ns
+  proxy_completion_flag    n=   80  p50=1238 ns  p95=1467 ns
+  proxy_doorbell_post      n=   80  p50=425 ns  p95=495 ns
+op=engram rank=1
+  collect_flag             n=   80  p50=15309 ns  p95=18223 ns
+  copy                     n=   80  p50=2913 ns  p95=3609 ns
+  doorbell_flag            n=   80  p50=19405 ns  p95=24032 ns
+  producer                 n=   80  p50=1923 ns  p95=2450 ns
+  proxy_completion_flag    n=   80  p50=1218 ns  p95=1457 ns
+  proxy_doorbell_post      n=   80  p50=30391 ns  p95=30491 ns
+op=head rank=0
+  collect_flag             n=   80  p50=14270 ns  p95=18343 ns
+  copy                     n=   80  p50=3028 ns  p95=3691 ns
+  doorbell_flag            n=   80  p50=19362 ns  p95=24178 ns
+  producer                 n=   80  p50=2077 ns  p95=2362 ns
+  proxy_completion_flag    n=   80  p50=1188 ns  p95=1417 ns
+  proxy_doorbell_post      n=   80  p50=404 ns  p95=472 ns
+op=head rank=1
+  collect_flag             n=   80  p50=14521 ns  p95=18333 ns
+  copy                     n=   80  p50=3026 ns  p95=3670 ns
+  doorbell_flag            n=   80  p50=21080 ns  p95=24557 ns
+  producer                 n=   80  p50=2005 ns  p95=2432 ns
+  proxy_completion_flag    n=   80  p50=1185 ns  p95=1449 ns
+  proxy_doorbell_post      n=   80  p50=30407 ns  p95=30486 ns
+op=kv rank=0
+  collect_flag             n=   80  p50=14486 ns  p95=18104 ns
+  copy                     n=   80  p50=2995 ns  p95=3653 ns
+  doorbell_flag            n=   80  p50=19765 ns  p95=24465 ns
+  producer                 n=   80  p50=1975 ns  p95=2457 ns
+  proxy_completion_flag    n=   80  p50=1179 ns  p95=1457 ns
+  proxy_doorbell_post      n=   80  p50=396 ns  p95=490 ns
+op=kv rank=1
+  collect_flag             n=   80  p50=15531 ns  p95=18249 ns
+  copy                     n=   80  p50=3020 ns  p95=3632 ns
+  doorbell_flag            n=   80  p50=19916 ns  p95=24181 ns
+  producer                 n=   80  p50=2018 ns  p95=2470 ns
+  proxy_completion_flag    n=   80  p50=1174 ns  p95=1468 ns
+  proxy_doorbell_post      n=   80  p50=30405 ns  p95=30484 ns
+op=moe_gather rank=0
+  collect_flag             n=   80  p50=15240 ns  p95=18540 ns
+  copy                     n=   80  p50=3005 ns  p95=3680 ns
+  doorbell_flag            n=   80  p50=20223 ns  p95=24308 ns
+  producer                 n=   80  p50=1990 ns  p95=2449 ns
+  proxy_completion_flag    n=   80  p50=1219 ns  p95=1463 ns
+  proxy_doorbell_post      n=   80  p50=396 ns  p95=492 ns
+op=moe_gather rank=1
+  collect_flag             n=   80  p50=15276 ns  p95=18534 ns
+  copy                     n=   80  p50=3023 ns  p95=3701 ns
+  doorbell_flag            n=   80  p50=19323 ns  p95=24103 ns
+  producer                 n=   80  p50=1961 ns  p95=2415 ns
+  proxy_completion_flag    n=   80  p50=1214 ns  p95=1474 ns
+  proxy_doorbell_post      n=   80  p50=30390 ns  p95=30483 ns
+rank 0: samples gpu=400 proxy=400 dropped gpu=0 proxy=0
+rank 1: samples gpu=400 proxy=400 dropped gpu=3 proxy=2
+  ok: rank 0 attn_gather producer p95 is the injected one (52446 >= 45000 ns)
+  ok: rank 1 attn_gather producer p95 stays baseline (2437 < 8000 ns)
+  ok: rank 0 moe_gather producer p95 stays baseline (2449 < 8000 ns)
+  ok: rank 0 kv producer p95 stays baseline (2457 < 8000 ns)
+  ok: rank 0 engram producer p95 stays baseline (2466 < 8000 ns)
+  ok: rank 0 head producer p95 stays baseline (2362 < 8000 ns)
+  ok: rank 1 attn_gather proxy doorbell->last-post p95 is the injected one (30492 >= 30000 ns)
+  ok: rank 0 attn_gather proxy doorbell->last-post p95 stays baseline (476 < 5000 ns)
+  ok: rank 1 moe_gather proxy doorbell->last-post p95 is the injected one (30483 >= 30000 ns)
+  ok: rank 0 moe_gather proxy doorbell->last-post p95 stays baseline (492 < 5000 ns)
+  ok: rank 1 kv proxy doorbell->last-post p95 is the injected one (30484 >= 30000 ns)
+  ok: rank 0 kv proxy doorbell->last-post p95 stays baseline (490 < 5000 ns)
+  ok: rank 1 engram proxy doorbell->last-post p95 is the injected one (30491 >= 30000 ns)
+  ok: rank 0 engram proxy doorbell->last-post p95 stays baseline (495 < 5000 ns)
+  ok: rank 1 head proxy doorbell->last-post p95 is the injected one (30486 >= 30000 ns)
+  ok: rank 0 head proxy doorbell->last-post p95 stays baseline (472 < 5000 ns)
+  ok: rank 0 copy p95 stays baseline (3700)
+  ok: rank 0 doorbell->flag p95 stays baseline (24667)
+  ok: rank 1 copy p95 stays baseline (3632)
+  ok: rank 1 doorbell->flag p95 stays baseline (24626)
+  ok: rank 0 reports 400 gpu samples, no drops ({'gpu_dropped': 0, 'gpu_samples': 400, 'proxy_dropped': 0, 'proxy_samples': 400})
+  ok: rank 1 reports its drops ({'gpu_dropped': 3, 'gpu_samples': 400, 'proxy_dropped': 2, 'proxy_samples': 400})
+check_attribution: ok
+h0272: ok

@@ -1,0 +1,375 @@
+From c4e227a3559c9508b922d47071febc8559d7eb11 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Mon, 23 Nov 2026 11:12:36 -0800
+Subject: [PATCH 1/4] 0297 dsv41: TF_DS_KEYS_PROFILE (off by default): the
+ pruned selection's width and key-encoding class on the profile line
+
+The localization of the TF_DS_IDX_FUSED selection divergence (runs/fused-followup-20261121): round.zig's
+candidate-source selection records the keys' width and whether the kit's _score_keys or the fused key fold (0206)
+wrote them; key_prof.zig aggregates per class and prints a key_profile line beside prefill_profile_ms. idx_fused.zig
+gains the host-side check: the fold's flipped keys reverse the pruned picks across the sign bit at every width in
+16,384 < width <= 65,536 (the fold's engagement window in the follow-up tree) and agree inside one sign class.
+---
+ zig/src/families/dsv41/dsv41.zig      |   2 +
+ zig/src/families/dsv41/idx_fused.zig  | 156 ++++++++++++++++++++++++++
+ zig/src/families/dsv41/key_prof.zig   |  98 ++++++++++++++++
+ zig/src/families/dsv41/lanes_main.zig |   2 +
+ zig/src/families/dsv41/model.zig      |   3 +
+ zig/src/families/dsv41/round.zig      |   4 +
+ 6 files changed, 265 insertions(+)
+ create mode 100644 zig/src/families/dsv41/key_prof.zig
+
+diff --git a/zig/src/families/dsv41/dsv41.zig b/zig/src/families/dsv41/dsv41.zig
+index 86ec79b..b0f2a22 100644
+--- a/zig/src/families/dsv41/dsv41.zig
++++ b/zig/src/families/dsv41/dsv41.zig
+@@ -53,6 +53,7 @@ pub const sampling = @import("sampling.zig");
+ pub const model = @import("model.zig");
+ pub const prompt_rows = @import("prompt_rows.zig");
+ pub const prefill_prof = @import("prefill_prof.zig");
++pub const key_prof = @import("key_prof.zig");
+ pub const pass_profile = @import("pass_profile.zig");
+ pub const draft_prefetch = @import("draft_prefetch.zig");
+ pub const l2_knobs = @import("l2_knobs.zig");
+@@ -128,6 +129,7 @@ test {
+     refAll(model);
+     refAll(prompt_rows);
+     refAll(prefill_prof);
++    refAll(key_prof);
+     refAll(expert_prune);
+     refAll(idx_fused);
+     refAll(idx_pick_wide);
+diff --git a/zig/src/families/dsv41/idx_fused.zig b/zig/src/families/dsv41/idx_fused.zig
+index 216d54d..29b5cb9 100644
+--- a/zig/src/families/dsv41/idx_fused.zig
++++ b/zig/src/families/dsv41/idx_fused.zig
+@@ -248,3 +248,159 @@ test "key negative-column rule: a column at or past every is -1 in the list and
+     try expectEqual([_]u8{ 0, 1, 0, 0 }, mask); // only block 1 lands
+     try expectEqual([_]i32{ 1, -1 }, cblk);
+ }
++
++// -- the key fold's divergence, localized (runs/fused-followup-20261121/RESULTS.md's four long-prompt cases) -------
++//
++// The pruned selection reads the keys buffer and compares its int64 keys as SIGNED (torch.topk on int64: the kit step
++// tri_index.TopK wraps, and the fused _topk_sel that replaces it must match - production's picks are the kit's). The
++// kit's `_score_keys` writes keys in that signed order; the fused key fold (0206) writes `scoreKey`'s, which differ in
++// the top bit only and order as unsigned - so a signed compare of the folded keys reverses every negative-score vs
++// non-negative-score pair while keeping each class's own order. The picks therefore agree inside one sign class and
++// diverge whenever both classes meet at the selection's boundary - the four mismatches' signature, and what the fold's
++// byte parity (identical keys modulo the flip) could not see. In the follow-up tree the fold writes the keys at
++// 16,384 < width <= 65,536 (the pool regime's floor is candidate_blocks * candidate_block; its ceiling that tree's
++// 8,192-block fused cap at the served block size): exactly the failing window. Below the floor the pool takes candFast
++// (no fold), above the ceiling the unfused sequence keeps the kit's `_score_keys` - both write the kit's encoding.
++
++/// The kit's `_score_keys` key for a score at a column: `scoreKey` without the top-bit flip (the follow-up probe row's
++/// measured encoding: 0.0 at column 0 -> 0x00000000ffffffff, scoreKey's 0x80000000ffffffff with only the flip
++/// differing).
++fn kitOf(x: f32, j: usize) u64 {
++    return scoreKey(x, j) ^ 0x8000000000000000;
++}
++
++/// The consumer's pair rule: the pruned selection's signed compare (torch.topk on int64).
++fn keyLess(a: u64, b: u64) bool {
++    return @as(i64, @bitCast(a)) < @as(i64, @bitCast(b));
++}
++
++const Pair = struct { key: u64, col: usize };
++
++fn pairLess(_: void, a: Pair, b: Pair) bool {
++    return keyLess(b.key, a.key); // descending
++}
++
++/// `topk_select_pruned` in miniature (tri_index.topkSelectPruned): the k largest keys as the consumer's signed compare
++/// takes them - from the k best 64-key tiles by signed tile maximum when the row prunes (more than TOPK_FUSED_MAX
++/// keys and more than k tiles), else every key - returned as ascending columns.
++fn prunedCols(gpa: std.mem.Allocator, keys: []const u64, tmax: []const u64, k: usize) ![]usize {
++    const n = keys.len;
++    var set = try gpa.alloc(usize, n);
++    defer gpa.free(set);
++    var m: usize = 0;
++    if (n > 4096 and tmax.len > k) {
++        // the k tiles whose maxima are largest (signed), then their keys
++        var tp = try gpa.alloc(Pair, tmax.len);
++        defer gpa.free(tp);
++        for (tmax, 0..) |u, t| tp[t] = .{ .key = u, .col = t };
++        std.mem.sort(Pair, tp, {}, pairLess);
++        for (tp[0..k]) |p| {
++            const lo = p.col * 64;
++            for (lo..@min(n, lo + 64)) |j| {
++                set[m] = j;
++                m += 1;
++            }
++        }
++    } else {
++        for (0..n) |j| set[j] = j;
++        m = n;
++    }
++    var kp = try gpa.alloc(Pair, m);
++    defer gpa.free(kp);
++    for (set[0..m], 0..) |j, i| kp[i] = .{ .key = keys[j], .col = j };
++    std.mem.sort(Pair, kp, {}, pairLess);
++    const out = try gpa.alloc(usize, k);
++    for (kp[0..k], 0..) |p, i| out[i] = p.col;
++    std.mem.sort(usize, out, {}, std.sort.asc(usize));
++    return out;
++}
++
++/// The key class by its encoding's top bit: the non-negative scores and NaN (kit keys at or above 0x8000...) are one
++/// class, the negative scores the other - the flip the fold and the kit disagree on moves keys between exactly these.
++fn nonnegClass(x: f32) bool {
++    return x != x or x >= 0;
++}
++
++test "the fold's flipped keys change the pruned picks across the sign bit (the failing window's widths)" {
++    const gpa = std.testing.allocator;
++    // the failing window's shapes (len_20000/30000/50000/64000) and its edges; k is config.json's index_topk
++    const widths = [_]usize{ 16384, 20000, 30000, 32768, 50000, 64000, 65536 };
++    const k = 512;
++    for (widths) |w| {
++        const score = try gpa.alloc(f32, w);
++        defer gpa.free(score);
++        const fold = try gpa.alloc(u64, w);
++        defer gpa.free(fold);
++        const kit = try gpa.alloc(u64, w);
++        defer gpa.free(kit);
++        const nt = (w + 63) / 64;
++        const ftmax = try gpa.alloc(u64, nt);
++        defer gpa.free(ftmax);
++        const ktmax = try gpa.alloc(u64, nt);
++        defer gpa.free(ktmax);
++        for ([_]enum { mixed, neg, nonneg }{ .mixed, .neg, .nonneg }) |row| {
++            // the adversarial score rows: a mixed-sign row whose tiles alternate class, and the two single-class rows
++            for (score, 0..) |*x, j| {
++                const f: f32 = @floatFromInt(j);
++                x.* = switch (row) {
++                    .mixed => if ((j / 64) & 1 == 0) -1.0 - f else 1.0 + f,
++                    .neg => -1.0 - f,
++                    .nonneg => @mod(f, 7.0),
++                };
++            }
++            switch (row) {
++                .mixed => {
++                    score[0] = @bitCast(@as(u32, 0x7fc00000)); // NaN, the key order's top class
++                    score[1] = -std.math.inf(f32);
++                    score[2] = 3.5;
++                    score[3] = 3.5; // a tie (the keys break it to the lower column in both encodings)
++                    score[4] = -0.0;
++                    score[5] = 0.0; // the -0/+0 pair (one key between them)
++                },
++                .neg => {
++                    score[0] = -std.math.inf(f32);
++                    score[1] = -2.5;
++                    score[2] = -2.5; // a tie
++                },
++                .nonneg => {
++                    score[0] = 0.0;
++                    score[1] = -0.0; // the -0/+0 pair
++                    score[2] = std.math.inf(f32);
++                },
++            }
++            // both producers: the fold's scoreKey keys and unsigned tile maxima, the kit's keys and signed tile maxima
++            for (score, 0..) |x, j| {
++                fold[j] = scoreKey(x, j);
++                kit[j] = kitOf(x, j);
++            }
++            for (0..nt) |t| {
++                const lo = t * 64;
++                var fm: u64 = 0; // below every scoreKey key, the fold's unsigned-max rule (0206's foldKeys)
++                var km = kit[lo]; // the kit's tile maximum: its largest key as the consumer's signed compare sees it
++                for (lo..@min(w, lo + 64)) |j| {
++                    if (fold[j] > fm) fm = fold[j];
++                    if (keyLess(km, kit[j])) km = kit[j];
++                }
++                ftmax[t] = fm;
++                ktmax[t] = km;
++            }
++            const fp = try prunedCols(gpa, fold, ftmax, k);
++            defer gpa.free(fp);
++            const kp = try prunedCols(gpa, kit, ktmax, k);
++            defer gpa.free(kp);
++            switch (row) {
++                .mixed => {
++                    // both classes at the boundary: the picks diverge and split by class - the kit takes the
++                    // non-negative scores (NaN included), the fold's signed compare ranks every negative score above
++                    // them and takes those. This is the four long-prompt mismatches, at every in-window width.
++                    try std.testing.expect(!std.mem.eql(usize, fp, kp));
++                    for (kp) |j| try std.testing.expect(nonnegClass(score[j]));
++                    for (fp) |j| try std.testing.expect(!nonnegClass(score[j]));
++                },
++                // one sign class: the flip preserves each class's order, so the picks agree (the in-class case the
++                // matching rows exercise)
++                .neg, .nonneg => try std.testing.expectEqualSlices(usize, kp, fp),
++            }
++        }
++    }
++}
+diff --git a/zig/src/families/dsv41/key_prof.zig b/zig/src/families/dsv41/key_prof.zig
+new file mode 100644
+index 0000000..853da21
+--- /dev/null
++++ b/zig/src/families/dsv41/key_prof.zig
+@@ -0,0 +1,98 @@
++//! TF_DS_KEYS_PROFILE=1 (a profile; off by default): at the pruned selection site, the width of the keys the selection
++//! read and the encoding class that wrote them - the kit's `_score_keys` / `_index_score` keys (the kit's encoding) or
++//! the fused key fold's (0206's, `scoreKey`'s encoding; the two differ in the top bit and order differently under the
++//! consumer's signed compare, see idx_fused.zig's key fold tests). The line prints at the end of the run next to
++//! prefill_profile_ms (lanes_main.zig) as "key_profile": each class's count and the width range it saw. Off, the site
++//! is one load and a branch.
++const std = @import("std");
++
++pub const env_name: [:0]const u8 = "TF_DS_KEYS_PROFILE";
++
++/// The switch's value: unset, "" or "0" off; "1" on; anything else is a refusal to start (idx_fused.parse's rule).
++pub fn parse(text: ?[]const u8) ?bool {
++    const t = text orelse return false;
++    if (t.len == 0 or std.mem.eql(u8, t, "0")) return false;
++    if (std.mem.eql(u8, t, "1")) return true;
++    std.debug.print("{s}: expected 1 or 0\n", .{env_name});
++    return null;
++}
++
++pub fn fromText(text: ?[]const u8) error{BadKeysProfile}!bool {
++    return parse(text) orelse error.BadKeysProfile;
++}
++
++/// What wrote the keys the selection read: the kit's kernels or the fused key fold (0206).
++pub const Class = enum { kit, fold };
++
++/// One class's counters: the selections and the widths they saw.
++pub const Counts = struct {
++    n: u64 = 0,
++    width_min: usize = std.math.maxInt(usize),
++    width_max: usize = 0,
++};
++
++pub const Profile = struct {
++    selections: u64 = 0,
++    counts: [@typeInfo(Class).@"enum".field_names.len]Counts = @splat(.{}),
++};
++
++/// The one live profile (model.open's TF_DS_KEYS_PROFILE; null: the record is a branch).
++pub var live: ?*Profile = null;
++var one: Profile = .{};
++
++/// TF_DS_KEYS_PROFILE=1: the records on, from the next selection.
++pub fn enable() void {
++    one = .{};
++    live = &one;
++}
++
++/// The pruned selection site's record (round.zig's candidate-source arm): the keys' width and their encoding class.
++pub fn record(width: usize, class: Class) void {
++    const p = live orelse return;
++    const c = &p.counts[@intFromEnum(class)];
++    c.n += 1;
++    c.width_min = @min(c.width_min, width);
++    c.width_max = @max(c.width_max, width);
++    p.selections += 1;
++}
++
++/// The run's line, next to prefill_profile_ms: each class's count and width range (zeros when never seen).
++pub fn print(w: anytype, rank: usize) !void {
++    const p = live orelse return;
++    try w.print("{{\"rank\": {d}, \"key_profile\": {{\"selections\": {d}", .{ rank, p.selections });
++    inline for (@typeInfo(Class).@"enum".field_names, 0..) |name, i| {
++        const c = p.counts[i];
++        try w.print(", \"{s}\": {{\"n\": {d}, \"width_min\": {d}, \"width_max\": {d}}}", .{ name, c.n, if (c.n == 0) 0 else c.width_min, c.width_max });
++    }
++    try w.print("}}}}\n", .{});
++    try w.flush();
++}
++
++test "the switch parses its forms and nothing else" {
++    try std.testing.expectEqual(@as(?bool, false), parse(null));
++    try std.testing.expectEqual(@as(?bool, false), parse(""));
++    try std.testing.expectEqual(@as(?bool, false), parse("0"));
++    try std.testing.expectEqual(@as(?bool, true), parse("1"));
++    try std.testing.expectEqual(@as(?bool, null), parse("2"));
++    try std.testing.expectEqual(@as(?bool, null), parse("yes"));
++    try std.testing.expectEqual(@as(?bool, null), parse("01"));
++    try std.testing.expectError(error.BadKeysProfile, fromText("2"));
++}
++
++test "the record counts each class's selections and widths; the line prints one JSON object" {
++    enable();
++    defer live = null;
++    record(32768, .kit);
++    record(20000, .kit);
++    record(65536, .fold);
++    try std.testing.expectEqual(@as(u64, 3), one.selections);
++    try std.testing.expectEqual(@as(u64, 2), one.counts[@intFromEnum(Class.kit)].n);
++    try std.testing.expectEqual(@as(usize, 20000), one.counts[@intFromEnum(Class.kit)].width_min);
++    try std.testing.expectEqual(@as(usize, 32768), one.counts[@intFromEnum(Class.kit)].width_max);
++    try std.testing.expectEqual(@as(u64, 1), one.counts[@intFromEnum(Class.fold)].n);
++    try std.testing.expectEqual(@as(usize, 65536), one.counts[@intFromEnum(Class.fold)].width_min);
++    var buf: [512]u8 = undefined;
++    var w: std.Io.Writer = .fixed(&buf);
++    try print(&w, 0);
++    try std.testing.expectEqualStrings("{\"rank\": 0, \"key_profile\": {\"selections\": 3, \"kit\": {\"n\": 2, \"width_min\": 20000, \"width_max\": 32768}, \"fold\": {\"n\": 1, \"width_min\": 65536, \"width_max\": 65536}}}\n", w.buffered());
++}
+diff --git a/zig/src/families/dsv41/lanes_main.zig b/zig/src/families/dsv41/lanes_main.zig
+index 7238955..b3529a7 100644
+--- a/zig/src/families/dsv41/lanes_main.zig
++++ b/zig/src/families/dsv41/lanes_main.zig
+@@ -253,6 +253,7 @@ pub fn main(init: std.process.Init) !u8 {
+             printPrune(w, o.rank, m) catch {};
+             printExpertBytes(w, o.rank, m) catch {};
+             dsv41.prefill_prof.print(w, o.rank) catch {};
++            dsv41.key_prof.print(w, o.rank) catch {};
+             if (m.ptimer) |tm| {
+                 w.print("{{\"rank\": {d}, \"prefill_phases_ms\": {{", .{o.rank}) catch {};
+                 for (dsv41.round.PhaseTimer.phases, 0..) |name, i| w.print("{s}\"{s}\": {d:.3}", .{ if (i == 0) "" else ", ", name, if (tm.rounds == 0) 0 else tm.ms[i] / @as(f64, @floatFromInt(tm.rounds)) }) catch {};
+@@ -452,6 +453,7 @@ pub fn main(init: std.process.Init) !u8 {
+         try printPrune(w, 0, m);
+         try printExpertBytes(w, 0, m);
+         try dsv41.prefill_prof.print(w, 0);
++        try dsv41.key_prof.print(w, 0);
+         if (m.eh) |eh| if (eh.p_calls > 0) {
+             const pc: f64 = @floatFromInt(eh.p_calls);
+             try w.print("{{\"rank\": 0, \"prefill_engram_ms\": {{\"calls\": {d}, \"rows\": {d:.2}, \"upload\": {d:.2}, \"mm\": {d:.2}, \"exchange\": {d:.2}, \"gate\": {d:.2}}}}}\n", .{ eh.p_calls, @as(f64, @floatFromInt(eh.p_rows)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_upload)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_mm)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_x)) / pc / 1e6, @as(f64, @floatFromInt(eh.p_gate)) / pc / 1e6 });
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 38af34f..f302b74 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -37,6 +37,7 @@ const shard_ops = @import("shard_ops.zig");
+ const prompt_rows = @import("prompt_rows.zig");
+ const expert_prune = @import("expert_prune.zig");
+ const prefill_prof = @import("prefill_prof.zig");
++const key_prof = @import("key_prof.zig");
+ const pass_profile = @import("pass_profile.zig");
+ const markov_cache = @import("markov_cache.zig");
+ const topk_merge = @import("topk_merge.zig");
+@@ -313,6 +314,8 @@ pub const Model = struct {
+         m.io = io;
+         // TF_DS_PREFILL_PROFILE=1: a prompt chunk's phases and sub-marks clocked (prefill_prof.zig, attribution only)
+         if (envOf("TF_DS_PREFILL_PROFILE")) |v| if (std.mem.eql(u8, v, "1")) prefill_prof.enable(io);
++        // TF_DS_KEYS_PROFILE=1: the pruned selection site's width and key-encoding class (key_prof.zig)
++        if (try key_prof.fromText(envOf(key_prof.env_name))) key_prof.enable();
+         // TF_DS_PASS_PROFILE (a malformed value refuses here, before the weights load); every rank that has it set
+         // runs its own passes eagerly, which moves no bit
+         const pass_profile_on = try pass_profile.fromText(envOf(pass_profile.env_name));
+diff --git a/zig/src/families/dsv41/round.zig b/zig/src/families/dsv41/round.zig
+index d6065c7..aca644f 100644
+--- a/zig/src/families/dsv41/round.zig
++++ b/zig/src/families/dsv41/round.zig
+@@ -20,6 +20,7 @@ const tri_hc = @import("tri_hc.zig");
+ const tri_norm = @import("tri_norm.zig");
+ const tri_attn = @import("tri_attn.zig");
+ const tri_index = @import("tri_index.zig");
++const key_prof = @import("key_prof.zig");
+ const exl3_linear = @import("exl3_linear.zig");
+ const exl3_experts = @import("exl3_experts.zig");
+ const round2d = @import("round2d.zig");
+@@ -1360,6 +1361,9 @@ fn attention(e: *const Engine, rd: *Round, ch: *const Chunk, cs: *const Caches,
+                     try e.ops.candFast(e.s, rd.score, nb, nb / cb, cb, vis, rd.cand, nb / cb, R);
+                     rd.has_cand = true;
+                 }
++                // TF_DS_KEYS_PROFILE (a profile): the pruned selection's width and the key-encoding class of rd.keys
++                // (keys_done-style: .fold once 0206's key fold writes them here instead of _score_keys below)
++                key_prof.record(nb, .kit);
+                 if (nb > tri_index.topk_fused_max) {
+                     try tri_index.scoreKeys(t, rd.score, rd.tmax, rd.keys, R, nb);
+                     try tri_index.topkSelectPruned(t, rd.keys, nb, rd.tmax, kk, vis, rd.cidx, rd.pbufs, top, R, nb);
+-- 
+2.56.1
+

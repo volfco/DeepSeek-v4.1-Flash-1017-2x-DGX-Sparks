@@ -1,0 +1,727 @@
+# HELP tensorfold:requests_running Requests in prefill or decode.
+# TYPE tensorfold:requests_running gauge
+tensorfold:requests_running 0
+# HELP tensorfold:requests_waiting Requests queued or held until a lane is free.
+# TYPE tensorfold:requests_waiting gauge
+tensorfold:requests_waiting 0
+# HELP tensorfold:generation_tokens_running Generated tokens held by live streams.
+# TYPE tensorfold:generation_tokens_running gauge
+tensorfold:generation_tokens_running 0
+# HELP tensorfold:prompt_tokens_total Prompt tokens of finished requests, those restored from kept prompt states included.
+# TYPE tensorfold:prompt_tokens_total counter
+tensorfold:prompt_tokens_total 2080284
+# HELP tensorfold:prompt_tokens_cached_total Prompt tokens of finished requests restored from kept prompt states (counted in prompt_tokens_total too); the rest were computed.
+# TYPE tensorfold:prompt_tokens_cached_total counter
+tensorfold:prompt_tokens_cached_total 1961984
+# HELP tensorfold:generation_tokens_total Generated tokens of finished requests.
+# TYPE tensorfold:generation_tokens_total counter
+tensorfold:generation_tokens_total 35668
+# HELP tensorfold:kv_cache_usage_ratio Tokens in a stream cache divided by that stream's context window.
+# TYPE tensorfold:kv_cache_usage_ratio gauge
+tensorfold:kv_cache_usage_ratio{pool="0"} 0
+# HELP tensorfold:mtp_drafted_total Draft tokens verified on finished requests.
+# TYPE tensorfold:mtp_drafted_total counter
+tensorfold:mtp_drafted_total 33612
+# HELP tensorfold:mtp_accepted_total Draft tokens kept on finished requests.
+# TYPE tensorfold:mtp_accepted_total counter
+tensorfold:mtp_accepted_total 25869
+# HELP tensorfold:request_latency_seconds Seconds from arrival to the reply leaving.
+# TYPE tensorfold:request_latency_seconds histogram
+tensorfold:request_latency_seconds_bucket{le="0.01"} 0
+tensorfold:request_latency_seconds_bucket{le="0.05"} 0
+tensorfold:request_latency_seconds_bucket{le="0.1"} 0
+tensorfold:request_latency_seconds_bucket{le="0.25"} 1
+tensorfold:request_latency_seconds_bucket{le="0.5"} 2
+tensorfold:request_latency_seconds_bucket{le="1"} 4
+tensorfold:request_latency_seconds_bucket{le="2.5"} 47
+tensorfold:request_latency_seconds_bucket{le="5"} 57
+tensorfold:request_latency_seconds_bucket{le="10"} 79
+tensorfold:request_latency_seconds_bucket{le="30"} 109
+tensorfold:request_latency_seconds_bucket{le="60"} 109
+tensorfold:request_latency_seconds_bucket{le="120"} 109
+tensorfold:request_latency_seconds_bucket{le="300"} 109
+tensorfold:request_latency_seconds_bucket{le="+Inf"} 109
+tensorfold:request_latency_seconds_sum 649.134514
+tensorfold:request_latency_seconds_count 109
+# HELP tensorfold:time_to_first_token_seconds Seconds from arrival to the first generated token.
+# TYPE tensorfold:time_to_first_token_seconds histogram
+tensorfold:time_to_first_token_seconds_bucket{le="0.01"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="0.05"} 0
+tensorfold:time_to_first_token_seconds_bucket{le="0.1"} 8
+tensorfold:time_to_first_token_seconds_bucket{le="0.25"} 31
+tensorfold:time_to_first_token_seconds_bucket{le="0.5"} 44
+tensorfold:time_to_first_token_seconds_bucket{le="1"} 53
+tensorfold:time_to_first_token_seconds_bucket{le="2.5"} 95
+tensorfold:time_to_first_token_seconds_bucket{le="5"} 102
+tensorfold:time_to_first_token_seconds_bucket{le="10"} 109
+tensorfold:time_to_first_token_seconds_bucket{le="30"} 109
+tensorfold:time_to_first_token_seconds_bucket{le="60"} 109
+tensorfold:time_to_first_token_seconds_bucket{le="120"} 109
+tensorfold:time_to_first_token_seconds_bucket{le="300"} 109
+tensorfold:time_to_first_token_seconds_bucket{le="+Inf"} 109
+tensorfold:time_to_first_token_seconds_sum 137.884578
+tensorfold:time_to_first_token_seconds_count 109
+# HELP tensorfold:request_decode_seconds Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.
+# TYPE tensorfold:request_decode_seconds histogram
+tensorfold:request_decode_seconds_bucket{le="0.01"} 15
+tensorfold:request_decode_seconds_bucket{le="0.05"} 16
+tensorfold:request_decode_seconds_bucket{le="0.1"} 17
+tensorfold:request_decode_seconds_bucket{le="0.25"} 25
+tensorfold:request_decode_seconds_bucket{le="0.5"} 32
+tensorfold:request_decode_seconds_bucket{le="1"} 49
+tensorfold:request_decode_seconds_bucket{le="2.5"} 56
+tensorfold:request_decode_seconds_bucket{le="5"} 69
+tensorfold:request_decode_seconds_bucket{le="10"} 83
+tensorfold:request_decode_seconds_bucket{le="30"} 109
+tensorfold:request_decode_seconds_bucket{le="60"} 109
+tensorfold:request_decode_seconds_bucket{le="120"} 109
+tensorfold:request_decode_seconds_bucket{le="300"} 109
+tensorfold:request_decode_seconds_bucket{le="+Inf"} 109
+tensorfold:request_decode_seconds_sum 511.249936
+tensorfold:request_decode_seconds_count 109
+# HELP tensorfold:request_time_per_output_token_seconds Seconds from the first generated token to the last, divided by the tokens less one.
+# TYPE tensorfold:request_time_per_output_token_seconds histogram
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.0025"} 0
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.005"} 0
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.0075"} 1
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.01"} 15
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.015"} 36
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.02"} 61
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.025"} 65
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.03"} 70
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.04"} 87
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.05"} 89
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.075"} 92
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.1"} 94
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.15"} 94
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.2"} 94
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.3"} 94
+tensorfold:request_time_per_output_token_seconds_bucket{le="0.5"} 94
+tensorfold:request_time_per_output_token_seconds_bucket{le="1"} 94
+tensorfold:request_time_per_output_token_seconds_bucket{le="+Inf"} 94
+tensorfold:request_time_per_output_token_seconds_sum 2.074024
+tensorfold:request_time_per_output_token_seconds_count 94
+# HELP tensorfold:decode_rounds_total Decode rounds used by finished requests.
+# TYPE tensorfold:decode_rounds_total counter
+tensorfold:decode_rounds_total 9743
+# HELP tensorfold:request_prefill_seconds Seconds a finished request's prompt pass took.
+# TYPE tensorfold:request_prefill_seconds histogram
+tensorfold:request_prefill_seconds_bucket{le="0.01"} 0
+tensorfold:request_prefill_seconds_bucket{le="0.05"} 0
+tensorfold:request_prefill_seconds_bucket{le="0.1"} 21
+tensorfold:request_prefill_seconds_bucket{le="0.25"} 39
+tensorfold:request_prefill_seconds_bucket{le="0.5"} 46
+tensorfold:request_prefill_seconds_bucket{le="1"} 58
+tensorfold:request_prefill_seconds_bucket{le="2.5"} 109
+tensorfold:request_prefill_seconds_bucket{le="5"} 109
+tensorfold:request_prefill_seconds_bucket{le="10"} 109
+tensorfold:request_prefill_seconds_bucket{le="30"} 109
+tensorfold:request_prefill_seconds_bucket{le="60"} 109
+tensorfold:request_prefill_seconds_bucket{le="120"} 109
+tensorfold:request_prefill_seconds_bucket{le="300"} 109
+tensorfold:request_prefill_seconds_bucket{le="+Inf"} 109
+tensorfold:request_prefill_seconds_sum 81.370619
+tensorfold:request_prefill_seconds_count 109
+# HELP tensorfold:device_memory_bytes Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).
+# TYPE tensorfold:device_memory_bytes gauge
+tensorfold:device_memory_bytes 113157631012
+# HELP tensorfold:device_memory_peak_bytes The most device memory the engine has held since start or the last /health?reset_peak=1.
+# TYPE tensorfold:device_memory_peak_bytes gauge
+tensorfold:device_memory_peak_bytes 113157631012
+# HELP tensorfold:num_requests_running Requests in prefill or decode. A mirror of tensorfold:requests_running.
+# TYPE tensorfold:num_requests_running gauge
+tensorfold:num_requests_running 0
+# HELP tensorfold:num_requests_waiting Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.
+# TYPE tensorfold:num_requests_waiting gauge
+tensorfold:num_requests_waiting 0
+# HELP tensorfold:kv_cache_usage_perc A stream's cache occupancy under vLLM's name; same streams and ratios as tensorfold:kv_cache_usage_ratio.
+# TYPE tensorfold:kv_cache_usage_perc gauge
+tensorfold:kv_cache_usage_perc{stream="0"} 0
+# HELP tensorfold:spec_decode_num_draft_tokens_total Draft tokens verified on finished requests, this server's single draft counter.
+# TYPE tensorfold:spec_decode_num_draft_tokens_total counter
+tensorfold:spec_decode_num_draft_tokens_total 33612
+# HELP tensorfold:spec_decode_num_accepted_tokens_total Draft tokens kept on finished requests.
+# TYPE tensorfold:spec_decode_num_accepted_tokens_total counter
+tensorfold:spec_decode_num_accepted_tokens_total 25869
+# HELP tensorfold:e2e_request_latency_seconds Seconds from arrival to the reply leaving, under vLLM's name.
+# TYPE tensorfold:e2e_request_latency_seconds histogram
+tensorfold:e2e_request_latency_seconds_bucket{le="0.01"} 0
+tensorfold:e2e_request_latency_seconds_bucket{le="0.05"} 0
+tensorfold:e2e_request_latency_seconds_bucket{le="0.1"} 0
+tensorfold:e2e_request_latency_seconds_bucket{le="0.25"} 1
+tensorfold:e2e_request_latency_seconds_bucket{le="0.5"} 2
+tensorfold:e2e_request_latency_seconds_bucket{le="1"} 4
+tensorfold:e2e_request_latency_seconds_bucket{le="2.5"} 47
+tensorfold:e2e_request_latency_seconds_bucket{le="5"} 57
+tensorfold:e2e_request_latency_seconds_bucket{le="10"} 79
+tensorfold:e2e_request_latency_seconds_bucket{le="30"} 109
+tensorfold:e2e_request_latency_seconds_bucket{le="60"} 109
+tensorfold:e2e_request_latency_seconds_bucket{le="120"} 109
+tensorfold:e2e_request_latency_seconds_bucket{le="300"} 109
+tensorfold:e2e_request_latency_seconds_bucket{le="+Inf"} 109
+tensorfold:e2e_request_latency_seconds_sum 649.134514
+tensorfold:e2e_request_latency_seconds_count 109
+# HELP tensorfold:request_decode_time_seconds Seconds a finished request spent decoding, under vLLM's name.
+# TYPE tensorfold:request_decode_time_seconds histogram
+tensorfold:request_decode_time_seconds_bucket{le="0.01"} 15
+tensorfold:request_decode_time_seconds_bucket{le="0.05"} 16
+tensorfold:request_decode_time_seconds_bucket{le="0.1"} 17
+tensorfold:request_decode_time_seconds_bucket{le="0.25"} 25
+tensorfold:request_decode_time_seconds_bucket{le="0.5"} 32
+tensorfold:request_decode_time_seconds_bucket{le="1"} 49
+tensorfold:request_decode_time_seconds_bucket{le="2.5"} 56
+tensorfold:request_decode_time_seconds_bucket{le="5"} 69
+tensorfold:request_decode_time_seconds_bucket{le="10"} 83
+tensorfold:request_decode_time_seconds_bucket{le="30"} 109
+tensorfold:request_decode_time_seconds_bucket{le="60"} 109
+tensorfold:request_decode_time_seconds_bucket{le="120"} 109
+tensorfold:request_decode_time_seconds_bucket{le="300"} 109
+tensorfold:request_decode_time_seconds_bucket{le="+Inf"} 109
+tensorfold:request_decode_time_seconds_sum 511.249936
+tensorfold:request_decode_time_seconds_count 109
+# HELP tensorfold:request_prefill_time_seconds Seconds a finished request's prompt pass took, under vLLM's name.
+# TYPE tensorfold:request_prefill_time_seconds histogram
+tensorfold:request_prefill_time_seconds_bucket{le="0.01"} 0
+tensorfold:request_prefill_time_seconds_bucket{le="0.05"} 0
+tensorfold:request_prefill_time_seconds_bucket{le="0.1"} 21
+tensorfold:request_prefill_time_seconds_bucket{le="0.25"} 39
+tensorfold:request_prefill_time_seconds_bucket{le="0.5"} 46
+tensorfold:request_prefill_time_seconds_bucket{le="1"} 58
+tensorfold:request_prefill_time_seconds_bucket{le="2.5"} 109
+tensorfold:request_prefill_time_seconds_bucket{le="5"} 109
+tensorfold:request_prefill_time_seconds_bucket{le="10"} 109
+tensorfold:request_prefill_time_seconds_bucket{le="30"} 109
+tensorfold:request_prefill_time_seconds_bucket{le="60"} 109
+tensorfold:request_prefill_time_seconds_bucket{le="120"} 109
+tensorfold:request_prefill_time_seconds_bucket{le="300"} 109
+tensorfold:request_prefill_time_seconds_bucket{le="+Inf"} 109
+tensorfold:request_prefill_time_seconds_sum 81.370619
+tensorfold:request_prefill_time_seconds_count 109
+# HELP tensorfold:prefix_cache_queries_total Prompt tokens of finished requests, looked up in the kept prompt states, under vLLM's name.
+# TYPE tensorfold:prefix_cache_queries_total counter
+tensorfold:prefix_cache_queries_total 2080284
+# HELP tensorfold:prefix_cache_hits_total Prompt tokens of finished requests restored from kept prompt states, under vLLM's name.
+# TYPE tensorfold:prefix_cache_hits_total counter
+tensorfold:prefix_cache_hits_total 1961984
+# HELP tensorfold:client_disconnections_total Requests a client left before the reply left the server.
+# TYPE tensorfold:client_disconnections_total counter
+tensorfold:client_disconnections_total 0
+# HELP tensorfold:preemptions_total Requests that had to give a lane up to a later one.
+# TYPE tensorfold:preemptions_total counter
+tensorfold:preemptions_total 0
+# HELP tensorfold:chats_continued Streams that continued a conversation without resuming from its own turn state.
+# TYPE tensorfold:chats_continued counter
+tensorfold:chats_continued 0
+# HELP tensorfold:chats_continued_prefill_tokens Prompt tokens those streams prefilled.
+# TYPE tensorfold:chats_continued_prefill_tokens counter
+tensorfold:chats_continued_prefill_tokens 0
+# HELP tensorfold:prompt_cache_memory_hits Prompt passes that resumed a kept state in memory.
+# TYPE tensorfold:prompt_cache_memory_hits counter
+tensorfold:prompt_cache_memory_hits 58
+# HELP tensorfold:prompt_cache_memory_misses Prompt lookups that found no usable kept state.
+# TYPE tensorfold:prompt_cache_memory_misses counter
+tensorfold:prompt_cache_memory_misses 51
+# HELP tensorfold:prompt_cache_kept Prompt states kept in memory.
+# TYPE tensorfold:prompt_cache_kept counter
+tensorfold:prompt_cache_kept 0
+# HELP tensorfold:prompt_cache_evicted Kept states evicted from memory for room.
+# TYPE tensorfold:prompt_cache_evicted counter
+tensorfold:prompt_cache_evicted 0
+# HELP tensorfold:prompt_cache_refused Prompt states not kept: past the memory budget.
+# TYPE tensorfold:prompt_cache_refused counter
+tensorfold:prompt_cache_refused 0
+# HELP tensorfold:prompt_cache_failed Kept states that failed to save or restore.
+# TYPE tensorfold:prompt_cache_failed counter
+tensorfold:prompt_cache_failed 0
+# HELP tensorfold:prompt_cache_entries Prompt states kept in memory now.
+# TYPE tensorfold:prompt_cache_entries gauge
+tensorfold:prompt_cache_entries 28
+# HELP tensorfold:prompt_cache_held_bytes Bytes the kept states hold now.
+# TYPE tensorfold:prompt_cache_held_bytes gauge
+tensorfold:prompt_cache_held_bytes 187170816
+# HELP tensorfold:prompt_cache_disk_lookups Lookups that asked the disk tier.
+# TYPE tensorfold:prompt_cache_disk_lookups counter
+tensorfold:prompt_cache_disk_lookups 146
+# HELP tensorfold:prompt_cache_disk_hits Lookups whose durable point was longer than the best usable memory state.
+# TYPE tensorfold:prompt_cache_disk_hits counter
+tensorfold:prompt_cache_disk_hits 37
+# HELP tensorfold:prompt_cache_disk_hits_committed Disk restores every rank installed, adopted as kept states.
+# TYPE tensorfold:prompt_cache_disk_hits_committed counter
+tensorfold:prompt_cache_disk_hits_committed 28
+# HELP tensorfold:prompt_cache_restores_begun Disk restore jobs started.
+# TYPE tensorfold:prompt_cache_restores_begun counter
+tensorfold:prompt_cache_restores_begun 28
+# HELP tensorfold:prompt_cache_restores_shared Requests that joined a disk restore already in flight.
+# TYPE tensorfold:prompt_cache_restores_shared counter
+tensorfold:prompt_cache_restores_shared 0
+# HELP tensorfold:prompt_cache_restores_failed Disk restores aborted on every rank (missing, damaged, guarded).
+# TYPE tensorfold:prompt_cache_restores_failed counter
+tensorfold:prompt_cache_restores_failed 0
+# HELP tensorfold:prompt_cache_restores_cancelled Disk restores stopped: no request waited for them any more, or shutdown.
+# TYPE tensorfold:prompt_cache_restores_cancelled counter
+tensorfold:prompt_cache_restores_cancelled 0
+# HELP tensorfold:prompt_cache_restores_dropped Installed disk restores not adopted: no room, or memory already had them.
+# TYPE tensorfold:prompt_cache_restores_dropped counter
+tensorfold:prompt_cache_restores_dropped 0
+# HELP tensorfold:prompt_cache_restores_refused Disk restores not begun: the memory budget could not hold their destination, or the tier was at its capacity (once a request).
+# TYPE tensorfold:prompt_cache_restores_refused counter
+tensorfold:prompt_cache_restores_refused 3
+# HELP tensorfold:prompt_cache_restores_active Disk restore jobs in flight.
+# TYPE tensorfold:prompt_cache_restores_active gauge
+tensorfold:prompt_cache_restores_active 0
+# HELP tensorfold:prompt_cache_restoring_bytes Memory the disk restores in flight reserved, charged to the prompt cache's budget.
+# TYPE tensorfold:prompt_cache_restoring_bytes gauge
+tensorfold:prompt_cache_restoring_bytes 0
+# HELP tensorfold:prompt_cache_restore_blocks_done Blocks the restores in flight have copied so far.
+# TYPE tensorfold:prompt_cache_restore_blocks_done gauge
+tensorfold:prompt_cache_restore_blocks_done 0
+# HELP tensorfold:prompt_cache_restore_blocks_total Blocks the restores in flight copy in all.
+# TYPE tensorfold:prompt_cache_restore_blocks_total gauge
+tensorfold:prompt_cache_restore_blocks_total 0
+# HELP tensorfold:prompt_cache_restored_tokens Prompt tokens restored from disk.
+# TYPE tensorfold:prompt_cache_restored_tokens counter
+tensorfold:prompt_cache_restored_tokens 944128
+# HELP tensorfold:prompt_cache_restore_waits Requests parked on a disk restore.
+# TYPE tensorfold:prompt_cache_restore_waits counter
+tensorfold:prompt_cache_restore_waits 28
+# HELP tensorfold:prompt_cache_restore_wait_timeouts Requests admitted without their disk restore after TF_SPILL_LOAD_WAIT_MS.
+# TYPE tensorfold:prompt_cache_restore_wait_timeouts counter
+tensorfold:prompt_cache_restore_wait_timeouts 0
+# HELP tensorfold:prompt_cache_restore_wait_ns Nanoseconds requests waited for disk restores.
+# TYPE tensorfold:prompt_cache_restore_wait_ns counter
+tensorfold:prompt_cache_restore_wait_ns 4472982399
+# HELP tensorfold:prompt_cache_restore_wait_max_ns The longest wait for a disk restore, in nanoseconds.
+# TYPE tensorfold:prompt_cache_restore_wait_max_ns counter
+tensorfold:prompt_cache_restore_wait_max_ns 1341781492
+# HELP tensorfold:prompt_cache_restores_deferred Requests whose disk restore was refused for capacity (restores or read slots in flight) and retried shortly instead of prefilling.
+# TYPE tensorfold:prompt_cache_restores_deferred counter
+tensorfold:prompt_cache_restores_deferred 3
+# HELP tensorfold:prompt_cache_restores_deferred_expired Of them, requests admitted on what memory holds after TF_SPILL_DEFER_MS without the restore starting.
+# TYPE tensorfold:prompt_cache_restores_deferred_expired counter
+tensorfold:prompt_cache_restores_deferred_expired 0
+# HELP tensorfold:prompt_cache_restores_room_waits Requests whose disk restore the KV pool had no room for while streams ran, and that waited for room as a prompt pass does instead of prefilling.
+# TYPE tensorfold:prompt_cache_restores_room_waits counter
+tensorfold:prompt_cache_restores_room_waits 0
+# HELP tensorfold:prompt_cache_restores_room_wait_expired Of them, requests admitted on what memory holds after TF_SPILL_LOAD_WAIT_MS without room for the restore.
+# TYPE tensorfold:prompt_cache_restores_room_wait_expired counter
+tensorfold:prompt_cache_restores_room_wait_expired 0
+# HELP tensorfold:prompt_cache_writes_enqueued Kept states enqueued for the disk tier at their keep.
+# TYPE tensorfold:prompt_cache_writes_enqueued counter
+tensorfold:prompt_cache_writes_enqueued 0
+# HELP tensorfold:prompt_cache_shared_promoted Disk points promoted to shared prefixes.
+# TYPE tensorfold:prompt_cache_shared_promoted counter
+tensorfold:prompt_cache_shared_promoted 0
+# HELP tensorfold:prompt_cache_flushes Clean-shutdown flushes of the disk tier.
+# TYPE tensorfold:prompt_cache_flushes counter
+tensorfold:prompt_cache_flushes 0
+# HELP tensorfold:prompt_cache_flush_timeouts Flushes that reached their deadline with points unpublished.
+# TYPE tensorfold:prompt_cache_flush_timeouts counter
+tensorfold:prompt_cache_flush_timeouts 0
+# HELP tensorfold:prompt_cache_flush_unpublished Points left unpublished at a flush deadline.
+# TYPE tensorfold:prompt_cache_flush_unpublished counter
+tensorfold:prompt_cache_flush_unpublished 0
+# HELP tensorfold:prompt_cache_parked Requests parked on a disk restore now (reading it, or deferred to ask again).
+# TYPE tensorfold:prompt_cache_parked gauge
+tensorfold:prompt_cache_parked 0
+# HELP tensorfold:prompt_cache_chats_continued Streams that continued a conversation without resuming from its own turn state.
+# TYPE tensorfold:prompt_cache_chats_continued counter
+tensorfold:prompt_cache_chats_continued 0
+# HELP tensorfold:prompt_cache_chats_continued_prefill_tokens Prompt tokens those streams prefilled.
+# TYPE tensorfold:prompt_cache_chats_continued_prefill_tokens counter
+tensorfold:prompt_cache_chats_continued_prefill_tokens 0
+# HELP tensorfold:prompt_cache_cached_tokens Prompt tokens passes resumed from kept states.
+# TYPE tensorfold:prompt_cache_cached_tokens counter
+tensorfold:prompt_cache_cached_tokens 1961984
+# HELP tensorfold:prompt_cache_computed_tokens Prompt tokens passes computed.
+# TYPE tensorfold:prompt_cache_computed_tokens counter
+tensorfold:prompt_cache_computed_tokens 118300
+# HELP tensorfold:spill_points Published points in this rank's disk tier.
+# TYPE tensorfold:spill_points gauge
+tensorfold:spill_points{rank="0"} 643
+tensorfold:spill_points{rank="1"} 643
+# HELP tensorfold:spill_blocks Unique blocks on this rank's disk.
+# TYPE tensorfold:spill_blocks gauge
+tensorfold:spill_blocks{rank="0"} 4406
+tensorfold:spill_blocks{rank="1"} 4406
+# HELP tensorfold:spill_stored_bytes Unique bytes the disk tier holds (blocks, point files, temporaries).
+# TYPE tensorfold:spill_stored_bytes gauge
+tensorfold:spill_stored_bytes{rank="0"} 9957257900
+tensorfold:spill_stored_bytes{rank="1"} 8703881900
+# HELP tensorfold:spill_cap_bytes The disk tier's cap (--spill-gib).
+# TYPE tensorfold:spill_cap_bytes gauge
+tensorfold:spill_cap_bytes{rank="0"} 193273528320
+tensorfold:spill_cap_bytes{rank="1"} 193273528320
+# HELP tensorfold:spill_disk_free_bytes Free bytes on the disk tier's file system.
+# TYPE tensorfold:spill_disk_free_bytes gauge
+tensorfold:spill_disk_free_bytes{rank="0"} 424024526848
+tensorfold:spill_disk_free_bytes{rank="1"} 244840943616
+# HELP tensorfold:spill_staging_bytes Host staging the disk tier holds now.
+# TYPE tensorfold:spill_staging_bytes gauge
+tensorfold:spill_staging_bytes{rank="0"} 0
+tensorfold:spill_staging_bytes{rank="1"} 0
+# HELP tensorfold:spill_staging_peak The most host staging the disk tier has held.
+# TYPE tensorfold:spill_staging_peak gauge
+tensorfold:spill_staging_peak{rank="0"} 54075392
+tensorfold:spill_staging_peak{rank="1"} 54075392
+# HELP tensorfold:spill_writes_pending Kept states queued for the disk, not yet published.
+# TYPE tensorfold:spill_writes_pending gauge
+tensorfold:spill_writes_pending{rank="0"} 0
+tensorfold:spill_writes_pending{rank="1"} 0
+# HELP tensorfold:spill_writes_queued Kept states queued for the disk.
+# TYPE tensorfold:spill_writes_queued counter
+tensorfold:spill_writes_queued{rank="0"} 0
+tensorfold:spill_writes_queued{rank="1"} 0
+# HELP tensorfold:spill_writes_committed Points published on disk (manifest last).
+# TYPE tensorfold:spill_writes_committed counter
+tensorfold:spill_writes_committed{rank="0"} 0
+tensorfold:spill_writes_committed{rank="1"} 0
+# HELP tensorfold:spill_writes_cancelled Unpublished points cancelled (a guard could not stage, staging full, shutdown).
+# TYPE tensorfold:spill_writes_cancelled counter
+tensorfold:spill_writes_cancelled{rank="0"} 0
+tensorfold:spill_writes_cancelled{rank="1"} 0
+# HELP tensorfold:spill_writes_cancelled_guard Unpublished points cancelled because their source was about to change.
+# TYPE tensorfold:spill_writes_cancelled_guard counter
+tensorfold:spill_writes_cancelled_guard{rank="0"} 0
+tensorfold:spill_writes_cancelled_guard{rank="1"} 0
+# HELP tensorfold:spill_writes_cancelled_staging Unpublished points cancelled because staging had no room.
+# TYPE tensorfold:spill_writes_cancelled_staging counter
+tensorfold:spill_writes_cancelled_staging{rank="0"} 0
+tensorfold:spill_writes_cancelled_staging{rank="1"} 0
+# HELP tensorfold:spill_writes_cancelled_shutdown Unpublished points cancelled at the flush deadline.
+# TYPE tensorfold:spill_writes_cancelled_shutdown counter
+tensorfold:spill_writes_cancelled_shutdown{rank="0"} 0
+tensorfold:spill_writes_cancelled_shutdown{rank="1"} 0
+# HELP tensorfold:spill_writes_failed Disk writes that failed.
+# TYPE tensorfold:spill_writes_failed counter
+tensorfold:spill_writes_failed{rank="0"} 0
+tensorfold:spill_writes_failed{rank="1"} 0
+# HELP tensorfold:spill_forced_staging Ranges staged at once because their source was about to change.
+# TYPE tensorfold:spill_forced_staging counter
+tensorfold:spill_forced_staging{rank="0"} 0
+tensorfold:spill_forced_staging{rank="1"} 0
+# HELP tensorfold:spill_no_space Writes refused by the cap or the free-disk floor.
+# TYPE tensorfold:spill_no_space counter
+tensorfold:spill_no_space{rank="0"} 0
+tensorfold:spill_no_space{rank="1"} 0
+# HELP tensorfold:spill_dedup_blocks Blocks linked to equal bytes already on disk.
+# TYPE tensorfold:spill_dedup_blocks counter
+tensorfold:spill_dedup_blocks{rank="0"} 0
+tensorfold:spill_dedup_blocks{rank="1"} 0
+# HELP tensorfold:spill_dedup_bytes Bytes those links saved.
+# TYPE tensorfold:spill_dedup_bytes counter
+tensorfold:spill_dedup_bytes{rank="0"} 0
+tensorfold:spill_dedup_bytes{rank="1"} 0
+# HELP tensorfold:spill_written_bytes Bytes written to disk.
+# TYPE tensorfold:spill_written_bytes counter
+tensorfold:spill_written_bytes{rank="0"} 0
+tensorfold:spill_written_bytes{rank="1"} 0
+# HELP tensorfold:spill_presence_refused Restores refused because a rank lacked the point.
+# TYPE tensorfold:spill_presence_refused counter
+tensorfold:spill_presence_refused{rank="0"} 0
+tensorfold:spill_presence_refused{rank="1"} 0
+# HELP tensorfold:spill_compatible_misses Durable lookups with no compatible point.
+# TYPE tensorfold:spill_compatible_misses counter
+tensorfold:spill_compatible_misses{rank="0"} 0
+tensorfold:spill_compatible_misses{rank="1"} 0
+# HELP tensorfold:spill_crc_errors Blocks or sections that failed their CRC.
+# TYPE tensorfold:spill_crc_errors counter
+tensorfold:spill_crc_errors{rank="0"} 0
+tensorfold:spill_crc_errors{rank="1"} 0
+# HELP tensorfold:spill_size_errors Files truncated or past their manifest's bounds.
+# TYPE tensorfold:spill_size_errors counter
+tensorfold:spill_size_errors{rank="0"} 0
+tensorfold:spill_size_errors{rank="1"} 0
+# HELP tensorfold:spill_reads Points read for restores.
+# TYPE tensorfold:spill_reads counter
+tensorfold:spill_reads{rank="0"} 28
+tensorfold:spill_reads{rank="1"} 28
+# HELP tensorfold:spill_read_bytes Bytes read for restores.
+# TYPE tensorfold:spill_read_bytes counter
+tensorfold:spill_read_bytes{rank="0"} 632360960
+tensorfold:spill_read_bytes{rank="1"} 368414720
+# HELP tensorfold:spill_read_failed Restore reads that failed.
+# TYPE tensorfold:spill_read_failed counter
+tensorfold:spill_read_failed{rank="0"} 0
+tensorfold:spill_read_failed{rank="1"} 0
+# HELP tensorfold:spill_evicted_turns Old turns evicted from disk.
+# TYPE tensorfold:spill_evicted_turns counter
+tensorfold:spill_evicted_turns{rank="0"} 0
+tensorfold:spill_evicted_turns{rank="1"} 0
+# HELP tensorfold:spill_evicted_forks Abandoned forks evicted from disk.
+# TYPE tensorfold:spill_evicted_forks counter
+tensorfold:spill_evicted_forks{rank="0"} 0
+tensorfold:spill_evicted_forks{rank="1"} 0
+# HELP tensorfold:spill_evicted_conversations Whole conversations evicted from disk.
+# TYPE tensorfold:spill_evicted_conversations counter
+tensorfold:spill_evicted_conversations{rank="0"} 0
+tensorfold:spill_evicted_conversations{rank="1"} 0
+# HELP tensorfold:spill_evicted_shared Shared-prefix points evicted from disk.
+# TYPE tensorfold:spill_evicted_shared counter
+tensorfold:spill_evicted_shared{rank="0"} 0
+tensorfold:spill_evicted_shared{rank="1"} 0
+# HELP tensorfold:spill_quota_trims Writes that trimmed their conversation to its quota.
+# TYPE tensorfold:spill_quota_trims counter
+tensorfold:spill_quota_trims{rank="0"} 0
+tensorfold:spill_quota_trims{rank="1"} 0
+# HELP tensorfold:spill_recovered_points Published points found at start.
+# TYPE tensorfold:spill_recovered_points counter
+tensorfold:spill_recovered_points{rank="0"} 643
+tensorfold:spill_recovered_points{rank="1"} 643
+# HELP tensorfold:spill_dropped_temporaries Incomplete records removed at start.
+# TYPE tensorfold:spill_dropped_temporaries counter
+tensorfold:spill_dropped_temporaries{rank="0"} 0
+tensorfold:spill_dropped_temporaries{rank="1"} 0
+# HELP tensorfold:spill_pictures_kept Points written to disk with pictures before their cut.
+# TYPE tensorfold:spill_pictures_kept counter
+tensorfold:spill_pictures_kept{rank="0"} 0
+tensorfold:spill_pictures_kept{rank="1"} 0
+# HELP tensorfold:spill_pictures_refused Disk keeps and lookups with pictures turned away (ids and media disagree, or image cache off).
+# TYPE tensorfold:spill_pictures_refused counter
+tensorfold:spill_pictures_refused{rank="0"} 0
+tensorfold:spill_pictures_refused{rank="1"} 0
+# HELP tensorfold:prompt_cache_misses_no_prefix Of memory_misses: no kept state's tokens matched the prompt's.
+# TYPE tensorfold:prompt_cache_misses_no_prefix counter
+tensorfold:prompt_cache_misses_no_prefix 51
+# HELP tensorfold:prompt_cache_misses_tail_window Of memory_misses: a state matched but the tail, window or grid rules passed it over.
+# TYPE tensorfold:prompt_cache_misses_tail_window counter
+tensorfold:prompt_cache_misses_tail_window 0
+# HELP tensorfold:prompt_cache_misses_stale Of memory_misses: a state matched but the family staled it.
+# TYPE tensorfold:prompt_cache_misses_stale counter
+tensorfold:prompt_cache_misses_stale 0
+# HELP tensorfold:prompt_cache_refused_budget Of refused: the state alone passed the memory budget.
+# TYPE tensorfold:prompt_cache_refused_budget counter
+tensorfold:prompt_cache_refused_budget 0
+# HELP tensorfold:prompt_cache_refused_restores Of refused: restores in flight held the budget's rest.
+# TYPE tensorfold:prompt_cache_refused_restores counter
+tensorfold:prompt_cache_refused_restores 0
+# HELP tensorfold:prompt_cache_evicted_superseded Of evicted: a state a later prompt extends (its superseded turn).
+# TYPE tensorfold:prompt_cache_evicted_superseded counter
+tensorfold:prompt_cache_evicted_superseded 0
+# HELP tensorfold:prompt_cache_evicted_lru Of evicted: the least recently used state.
+# TYPE tensorfold:prompt_cache_evicted_lru counter
+tensorfold:prompt_cache_evicted_lru 0
+# HELP tensorfold:prompt_cache_failed_save Of failed: a keep's save failed.
+# TYPE tensorfold:prompt_cache_failed_save counter
+tensorfold:prompt_cache_failed_save 0
+# HELP tensorfold:prompt_cache_failed_restore Of failed: a restore failed (this pass's resume, or a peer's).
+# TYPE tensorfold:prompt_cache_failed_restore counter
+tensorfold:prompt_cache_failed_restore 0
+# HELP tensorfold:prompt_cache_resume_depth_percent Percent of a finished prompt pass's prompt tokens that a kept prompt state resumed, one observation per pass (0/25/50/75/90/99/100 percent).
+# TYPE tensorfold:prompt_cache_resume_depth_percent histogram
+tensorfold:prompt_cache_resume_depth_percent_bucket{le="0"} 51
+tensorfold:prompt_cache_resume_depth_percent_bucket{le="25"} 51
+tensorfold:prompt_cache_resume_depth_percent_bucket{le="50"} 63
+tensorfold:prompt_cache_resume_depth_percent_bucket{le="75"} 75
+tensorfold:prompt_cache_resume_depth_percent_bucket{le="90"} 84
+tensorfold:prompt_cache_resume_depth_percent_bucket{le="99"} 108
+tensorfold:prompt_cache_resume_depth_percent_bucket{le="100"} 109
+tensorfold:prompt_cache_resume_depth_percent_bucket{le="+Inf"} 109
+tensorfold:prompt_cache_resume_depth_percent_sum 4508.87549
+tensorfold:prompt_cache_resume_depth_percent_count 109
+# HELP tensorfold:kv_shard_parts KV-ownership parts (one a rank).
+# TYPE tensorfold:kv_shard_parts gauge
+tensorfold:kv_shard_parts 2
+# HELP tensorfold:kv_shard_part_rows Pool positions a part holds.
+# TYPE tensorfold:kv_shard_part_rows gauge
+tensorfold:kv_shard_part_rows 1050624
+# HELP tensorfold:kv_shard_carries Admissions that carried a kept prompt state into another part.
+# TYPE tensorfold:kv_shard_carries counter
+tensorfold:kv_shard_carries 0
+# HELP tensorfold:kv_shard_carry_rescued Carries made because the state's own part would drop it.
+# TYPE tensorfold:kv_shard_carry_rescued counter
+tensorfold:kv_shard_carry_rescued 0
+# HELP tensorfold:kv_shard_carry_pressure Carries made because the state's own part would evict kept states.
+# TYPE tensorfold:kv_shard_carry_pressure counter
+tensorfold:kv_shard_carry_pressure 0
+# HELP tensorfold:kv_shard_carry_others Carries made because resuming in place would stale another conversation's state.
+# TYPE tensorfold:kv_shard_carry_others counter
+tensorfold:kv_shard_carry_others 0
+# HELP tensorfold:kv_shard_carry_paused Carries made instead of waiting for the live stream holding the state.
+# TYPE tensorfold:kv_shard_carry_paused counter
+tensorfold:kv_shard_carry_paused 0
+# HELP tensorfold:kv_shard_moves Live streams moved whole to another part to admit a request.
+# TYPE tensorfold:kv_shard_moves counter
+tensorfold:kv_shard_moves 0
+# HELP tensorfold:kv_shard_moved_tokens Tokens carried or moved across parts.
+# TYPE tensorfold:kv_shard_moved_tokens counter
+tensorfold:kv_shard_moved_tokens 0
+# HELP tensorfold:kv_shard_moved_bytes Owner-only bytes the carries and moves sent.
+# TYPE tensorfold:kv_shard_moved_bytes counter
+tensorfold:kv_shard_moved_bytes 0
+# HELP tensorfold:kv_shard_transfers_failed Copies, carries or moves that finished failed (the prompt ran from 0, or the stream stayed).
+# TYPE tensorfold:kv_shard_transfers_failed counter
+tensorfold:kv_shard_transfers_failed 0
+# HELP tensorfold:kv_shard_staged Kept states whose pending spill writes were staged before their rows changed.
+# TYPE tensorfold:kv_shard_staged counter
+tensorfold:kv_shard_staged 0
+# HELP tensorfold:kv_shard_staled Kept states given up for a placement.
+# TYPE tensorfold:kv_shard_staled counter
+tensorfold:kv_shard_staled 4
+# HELP tensorfold:kv_shard_twins_made Filling prompts given borrowed twins.
+# TYPE tensorfold:kv_shard_twins_made counter
+tensorfold:kv_shard_twins_made 51
+# HELP tensorfold:kv_shard_twins_revoked Borrowed twins taken back for an admission or a restore.
+# TYPE tensorfold:kv_shard_twins_revoked counter
+tensorfold:kv_shard_twins_revoked 0
+# HELP tensorfold:kv_shard_refused_pinned Moves refused: a copy or carry reads the stream's rows.
+# TYPE tensorfold:kv_shard_refused_pinned counter
+tensorfold:kv_shard_refused_pinned 0
+# HELP tensorfold:kv_shard_refused_twin Carries or moves refused: the stream holds twins.
+# TYPE tensorfold:kv_shard_refused_twin counter
+tensorfold:kv_shard_refused_twin 0
+# HELP tensorfold:kv_shard_refused_loading Carries or moves refused: a transfer of the stream is in flight.
+# TYPE tensorfold:kv_shard_refused_loading counter
+tensorfold:kv_shard_refused_loading 0
+# HELP tensorfold:kv_shard_refused_partial Carries or moves refused: a prompt chunk is in flight.
+# TYPE tensorfold:kv_shard_refused_partial counter
+tensorfold:kv_shard_refused_partial 0
+# HELP tensorfold:kv_shard_refused_no_target Carries or moves refused: no part had the room.
+# TYPE tensorfold:kv_shard_refused_no_target counter
+tensorfold:kv_shard_refused_no_target 0
+# HELP tensorfold:kv_shard_refused_small Carries refused: the state is under the minimum carry.
+# TYPE tensorfold:kv_shard_refused_small counter
+tensorfold:kv_shard_refused_small 0
+# HELP tensorfold:kv_shard_no_part Admissions no part could make room for (the request waited).
+# TYPE tensorfold:kv_shard_no_part counter
+tensorfold:kv_shard_no_part 0
+# HELP tensorfold:kv_shard_plans Ownership op lists rank 0 sent the followers.
+# TYPE tensorfold:kv_shard_plans counter
+tensorfold:kv_shard_plans 325
+# HELP tensorfold:kv_shard_checks Planner digests the ranks compared (equal, or the pair ended).
+# TYPE tensorfold:kv_shard_checks counter
+tensorfold:kv_shard_checks 7
+# HELP tensorfold:kv_shard_prompt_fetches Prompt-chunk layers that fetched the owner's compressed rows.
+# TYPE tensorfold:kv_shard_prompt_fetches counter
+tensorfold:kv_shard_prompt_fetches 3420
+# HELP tensorfold:kv_shard_prompt_rows Compressed rows the prompt fetches sent.
+# TYPE tensorfold:kv_shard_prompt_rows counter
+tensorfold:kv_shard_prompt_rows 36844220
+# HELP tensorfold:kv_shard_prompt_picks Rows the prompt fetches would have sent unfolded (every pick of every row).
+# TYPE tensorfold:kv_shard_prompt_picks counter
+tensorfold:kv_shard_prompt_picks 1029269504
+# HELP tensorfold:kv_shard_prompt_bytes Bytes the prompt fetches sent.
+# TYPE tensorfold:kv_shard_prompt_bytes counter
+tensorfold:kv_shard_prompt_bytes 10611135360
+# HELP tensorfold:kv_shard_prompt_syncs Host reads the prompt fetches waited on.
+# TYPE tensorfold:kv_shard_prompt_syncs counter
+tensorfold:kv_shard_prompt_syncs 980
+# HELP tensorfold:kv_shard_fetch_rounds Decode rounds that fetched the owners' picked rows.
+# TYPE tensorfold:kv_shard_fetch_rounds counter
+tensorfold:kv_shard_fetch_rounds 7141
+# HELP tensorfold:kv_shard_owner_rounds Decode rounds the owners attended.
+# TYPE tensorfold:kv_shard_owner_rounds counter
+tensorfold:kv_shard_owner_rounds 0
+# HELP tensorfold:kv_shard_copies Cross-part extent transfers sent.
+# TYPE tensorfold:kv_shard_copies counter
+tensorfold:kv_shard_copies 0
+# HELP tensorfold:kv_shard_copy_bytes Bytes the cross-part extent transfers sent.
+# TYPE tensorfold:kv_shard_copy_bytes counter
+tensorfold:kv_shard_copy_bytes 0
+# HELP tensorfold:kv_shard_ranks Ranks whose own KV-ownership counters are reported (kv_shard_rank_*).
+# TYPE tensorfold:kv_shard_ranks gauge
+tensorfold:kv_shard_ranks 1
+# HELP tensorfold:kv_shard_part_free Rows of this part nothing holds.
+# TYPE tensorfold:kv_shard_part_free gauge
+tensorfold:kv_shard_part_free{part="0"} 563200
+tensorfold:kv_shard_part_free{part="1"} 761856
+# HELP tensorfold:kv_shard_part_live_rows Rows of this part live streams reserve.
+# TYPE tensorfold:kv_shard_part_live_rows gauge
+tensorfold:kv_shard_part_live_rows{part="0"} 0
+tensorfold:kv_shard_part_live_rows{part="1"} 0
+# HELP tensorfold:kv_shard_part_kept_rows Rows of this part kept prompt states hold outside live extents.
+# TYPE tensorfold:kv_shard_part_kept_rows gauge
+tensorfold:kv_shard_part_kept_rows{part="0"} 487424
+tensorfold:kv_shard_part_kept_rows{part="1"} 288768
+# HELP tensorfold:kv_shard_part_twin_rows Rows of this part borrowed twins hold.
+# TYPE tensorfold:kv_shard_part_twin_rows gauge
+tensorfold:kv_shard_part_twin_rows{part="0"} 0
+tensorfold:kv_shard_part_twin_rows{part="1"} 0
+# HELP tensorfold:kv_shard_part_hold_rows Rows of this part reserved for a restore or a live move in flight.
+# TYPE tensorfold:kv_shard_part_hold_rows gauge
+tensorfold:kv_shard_part_hold_rows{part="0"} 0
+tensorfold:kv_shard_part_hold_rows{part="1"} 0
+# HELP tensorfold:kv_shard_part_live Live streams whose extent lies in this part.
+# TYPE tensorfold:kv_shard_part_live gauge
+tensorfold:kv_shard_part_live{part="0"} 0
+tensorfold:kv_shard_part_live{part="1"} 0
+# HELP tensorfold:kv_shard_rank_prompt_fetches Prompt-chunk layers on this rank that fetched the owner's compressed rows.
+# TYPE tensorfold:kv_shard_rank_prompt_fetches counter
+tensorfold:kv_shard_rank_prompt_fetches{rank="0"} 3420
+# HELP tensorfold:kv_shard_rank_prompt_rows Compressed rows this rank's prompt fetches moved.
+# TYPE tensorfold:kv_shard_rank_prompt_rows counter
+tensorfold:kv_shard_rank_prompt_rows{rank="0"} 36844220
+# HELP tensorfold:kv_shard_rank_prompt_picks Rows this rank's prompt fetches would have moved unfolded.
+# TYPE tensorfold:kv_shard_rank_prompt_picks counter
+tensorfold:kv_shard_rank_prompt_picks{rank="0"} 1029269504
+# HELP tensorfold:kv_shard_rank_prompt_bytes Bytes this rank's prompt fetches moved.
+# TYPE tensorfold:kv_shard_rank_prompt_bytes counter
+tensorfold:kv_shard_rank_prompt_bytes{rank="0"} 10611135360
+# HELP tensorfold:kv_shard_rank_prompt_syncs Host reads this rank's prompt fetches waited on.
+# TYPE tensorfold:kv_shard_rank_prompt_syncs counter
+tensorfold:kv_shard_rank_prompt_syncs{rank="0"} 980
+# HELP tensorfold:kv_shard_rank_fetch_rounds Decode rounds on this rank that fetched the owners' picked rows.
+# TYPE tensorfold:kv_shard_rank_fetch_rounds counter
+tensorfold:kv_shard_rank_fetch_rounds{rank="0"} 7141
+# HELP tensorfold:kv_shard_rank_owner_rounds Decode rounds this rank attended as an owner.
+# TYPE tensorfold:kv_shard_rank_owner_rounds counter
+tensorfold:kv_shard_rank_owner_rounds{rank="0"} 0
+# HELP tensorfold:kv_shard_rank_copies Cross-part extent transfers this rank took part in.
+# TYPE tensorfold:kv_shard_rank_copies counter
+tensorfold:kv_shard_rank_copies{rank="0"} 0
+# HELP tensorfold:kv_shard_rank_copy_bytes Bytes of cross-part extent transfers this rank took part in.
+# TYPE tensorfold:kv_shard_rank_copy_bytes counter
+tensorfold:kv_shard_rank_copy_bytes{rank="0"} 0
+# HELP tensorfold:kv_shard_rank_plans Ownership op lists this rank applied.
+# TYPE tensorfold:kv_shard_rank_plans counter
+tensorfold:kv_shard_rank_plans{rank="0"} 325
+# HELP tensorfold:kv_shard_rank_checks Planner digest checks this rank took part in.
+# TYPE tensorfold:kv_shard_rank_checks counter
+tensorfold:kv_shard_rank_checks{rank="0"} 7
+# HELP tensorfold:kv_shard_rank_transfers_failed This rank's own sides of copies, carries or moves that failed.
+# TYPE tensorfold:kv_shard_rank_transfers_failed counter
+tensorfold:kv_shard_rank_transfers_failed{rank="0"} 0
+# HELP tensorfold:engram_lookup_seconds Seconds a read of Engram's table rows took, one observation per read (a decode round's, a prompt chunk's or a read-ahead's).
+# TYPE tensorfold:engram_lookup_seconds histogram
+tensorfold:engram_lookup_seconds_bucket{le="0.001"} 14170
+tensorfold:engram_lookup_seconds_bucket{le="0.0025"} 14327
+tensorfold:engram_lookup_seconds_bucket{le="0.005"} 14412
+tensorfold:engram_lookup_seconds_bucket{le="0.01"} 14426
+tensorfold:engram_lookup_seconds_bucket{le="0.025"} 14429
+tensorfold:engram_lookup_seconds_bucket{le="0.05"} 14436
+tensorfold:engram_lookup_seconds_bucket{le="0.1"} 14453
+tensorfold:engram_lookup_seconds_bucket{le="0.25"} 14566
+tensorfold:engram_lookup_seconds_bucket{le="0.5"} 14566
+tensorfold:engram_lookup_seconds_bucket{le="1"} 14566
+tensorfold:engram_lookup_seconds_bucket{le="2.5"} 14566
+tensorfold:engram_lookup_seconds_bucket{le="5"} 14566
+tensorfold:engram_lookup_seconds_bucket{le="10"} 14566
+tensorfold:engram_lookup_seconds_bucket{le="+Inf"} 14566
+tensorfold:engram_lookup_seconds_sum 27.885044
+tensorfold:engram_lookup_seconds_count 14566
+# HELP tensorfold:engram_rowcache_has_total Row-cache has() calls.
+# TYPE tensorfold:engram_rowcache_has_total counter
+tensorfold:engram_rowcache_has_total 0
+# HELP tensorfold:engram_rowcache_fast_total Row-cache has() calls the filter answered without the lock (TF_DS_ENGRAM_ROWCACHE_FILTER).
+# TYPE tensorfold:engram_rowcache_fast_total counter
+tensorfold:engram_rowcache_fast_total 0
+# HELP tensorfold:engram_rowcache_lock_total Row-cache has() calls that took the lock (the filter's positives, true or false).
+# TYPE tensorfold:engram_rowcache_lock_total counter
+tensorfold:engram_rowcache_lock_total 0
+# HELP tensorfold:service_refused Parked-work services asked for inside a round, a prompt chunk or a CUDA graph capture, skipped.
+# TYPE tensorfold:service_refused counter
+tensorfold:service_refused 0
+# HELP tensorfold:pair_failed Requests failed because the rank pair broke.
+# TYPE tensorfold:pair_failed counter
+tensorfold:pair_failed 0
+# HELP tensorfold:pair_busy_ms Milliseconds the engine thread has been busy without progress (0: idle).
+# TYPE tensorfold:pair_busy_ms gauge
+tensorfold:pair_busy_ms 0
+# HELP tensorfold:pair_stall_ms The stall bound: busy this long without progress breaks the pair (0: no stall monitor).
+# TYPE tensorfold:pair_stall_ms gauge
+tensorfold:pair_stall_ms 120000
+# HELP tensorfold:pair_stalled 1 while the engine thread has been busy past the stall bound.
+# TYPE tensorfold:pair_stalled gauge
+tensorfold:pair_stalled 0
+# HELP tensorfold:pair_broken 1 once the rank pair broke.
+# TYPE tensorfold:pair_broken gauge
+tensorfold:pair_broken 0

@@ -1,0 +1,18 @@
+19:03:13 start
+Done. Kernel patch 0273 (which per its brief bundles 0274) is implemented, gated, committed, and reported.
+
+## Summary
+
+**Commits** (branch `kernel-0273`, base `27baa93`, tree clean):
+- `7c8fee2` `0273 dsv41: a failed stretch capture joins its forks and owes the next capture no join` — `round.zig` failure path now joins every flagged fork (side, prefetch, `cs`, `ss_q`), ends the capture, clears all four flags whatever the calls returned, and logs a warning. Plus the ported host test (mutation-checked) and the optional `tf-cuda-test capture-fork` GPU test.
+- `0dfeaaa` `0274 core: the tool-call gate commits the drawn token as the first token` — one statement in `engine.zig` (`started`): read the draw before assigning `feed`. **Premise reproduced on our zig 0.17**: the shipped test failed pre-fix with `[0]` (the handle) where `[68]` (the drawn token) was owed.
+
+**Fork-flag audit** (in the report): `side_out`/`pf_out` (the source patch's pair), `cs_out` (our tree's, source lacks it), `ss_q_out` (also covered by `forward`'s errdefer) — all joined + cleared; unflagged `ss_jo` shown safe by record-then-wait ordering. Decision summary: joined/cleared four forks instead of the source's two, warn at the call site, one report covering both ports (no BRIEF-0274.md exists).
+
+**Gate**: `zig build test` exit 0; syntax check identical 9-error set to base; harness `h0273/` — 49-case matrix + negative control + `ss_jo` case + feed-gate probe all matched their independent references (`run.log` kept); `zig build` compiles the ported GPU test.
+
+**Report**: `runs/kernel-round-20261122d/report-0273.md` (gate results, decisions, gaps for the hardware gate: run `capture-fork` on GPU, count the new warning line; eager-stretch stale-flag edge self-heals, logged as follow-up).
+
+*Skipped / not checked:* GPU execution of `capture-fork` and the warning's production observability (no GPU here); no shared `continue.md`/`todo.md` edits (concurrent agents, worktree must stay clean — follow-ups are in the report for the driver). *Risk:* one unrelated loopback test flaked once mid-run (`rank_wire`), green on all clean runs.
+19:41:33 pi exited rc=0
+19:41:33 committed 0dfeaaa 0274 core: the tool-call gate commits the drawn token as the first token

@@ -1,0 +1,23 @@
+17:08:25 start
+Done. **Kernel patch 0269 complete.**
+
+## Checkpoint summary
+
+**Premise — holds.** `lanes.Built.build` packs a verify round's windows back-to-back in round order, and at the served config every stream drafts, so the participating windows' rows in `rd.taps` are consecutive in **100% of rounds** — the gather copy is pure overhead there. The ~210 KiB figure re-checks (7 rows × 3 taps × 5,120 ch × 2 B = 215,040 B).
+
+**Commit** `5d1b4cdfa09ff34564eaa85a4f9038ed0b26b21c` (exactly one, subject per brief, tree clean) — 5 files:
+- `draft_taps_direct.zig` (new, pure): switch parse + `inPlace` contiguity predicate + truth-table and byte-matrix tests
+- `draft.zig`: `absorb_many` skips the gather `copyRows` and calls `mainKeys(first row, total count)` when rows are consecutive; gaps keep today's packing; engagement banner behind atomic `swap` (0265 pattern)
+- `ops.zig` (`bool` at load, no `?cuda.Function` — no kernel exists), `dsv41.zig` (registration), `layer_main.zig` (one comment)
+
+**Graph-capture contract:** contiguity is decided on the host at enqueue time in `absorb_many`, from the same per-round window state that already decides the gather's pointers today. The absorb is eager — outside both capture sites (`round.zig:1904`, `draft.zig:224`) — so no captured graph replay can see a different decision. Both ranks derive identical items from the frame; the arm is bit-identical regardless.
+
+**Gate — all green:** `zig build test` exit 0 ×3 (one earlier run hit the known `lane_host.test.prefill` flake signature, didn't recur); `cuda syntax check: ok` (with the fixed stubs — the shared stubs tree fails on the *unmodified base*, same as reports 0260/0265); harness `h0269/`: **28,016 cases, 0 failures**, in-place reads match an independently written packed-copy reference byte for byte (1–4 windows × lengths 1–7 × 5 gap layouts + served width).
+
+**Report** at `runs/kernel-round-20261122c/report-0269.md` with the real hash, launch counts (1–4 `copyRows` launches and 0.2–0.86 MiB copied per rank per round removed), contiguity frequency, decisions/deviations, and known gaps (hardware-only timing and banner counting; `layer_main`'s `dr.at` fixture check needs the switch off; the out-of-scope tap-launch half recorded as follow-up).
+
+**Caveat to know:** the independent reviewer verified every contract point but its final report was lost to provider 500s (salvaged session shows no findings; the one open check — `dr.taps_w` vs `rd.taps`'s dummy-row wrinkle — resolved by hand: only a nonsensical zero-tap config diverges, and both arms read zero bytes there). Timing of the saved launch is unmeasured — hardware gate only.
+
+*Skipped per brief: the tap-launch-when-drafter-disabled half. Not checked: real GPU replay timing.*
+18:04:30 pi exited rc=0
+18:04:30 committed 5d1b4cd 0269 dsv41: TF_DS_DRAFT_TAPS_DIRECT (off by default): the drafter reads contiguous verify-round taps in place

@@ -1,0 +1,16 @@
+Done. Kernel patch 0265 is complete.
+
+## Summary
+
+**Premise:** holds. The drafter's head projects `N × blockRows(steps)` rows while Markov and confidence read only the first `steps` per stream — at the served batch (4×5×3) that's 20 rows vs 12 needed.
+
+**Implementation** (`c04f020`, one commit, brief's exact subject, worktree clean):
+- `draft_head_scored.zig` (new, pure): `TF_DS_DRAFT_HEAD_SCORED` parse (idx_fused pattern), row-map host reference, arm predicate.
+- `draft.zig`: on path packs scored rows at `stream*steps+step` in the same buffers — one kit `_collapse` per stream at row offsets (bit-identity by construction, no new CUDA code), one `_rmsnorm`, one head GEMM at `M=N*steps`. Every reader (`_score`, noise hook, spec hook, conf packer) takes the packed stride `lrow`; the probe falls back to the full arm since it hashes the whole recorded logits buffer.
+- `ops.zig` bool at load; `dsv41.zig` export + refAll.
+
+**Gate:** `zig build test` 27/27 steps, 826/826 uncached (one documented flake hit once, clean on reruns); cuda syntax ok (the shared stubs are broken on the base itself — used the round's fixed stubs copied into `h0265/stubs/`); `h0265/` harness: 150 layouts (124 shallow), 0 failures, 3 injected bugs all caught. Independent reviewer subagent: "OK with notes" — both code notes folded in.
+
+**Report:** `report-0265.md` with the reader/row-index table, launch counts (4→7 at N=4, head rows 20→12, −1.97 MiB/rank/pass), the served-policy engagement rule (engages iff `steps ≤ 4` — all 3–4-stream passes and shallow 1–2-stream passes), GEMM M-invariance evidence, and the hardware-only gaps (per-row invariance inside the glinear cubin; the ~0.07 ms/pass net timing).
+
+Skipped/not checked: no GPU, so glinear's per-row invariance rests on the documented plan design ("a layer keeps one reduction for every row count") plus launch-arg evidence — only the hardware A/B can settle it; the +3 launches' net timing is unmeasured.

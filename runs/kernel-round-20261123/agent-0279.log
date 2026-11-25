@@ -1,0 +1,14 @@
+02:49:08 start
+Done. **Patch 0279 is committed and reported.**
+
+**Commit** (branch `kernel-0279`, base `10c9866`): `f6e126b94f3532ae5395357a18ed18038609f24b` — `0279 dsv41: TF_DS_IDX_PICK_WIDE (off by default): the indexer's small-row selection up to 65,536 blocks`. Working tree clean.
+
+**Premise held**: at ratio 2, contexts 262,145–1,048,576 tokens give nbk = 32,768 / 65,536 > the 16,384 fused bound (`nb = bucket/ratio`, `round.zig:1183`; buckets double to `pool_cap` = 1M), so every deep-context decode round pays the 3-launch unfused fallback at the candidate source. With the switch on that drops to **2 launches** (`block_max` unchanged + new `tf_ds_idx_pick_wide_kernel` reading the maxima from global memory); 65,537 keeps the fallback (the radix prefix's constant column bytes break there — the harness's negative control proves it: the kernel literally cannot pick column 65,536).
+
+**Gate (all green)**: `zig build test` (5 clean runs after one uncaptured flake), `zig build`, cuda syntax check = identical 9-error stub set to base (diffed against `git archive 10c9866`), and the h0279 harness: kernel source extracted verbatim and emulated (fiber SIMT, one OS thread, blocks sequential) vs an independent sort reference — 36 wide cases (nbk 16,385/32,768/65,536 × rows 1/7 × equal-maxima/signed-zeros/−inf/NaN patterns) all byte-match, plus `gate.zig` against the real worktree modules (65,537 → unfused). An independent review subagent found no P0/P1; its three small P2s are fixed inside the commit.
+
+**Report**: `runs/kernel-round-20261123/report-0279.md` — premise evidence, launch table, cost estimate (≈1–2 µs/round at 32K, 2–4 µs at 64K blocks from L2 traffic; crossover vs the unfused trio is GPU-only), decisions, and gaps.
+
+Skipped: shared-file updates (`decisions.md`/`todo.md`/`continue.md` — concurrent agents, tree must stay clean; follow-ups are in the report) and prompt-arm/rows>7 coverage. Risk to know: bit-identity vs the unfused GPU chain is proven CPU-side via the shared total order only — the hardware gate should still byte-diff `cblk` at 32K/65K and count the one engagement banner line.
+03:54:48 pi exited rc=0
+03:54:48 committed f6e126b 0279 dsv41: TF_DS_IDX_PICK_WIDE (off by default): the indexer's small-row selection up to 65,536 blocks

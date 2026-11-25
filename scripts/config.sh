@@ -130,7 +130,7 @@ CONTEXT="${CONTEXT:-1048576}"
 # 1,062 MiB a rank against 1,783 MiB replicated; decode 1-4% slower). Empty with KV_SHARD=1: the pool it needs (2,101,248 at 1,048,576).
 POOL="${POOL:-}"
 PARALLEL="${PARALLEL:-4}"              # requests at once (the engine's streams, TF_DS_STREAMS; the family measured 4)
-ROUND_ROWS="${ROUND_ROWS:-}"           # empty or 16: the pinned kit only has row kernels through 16 (issue #23)
+ROUND_ROWS="${ROUND_ROWS:-}"           # empty (16) or 16..48: above 16 the engine splits a gate the kit cannot launch whole into 16-row pieces (0017); TF_DS_PLAIN_ROWS keeps the cuBLAS shapes at 16
 MAX_TOKENS="${MAX_TOKENS:-32768}"      # a reply's budget when a request sets none
 THINKING="${THINKING:-1}"              # think first unless a request turns it off
 # The reasoning effort when a request names none: low, medium, high or xhigh (empty: the chat template's default)

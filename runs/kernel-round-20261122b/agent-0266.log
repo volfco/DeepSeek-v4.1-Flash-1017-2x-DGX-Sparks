@@ -1,0 +1,11 @@
+**Patch 0266 complete.** Commit `e7bfa00` on `kernel-0266` (parent `27baa93`), tree clean, report at `runs/kernel-round-20261122b/report-0266.md`, harness at `h0266/`.
+
+**Premise:** holds — rows at positions `(2k, 2k+1)` of one request share a source-slot pair, so a 7-row window computes 4 distinct pairs (both parities), verified from `setGlue` and pinned by tests.
+
+**Design (summarized):** `TF_DS_COMPRESS2_PAIR_ONCE` (off by default, only under `TF_DS_FUSED_COMPRESS2_NORM=1`). New kernels `tf_ds_compress2x_norm{128,512}_pair_kernel` in `dsv41_torch.cu` (needs its `__device__` helpers — bit-exact kit PTX not duplicated). Each row's block still scatters its own raw-ring slot; only the key's first row computes (0197's arithmetic verbatim) and stores the result straight into every member's output row — no staged shared result, **no new barrier**, no cross-block ordering. Grid unchanged (R blocks × D threads — the register's flat 1.75/2.00/2.01 µs at R=1/7/32 says fewer, fatter blocks would serialise pairs). Savings: 7-row window 7→4 pairs; 4×(5..7)-row round 20–28→12–16 (8–12 saved).
+
+**Gates:** `zig build test` exit 0; syntax check `ok` under the round's stub set (the brief-named stub set fails identically at base — stale stubs, zero new errors from this patch, documented with evidence); harness **184 cases, 0 failures** (new-vs-0197 and new-vs-independent-reference byte-equal on rings, latents incl. padding, invalid flag; negative control fails 340). Independent review: safe to commit; its G>32 coverage gap closed before commit.
+
+**Decision recap:** fields on `Exact` not `Ops` (kernel must live in `dsv41_torch.cu`); general key grouping instead of a 7-row-only fast path (5–6-row windows must save too); decisions recorded in the report since the Sparks logs are off-limits.
+
+*Skipped/unchecked: GPU bit-identity and wall-time are hardware-gate-only (ceiling ≤ ~0.1 µs of 2.0 µs; treat sub-0.1 µs as noise); PDL=1 arm unexercised (arithmetic-identical by construction); the harness's gi generator remains a third copy of the `setGlue` rule — a future `setGlue` edit would not be auto-cross-checked.*

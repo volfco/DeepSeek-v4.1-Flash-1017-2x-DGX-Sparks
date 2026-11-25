@@ -1,0 +1,10 @@
+# k296: sched lane 0294/0295/0296 on bench-fused-next-87e92a2 (= 1421187 [2bb052f + 0280..0283, all off] + 0294..0296).
+# ctl arms: every new switch off (0296's counter rides TF_DS_ROUND_PROFILE=1, which arms.sh sets in every arm).
+# dm065: TF_DS_DRAFT_MS=0.65 — the serving readers (depth.zig roundCost, plan_lanes) multiply it by drafts/steps,
+#        so the per-step unit is ~3.9 ms pass / 6 steps, not the report's whole-pass 3.9/7.2.
+ctl1|tensorfold-dsv41:bench-fused-next-87e92a2|
+conf_a|tensorfold-dsv41:bench-fused-next-87e92a2|TF_DS_CONF_LEADER_ONLY=1
+fit_a|tensorfold-dsv41:bench-fused-next-87e92a2|TF_DS_ROUND_MS_FIT=1
+dm065_a|tensorfold-dsv41:bench-fused-next-87e92a2|TF_DS_DRAFT_MS=0.65
+ctl2|tensorfold-dsv41:bench-fused-next-87e92a2|
+conf_b|tensorfold-dsv41:bench-fused-next-87e92a2|TF_DS_CONF_LEADER_ONLY=1

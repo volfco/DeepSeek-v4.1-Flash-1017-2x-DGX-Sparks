@@ -1,0 +1,60 @@
+# fx1L: per transfer, microseconds (rank0 / rank1)
+class                    n     bytes |       stage    wait p50   wait mean      copy   ring mean | |dp| mean    p50 skew cost | bal.ring  floor
+attn L0 (hand-off)     195    107231 |  14.9/3.3     0.5/42.9    6.3/48.1   3.4/1.4   27.1/55.3  |      32.3   22.0      16.1 |     41.2   15.5
+attn_gather           5854    103733 |   3.4/3.4    10.5/8.6    16.0/13.1   2.1/2.2   24.1/21.7  |      20.0   13.0      10.0 |     22.9   15.3
+attn after kv         1512    102955 |   3.1/3.3    47.6/0.5    49.4/1.2    1.4/3.8   56.4/11.0  |       7.1    3.1       3.5 |     33.7   15.2
+moe_gather            7581    103818 |   3.5/3.5    11.6/8.4    18.1/14.4   1.9/1.8   25.6/21.9  |      23.2   14.1      11.6 |     23.8   15.3
+kv                    1515    748960 |  14.3/8.4     2.1/50.5    6.3/51.8   0.4/5.2   22.8/67.3  |      21.9   16.3      10.9 |     45.1   51.8
+engram                 377    507654 |   7.6/6.9    14.2/37.4   19.2/44.2   3.7/2.9   33.1/57.0  |      29.4   19.3      14.7 |     45.0   38.2
+head                   193   1283422 |  12.4/13.6   58.0/52.2   73.7/57.3   6.8/7.1   98.3/83.3  |      44.9   15.5      22.5 |     90.8   82.1
+pass hidden           1133    119897 |   3.7/3.7    10.5/15.4   15.7/18.4   2.5/1.4   26.3/26.8  |      16.6    6.0       8.3 |     26.6   16.2
+pass markov           1091        16 |   2.9/2.9     6.3/1.0    12.0/4.9    0.9/0.9   17.1/10.3  |      11.8    5.2       5.9 |     13.7    9.4
+  per cycle (6-step pass + forward): balanced ring time 2.75 ms, standalone floor 1.95 ms, excess 0.81 ms; skew cost by |dp|/2: 1.04 ms
+  random skew only, forward (31 plain attention + 40 MoE gathers): ring 1.66 ms, floor 1.08 ms, excess 0.58 ms; by |dp|/2: 0.77 ms | pass (12 gathers): excess 0.09 ms; by |dp|/2: 0.09 ms
+  kv rank 0: sends bytes in 1515/1515 records; ring time = 18.3 + 0.90 us per decode row (147,456 B a row)
+  kv rank 1: sends bytes in 0/1515 records; ring time = 33.2 + 6.70 us per decode row (147,456 B a row)
+# fx1Lb: per transfer, microseconds (rank0 / rank1)
+class                    n     bytes |       stage    wait p50   wait mean      copy   ring mean | |dp| mean    p50 skew cost | bal.ring  floor
+attn L0 (hand-off)     195    107231 |  11.9/3.2     0.7/29.8   11.3/31.3   3.5/2.2   28.7/39.3  |      24.0   12.8      12.0 |     34.0   15.5
+attn_gather           5854    103733 |   3.4/3.4    11.7/8.1    16.8/12.0   2.2/2.3   25.0/20.6  |      20.6   14.6      10.3 |     22.8   15.3
+attn after kv         1512    102955 |   3.1/3.2    48.7/0.5    49.3/1.2    1.5/2.5   56.4/10.0  |       7.5    3.8       3.7 |     33.2   15.2
+moe_gather            7581    103818 |   3.5/3.5    10.4/9.0    17.3/15.2   1.9/1.8   24.9/22.8  |      23.5   15.0      11.8 |     23.9   15.3
+kv                    1515    748960 |  14.6/8.6     2.1/48.3    7.6/50.2   0.4/5.4   24.3/66.2  |      21.7   14.9      10.8 |     45.2   51.8
+engram                 377    507654 |   7.6/6.8    12.5/37.8   19.7/44.9   3.8/3.1   34.1/57.8  |      32.0   19.7      16.0 |     45.9   38.2
+head                   193   1283422 |  12.2/13.8   43.0/69.6   60.9/68.6   7.1/7.0   86.1/95.1  |      51.7   31.8      25.8 |     90.6   82.1
+pass hidden           1133    119897 |   3.7/3.6    10.2/15.6   14.8/17.8   2.4/1.4   24.7/26.2  |      16.9    6.0       8.5 |     25.4   16.2
+pass markov           1091        16 |   2.9/2.9     5.8/1.0     8.0/5.9    0.9/0.9   13.2/11.1  |       8.8    4.5       4.4 |     12.1    9.4
+  per cycle (6-step pass + forward): balanced ring time 2.73 ms, standalone floor 1.95 ms, excess 0.78 ms; skew cost by |dp|/2: 1.05 ms
+  random skew only, forward (31 plain attention + 40 MoE gathers): ring 1.66 ms, floor 1.08 ms, excess 0.58 ms; by |dp|/2: 0.79 ms | pass (12 gathers): excess 0.07 ms; by |dp|/2: 0.08 ms
+  kv rank 0: sends bytes in 1515/1515 records; ring time = 18.7 + 1.11 us per decode row (147,456 B a row)
+  kv rank 1: sends bytes in 0/1515 records; ring time = 36.8 + 5.79 us per decode row (147,456 B a row)
+# np1L: per transfer, microseconds (rank0 / rank1)
+class                    n     bytes |       stage    wait p50   wait mean      copy   ring mean | |dp| mean    p50 skew cost | bal.ring  floor
+attn L0 (hand-off)     195    107231 |   8.5/3.5     0.5/26.6   10.9/34.6   2.3/1.4   23.7/41.2  |      31.7   17.1      15.9 |     32.4   15.5
+attn_gather           5854    103733 |   3.3/3.4    12.4/6.2    15.5/10.2   1.4/1.3   22.0/16.9  |      10.5    4.4       5.2 |     19.4   15.3
+attn after kv         1512    102955 |   3.3/3.4    49.1/0.5    50.2/1.2    1.4/1.4   56.7/7.9   |       5.9    2.7       2.9 |     32.3   15.2
+moe_gather            7581    103818 |   3.5/3.5     3.8/15.3   11.2/17.4   1.4/1.3   17.7/23.9  |      13.2    4.9       6.6 |     20.8   15.3
+kv                    1515    748960 |   8.1/3.5     1.1/42.0    5.0/45.0   0.4/4.8   14.8/55.0  |      10.0    4.6       5.0 |     34.9   51.8
+engram                 377    507654 |   7.5/6.5    23.5/25.7   26.5/36.8   3.4/2.9   40.3/49.2  |      18.7    4.7       9.4 |     44.8   38.2
+head                   193   1283422 |  12.0/14.6   41.0/68.8   51.4/72.7   7.1/6.9   76.6/98.9  |      33.9   15.2      17.0 |     87.8   82.1
+pass hidden           1133    119897 |   3.6/3.6    10.0/15.1   13.5/17.4   2.2/1.4   23.6/25.9  |      14.1    6.1       7.0 |     24.7   16.2
+pass markov           1091        16 |   2.9/2.9     1.0/5.8     5.1/8.4    0.9/0.9   10.2/13.5  |       9.3    5.2       4.7 |     11.9    9.4
+  per cycle (6-step pass + forward): balanced ring time 2.40 ms, standalone floor 1.95 ms, excess 0.46 ms; skew cost by |dp|/2: 0.61 ms
+  random skew only, forward (31 plain attention + 40 MoE gathers): ring 1.44 ms, floor 1.08 ms, excess 0.35 ms; by |dp|/2: 0.43 ms | pass (12 gathers): excess 0.07 ms; by |dp|/2: 0.07 ms
+  kv rank 0: sends bytes in 1515/1515 records; ring time = 9.8 + 0.98 us per decode row (147,456 B a row)
+  kv rank 1: sends bytes in 0/1515 records; ring time = 14.9 + 7.90 us per decode row (147,456 B a row)
+# ns1L: per transfer, microseconds (rank0 / rank1)
+class                    n     bytes |       stage    wait p50   wait mean      copy   ring mean | |dp| mean    p50 skew cost | bal.ring  floor
+attn L0 (hand-off)     195    107231 |  12.9/3.2     0.5/38.6    5.7/42.8   3.8/1.5   24.6/50.2  |      29.7   21.7      14.8 |     37.4   15.5
+attn_gather           5854    103733 |   3.5/3.4     7.9/12.6   12.4/15.1   2.2/2.1   20.8/23.3  |      14.9    8.0       7.5 |     22.0   15.3
+attn after kv         1512    102955 |   3.2/3.3    47.0/0.5    47.4/1.3    1.5/2.7   54.8/10.3  |       6.3    2.8       3.1 |     32.6   15.2
+moe_gather            7581    103818 |   3.5/3.5     9.7/9.2    15.7/14.5   1.8/1.9   23.1/22.1  |      16.6    7.1       8.3 |     22.6   15.3
+kv                    1515    748960 |  14.1/8.6     1.9/48.6    5.4/50.0   0.4/5.2   21.9/65.8  |      17.5   11.6       8.7 |     43.8   51.8
+engram                 377    507654 |   7.7/6.2    16.4/36.2   20.6/42.2   3.7/2.9   34.8/54.5  |      26.0   15.3      13.0 |     44.7   38.2
+head                   193   1283422 |  13.2/14.4   43.9/63.6   62.4/71.9   6.9/7.3   87.7/98.7  |      51.3   21.5      25.6 |     93.2   82.1
+pass hidden           1133    119897 |   3.7/3.6    11.4/14.7   15.5/16.8   1.6/1.4   25.3/25.6  |      16.1    6.9       8.0 |     25.5   16.2
+pass markov           1091        16 |   2.9/3.0     1.1/5.8     4.8/8.7    0.9/0.9    9.9/14.1  |       8.7    4.0       4.4 |     12.0    9.4
+  per cycle (6-step pass + forward): balanced ring time 2.64 ms, standalone floor 1.95 ms, excess 0.69 ms; skew cost by |dp|/2: 0.80 ms
+  random skew only, forward (31 plain attention + 40 MoE gathers): ring 1.59 ms, floor 1.08 ms, excess 0.50 ms; by |dp|/2: 0.56 ms | pass (12 gathers): excess 0.07 ms; by |dp|/2: 0.07 ms
+  kv rank 0: sends bytes in 1515/1515 records; ring time = 17.5 + 0.86 us per decode row (147,456 B a row)
+  kv rank 1: sends bytes in 0/1515 records; ring time = 34.5 + 6.15 us per decode row (147,456 B a row)

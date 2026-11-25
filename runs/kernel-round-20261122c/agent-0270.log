@@ -1,0 +1,24 @@
+17:08:27 start
+Extension error (/home/colum/.pi/agent/npm/node_modules/pi-subagents/index.js): Auto-drain failed for session '/home/colum/Workspace/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/kernel-round-20261122c/sessions/0270/2026-11-22T17-08-27-776Z_01a2043b-09ff-7230-a6d5-f78ab1431c90.jsonl': Waited 13m5s for 3 async run(s); done. Outcome: 3 failed.
+Result [5bdfd294-98bc-4964-8b47-c2aaa0c8fe48]: /tmp/pi-subagents-uid-1000/async-subagent-results/output-archives/5bdfd294-98bc-4964-8b47-c2aaa0c8fe48.json
+ Resume-first: 2 failed runs have persisted child sessions. Inspect status and revive each original run before reporting failure or launching a replacement. Launch a replacement only if revive fails or the user explicitly asks for one. Completion/control events have been observed; inspect status if a notification is not visible yet.
+Workflow receipt [5bdfd294-98bc-4964-8b47-c2aaa0c8fe48]: /tmp/pi-subagents-uid-1000/async-subagent-runs/5bdfd294-98bc-4964-8b47-c2aaa0c8fe48/workflow-receipt.json.
+**Patch 0270 complete.** All deliverables in place:
+
+## Summary
+
+**Commit `6926a5eb7c37895b50294682b51947af82194caa`** — `0270 dsv41: TF_DS_PROMPT_PICKS_ONCE (off by default): prompt attention pads its picks once per selection`, one commit on `kernel-0270` (base `27baa93`), working tree clean.
+
+**What it does:** `prompt.zig`'s attention reuses the padded pick list (`cidx → cidxp`, −1 to whole 16-column tiles) across layers sharing an indexer selection instead of re-running the fill + copy per layer. Re-pad triggers: indexer output, a replay cut that moves rows, a new chunk (all `Tracker.stale()` hooks), with an exact `(rows, kk)` match required for reuse. Host-structure validity only; banner logs once at first reuse.
+
+**Premise held:** layers 2–7 share 63 picks on a cold 127-token prompt exactly as the brief claims (5 fills + 5 copies saved there); the rule covers the whole chunk — **38 fills + 38 copy launches → 8 + 8 per rank per chunk**. Prefill is not graph-captured (capture sites are decode-only) — contract question answered in the report.
+
+**Gate (all pass):** `zig build test` 27/27, 511/511, exit 0 · CUDA syntax: round-local stubs `ok` (shared stubs fail on the pristine base — known drift; no `.cu` in this patch) · harness `h0270/` 10/10 with the full case matrix (cold prompt, multi-chunk × slices, replay cut incl. hook-only and rows-key cases, pick sweep 1..64 + >64, hand corner table), every read byte-equal to an independent reference, plus 3 negative controls proving the checks aren't vacuous.
+
+**Reviews:** two independent reviewer subagents, both VERDICT: OK, no S1. Both hit provider 500s mid-review and were revived to completion (noted in the report). All S2s fixed (dead `Tracker` default in `Chunk.init`; build.sh drift-guard gap) and the cheap S3s (independent tile width, hand corner table, `TF_DS_REPLAY_FLOOR=0` row).
+
+**Report:** `runs/kernel-round-20261122c/report-0270.md` (real hash, launch-count table, gate results, design decisions, hardware-gate-only gaps: banner count + exact-panel bit-compare + fill/copy count profile).
+
+**Left open / risks to know:** the saving is host launch overhead on prefill only (60 ops/chunk — expect within-noise wall time; price by launch count at the hardware gate); `tri.decode_rows` is a mutable global so pad counts can vary mid-chunk (bytes unaffected); the switch is outside the pair-switch handshake (byte-safe, but set alike on both ranks by convention).
+18:13:29 pi exited rc=0
+18:13:29 committed 6926a5e 0270 dsv41: TF_DS_PROMPT_PICKS_ONCE (off by default): prompt attention pads its picks once per selection

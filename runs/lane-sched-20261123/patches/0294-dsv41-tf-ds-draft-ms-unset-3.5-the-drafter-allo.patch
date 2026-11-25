@@ -1,0 +1,194 @@
+From cbd8a238eeee812ea41a77731a58c267f7e0ef15 Mon Sep 17 00:00:00 2001
+From: colum <git@volf.co>
+Date: Mon, 23 Nov 2026 12:28:05 -0800
+Subject: [PATCH 1/4] 0294 dsv41: TF_DS_DRAFT_MS (unset: 3.5) the drafter
+ allowance, and chooseK's wide-round clamp
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+TF_DS_DRAFT_MS is a float in milliseconds overriding the served draft_ms const for every
+reader: the round loop's chained head step (facts' mtp_step_ms and the solo allowance,
+through Model.draft_ms parsed at Model.open — a malformed value refuses startup) and
+chooseK's callers. Measured pass: 3.75-3.90 ms at one stream, ~7.2 at four, ~11 at eight
+(runs/trace-review-20261123/out/pass_x4.txt), so the knob is set at the served stream
+count. chooseK's clamp to round_ms.len priced a round wider than the 24-row table at its
+flat last entry (every further draft free: k pinned at kmax); it now prices each row past
+the table at the table's tail slope. Unreachable at the served 16-row rounds (priced rows
+stop at 20).
+---
+ zig/src/families/dsv41/draft.zig      | 65 +++++++++++++++++++++++++--
+ zig/src/families/dsv41/lanes.zig      |  4 +-
+ zig/src/families/dsv41/layer_main.zig |  4 +-
+ zig/src/families/dsv41/model.zig      |  2 +
+ zig/src/families/dsv41/native.zig     |  3 ++
+ 5 files changed, 70 insertions(+), 8 deletions(-)
+
+diff --git a/zig/src/families/dsv41/draft.zig b/zig/src/families/dsv41/draft.zig
+index 708916e..b9e4d08 100644
+--- a/zig/src/families/dsv41/draft.zig
++++ b/zig/src/families/dsv41/draft.zig
+@@ -1007,12 +1007,48 @@ pub fn passSteps(n_streams: usize, slots: usize, drafts: usize, round_rows: usiz
+ pub const round_ms = [_]f64{ 30.0, 35.2, 39.9, 44.9, 48.6, 52.1, 55.6, 59.1, 62.7, 66.3, 69.6, 72.9, 75.5, 78.2, 81.3, 84.4, 87.5, 90.6, 93.7, 96.8, 99.9, 103.0, 106.1, 109.2 };
+ pub const draft_ms: f64 = 3.5;
+ 
++/// TF_DS_DRAFT_MS (unset: the served draft_ms above), a float in milliseconds: the drafter allowance every reader of
++/// the const takes (the round loop's chained head step through Model.draft_ms, chooseK's callers through
++/// draftMsFromEnv). The const is a one-stream allowance; the measured pass is 3.75-3.90 ms at one stream, about 7.2 at
++/// four and about 11 at eight (runs/trace-review-20261123/out/pass_x4.txt), so set it at the served stream count. A
++/// malformed value refuses startup (the block knob's rule).
++pub const draft_ms_env: [:0]const u8 = "TF_DS_DRAFT_MS";
++
++pub fn parseDraftMs(text: ?[]const u8) !f64 {
++    const s = std.mem.trim(u8, text orelse return draft_ms, " ");
++    if (s.len == 0) return draft_ms;
++    const v = std.fmt.parseFloat(f64, s) catch return error.BadDraftMs;
++    if (!(v > 0.0) or v > 60_000.0) return error.BadDraftMs;
++    return v;
++}
++
++pub fn draftMsFromEnv() !f64 {
++    return parseDraftMs(if (std.c.getenv(draft_ms_env)) |v| std.mem.span(v) else null);
++}
++
++test "TF_DS_DRAFT_MS: unset is the served draft_ms, a float in ms overrides it, garbage refuses" {
++    try std.testing.expectEqual(@as(f64, 3.5), try parseDraftMs(null));
++    try std.testing.expectEqual(@as(f64, 3.5), try parseDraftMs(""));
++    try std.testing.expectEqual(@as(f64, 3.5), try parseDraftMs(" "));
++    try std.testing.expectEqual(@as(f64, 7.2), try parseDraftMs("7.2"));
++    try std.testing.expectEqual(@as(f64, 11.0), try parseDraftMs(" 11 "));
++    try std.testing.expectError(error.BadDraftMs, parseDraftMs("0"));
++    try std.testing.expectError(error.BadDraftMs, parseDraftMs("-1"));
++    try std.testing.expectError(error.BadDraftMs, parseDraftMs("ms"));
++    try std.testing.expectError(error.BadDraftMs, parseDraftMs("nan"));
++    try std.testing.expectError(error.BadDraftMs, parseDraftMs("inf"));
++}
++
+ extern "c" fn exp(x: f64) f64;
+ 
+ /// MultiDecoder._choose_k: the k in 0 .. kmax with the most expected tokens a millisecond (1 + the prefix survivals'
+ /// sum, survival the sigmoid of each confidence, over the round's table cost with the other streams at their table
+-/// depth), in Python's float64 arithmetic (libm's exp, as Python's math.exp calls it); the first best wins.
+-pub fn chooseK(conf: []const f32, kmax: usize, live: usize, drafts: usize, round_rows: usize) usize {
++/// depth), in Python's float64 arithmetic (libm's exp, as Python's math.exp calls it); the first best wins. `draft_cost`
++/// is the drafter allowance in ms (the served draft_ms; TF_DS_DRAFT_MS prices the round loop through Model.draft_ms and
++/// replay tools pass it in). A round wider than round_ms prices each row past the table at the table's tail slope: the
++/// old clamp to the last entry made every further draft free and pinned k at kmax (unreachable at the served 16-row
++/// rounds, where the priced rows stop at 20; reachable under wider rounds or deeper pins).
++pub fn chooseK(conf: []const f32, kmax: usize, live: usize, drafts: usize, round_rows: usize, draft_cost: f64) usize {
+     const others = (live - 1) * (depth(live, drafts, round_rows) + 1);
+     var best: usize = 0;
+     var best_v: f64 = -1.0;
+@@ -1023,8 +1059,12 @@ pub fn chooseK(conf: []const f32, kmax: usize, live: usize, drafts: usize, round
+             surv *= 1.0 / (1.0 + exp(-@as(f64, conf[kk - 1])));
+             exp_tokens += surv;
+         }
+-        const rows = @min(round_ms.len, others + kk + 1);
+-        const v = exp_tokens * @as(f64, @floatFromInt(live)) / (round_ms[rows - 1] + draft_ms);
++        const rows = others + kk + 1;
++        const cost: f64 = if (rows <= round_ms.len)
++            round_ms[rows - 1]
++        else
++            round_ms[round_ms.len - 1] + @as(f64, @floatFromInt(rows - round_ms.len)) * (round_ms[round_ms.len - 1] - round_ms[round_ms.len - 2]);
++        const v = exp_tokens * @as(f64, @floatFromInt(live)) / (cost + draft_cost);
+         if (v > best_v) {
+             best = kk;
+             best_v = v;
+@@ -1033,6 +1073,23 @@ pub fn chooseK(conf: []const f32, kmax: usize, live: usize, drafts: usize, round
+     return best;
+ }
+ 
++test "chooseK prices a round wider than the table at the tail slope" {
++    const conf = [_]f32{ -20.0, -20.0, -20.0, -20.0, -20.0 }; // every survival ~0: only the cost moves k
++    const good = [_]f32{ 9.0, 9.0, 9.0, 9.0, 9.0 }; // every draft survives: the widest round wins
++    // one stream prices rows 1..6 within the table: the served pricing stands
++    try std.testing.expectEqual(@as(usize, 0), chooseK(&conf, 5, 1, 5, 16, 3.5));
++    try std.testing.expectEqual(@as(usize, 5), chooseK(&good, 5, 1, 5, 16, 3.5));
++    // 8 streams at 48-row rounds price 29 + k rows, past the 24-row table: the tail slope keeps k at the cheapest
++    // round (the clamp's flat last entry priced every further draft free and pinned k at kmax)
++    try std.testing.expectEqual(@as(usize, 0), chooseK(&conf, 5, 8, 5, 48, 3.5));
++    try std.testing.expectEqual(@as(usize, 5), chooseK(&good, 5, 8, 5, 48, 3.5));
++    // the allowance moves the choice: at half-chance confidences the served allowance keeps 2 of 5 and a much larger
++    // one (marginal rows look cheaper beside it) keeps 4
++    const half = [_]f32{ 0.0, 0.0, 0.0, 0.0, 0.0 };
++    try std.testing.expectEqual(@as(usize, 2), chooseK(&half, 5, 1, 5, 16, 3.5));
++    try std.testing.expectEqual(@as(usize, 4), chooseK(&half, 5, 1, 5, 16, 100.0));
++}
++
+ test "draft depths and pass steps as multi.py takes them" {
+     // 16-row rounds, 5 drafts: 5 alone or beside one other stream, 3 at three or four
+     try std.testing.expectEqual(@as(usize, 5), depth(1, 5, 16));
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index 7249799..19a4afb 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -787,8 +787,8 @@ pub const Lanes = struct {
+             .speculate_early = false,
+             .drafts = if (self.m.dr) |dr| @intCast(dr.n_most) else 1,
+             .window_costs = self.wc[0..self.win_rows],
+-            .mtp_step_ms = draft.draft_ms,
+-            .solo_head_overhead_ms = if (drafting and self.solo_overhead) draft.draft_ms else null, // opt-in: the Python engine's fixed draft allowance
++            .mtp_step_ms = self.m.draft_ms, // TF_DS_DRAFT_MS (draft.draft_ms's knob)
++            .solo_head_overhead_ms = if (drafting and self.solo_overhead) self.m.draft_ms else null, // opt-in: the Python engine's fixed draft allowance
+             .allocate_learned = self.allocate_learned,
+             .draft_cal = self.draft_cal,
+             .cal_log = self.cal_log,
+diff --git a/zig/src/families/dsv41/layer_main.zig b/zig/src/families/dsv41/layer_main.zig
+index 917d17c..03d7092 100644
+--- a/zig/src/families/dsv41/layer_main.zig
++++ b/zig/src/families/dsv41/layer_main.zig
+@@ -802,7 +802,7 @@ fn runRounds(run: *Run, eng: *const prompt.Engine, ch: *prompt.Chunk, caches: *c
+             };
+             const emitted: usize = @intCast(pos[0] - @as(i64, @intCast(prompt_len)) + 1);
+             const cap_k = @min(draft_mod.depth(1, most, R_max), drafts -| emitted);
+-            const kk = draft_mod.chooseK(dr.confs[0][0..steps], @min(cap_k, steps), 1, most, R_max);
++            const kk = draft_mod.chooseK(dr.confs[0][0..steps], @min(cap_k, steps), 1, most, R_max, try draft_mod.draftMsFromEnv());
+             var window_ok = kk + 1 == ids.len;
+             if (window_ok) for (1..ids.len) |j| {
+                 if (ids[j] != dr.drafts[0][j - 1]) window_ok = false;
+@@ -1302,7 +1302,7 @@ fn runDrafted(run: *Run, eng: *const prompt.Engine, ch: *prompt.Chunk, caches: *
+                     try w_out.flush();
+                     return false;
+                 }
+-                const kk = draft_mod.chooseK(dr.confs[di][0..steps], @min(st.want, steps), nl, most, R_max);
++                const kk = draft_mod.chooseK(dr.confs[di][0..steps], @min(st.want, steps), nl, most, R_max, try draft_mod.draftMsFromEnv());
+                 for (0..kk) |jj| st.win[1 + jj] = dr.drafts[di][jj];
+                 st.n = 1 + kk;
+                 di += 1;
+diff --git a/zig/src/families/dsv41/model.zig b/zig/src/families/dsv41/model.zig
+index 38af34f..3ab2cca 100644
+--- a/zig/src/families/dsv41/model.zig
++++ b/zig/src/families/dsv41/model.zig
+@@ -167,6 +167,7 @@ pub const Model = struct {
+     debug_split: ?usize = null, // TF_DS_DEBUG_SPLIT=p: a cold pass's chunk holding p is cut in two at p (step 0)
+     rs: Resume, // the chunk part run between two slices
+     round_ms: []const f64, // the lane core's round costs by rows (Options.round_ms, else draft.round_ms)
++    draft_ms: f64, // the drafter allowance the policy prices a chained head step at (TF_DS_DRAFT_MS, else draft.draft_ms)
+     pool_cap: usize,
+     cache_dir: std.Io.Dir,
+     cache_file: std.Io.File,
+@@ -339,6 +340,7 @@ pub const Model = struct {
+         m.rs = .{};
+         m.round_ms = o.round_ms orelse &draft.round_ms;
+         if (m.round_ms.len == 0) return error.BadRoundMs;
++        m.draft_ms = try draft.draftMsFromEnv(); // TF_DS_DRAFT_MS: a malformed value refuses startup
+         m.pool_cap = o.pool; // (agree, below, compares it with the other rank's)
+         m.fill_slot = 0;
+         m.prof = false;
+diff --git a/zig/src/families/dsv41/native.zig b/zig/src/families/dsv41/native.zig
+index da16c1e..b85265b 100644
+--- a/zig/src/families/dsv41/native.zig
++++ b/zig/src/families/dsv41/native.zig
+@@ -11,6 +11,9 @@
+ //!                                               they need, the pool's caches by the context)
+ //!   TF_DS_ROUND_MS                              the lane core's round costs by rows (ms, comma separated; the
+ //!                                               served ROUND_MS unless set: a four-node lane's rounds cost less)
++//!   TF_DS_DRAFT_MS                              the drafter allowance in ms (float; the served DRAFT_MS 3.5 unless set:
++//!                                               the measured pass is ~3.9 at one stream, ~7.2 at four, ~11 at eight, so
++//!                                               set it at the served stream count; a malformed value refuses the start)
+ //!   TF_DS_T26_KEYED_DRAFT=1                     a sampled stream's drafts take the sampler's keyed Gumbel noise (seed, position,
+ //!                                               token id) on the drafter's logits, so they match the target's draws (unset: off;
+ //!                                               greedy streams unchanged; set alike on every rank: ops.zig reads it at load)
+-- 
+2.56.1
+

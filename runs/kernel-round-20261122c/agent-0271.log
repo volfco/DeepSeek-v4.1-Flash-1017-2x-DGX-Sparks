@@ -1,0 +1,20 @@
+17:08:29 start
+Extension error (/home/colum/.pi/agent/npm/node_modules/pi-subagents/index.js): Auto-drain failed for session '/home/colum/Workspace/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/runs/kernel-round-20261122c/sessions/0271/2026-11-22T17-08-29-725Z_01a2043b-119d-725e-aa73-d48af8f27cde.jsonl': Waited 12m27s for 3 async run(s); done. Outcome: 1 complete, 2 failed.
+Result [e14a8b2a-5012-4160-830f-25fe098097a9]: /tmp/pi-subagents-uid-1000/async-subagent-results/output-archives/e14a8b2a-5012-4160-830f-25fe098097a9.json
+ Resume-first: failed run "8cb9f2ad-acf9-45ef-aed9-69b885c688d4" has a persisted child session. Revive the original run with subagent({ action: "resume", id: "8cb9f2ad-acf9-45ef-aed9-69b885c688d4", message: "Continue from the persisted child session and report the result." }) before reporting failure or launching a replacement. Launch a replacement only if revive fails or the user explicitly asks for one. Completion/control events have been observed; inspect status if a notification is not visible yet.
+Workflow receipt [e14a8b2a-5012-4160-830f-25fe098097a9]: /tmp/pi-subagents-uid-1000/async-subagent-runs/e14a8b2a-5012-4160-830f-25fe098097a9/workflow-receipt.json.
+**Kernel patch 0271 complete.** Checkpoint summary:
+
+## Done
+- **Commit `8078e03`** on `kernel-0271` (parent `27baa93`), subject exactly per the brief, working tree clean — 5 files: new `resume_assemble.zig` (switch + host reference + 2,250-layout test sweep), `tf_ds_resume_assemble_kernel` in `dsv41_ops.cu`, `ops.zig` wiring (`bool` + `?cuda.Function`, looked up only when on), `prompt.zig` `replayCut` one-launch arm with fallback, banner, `dsv41.zig` export.
+- **Premise holds:** at the served shape (hc 4, hidden 5120, ring window 128) an exact-resume prepend costs 4 copy launches + 1 pageable position upload (6 when the prefix wraps) → **1 kernel**; on-arm outputs are byte-identical (pure data movement + integer positions), and the tail stash stays ordered after the restore by same-stream program order on `e.s`.
+- **Gate (all pass):** `zig build test` exit 0 (baseline and changed tree); `cuda syntax check: ok` via the round-local fixed stubs (the *shared* stubs fail on the pristine base itself with an identical error set — the standing 0260/0268 finding, documented); `h0271/` harness: **2,432 layouts (2,216 at the served ring), 0 mismatches**, 3/3 seeded mutants caught.
+- **Two independent reviewer subagents:** both "OK with notes, no blockers" (`h0271/review-code.md`, `review-harness.md`). All three actionable harness findings fixed and re-run (reproduces exactly); three code S3s left deliberately (documented dispositions).
+- **Report written:** `runs/kernel-round-20261122c/report-0271.md` with the real hash, launch counts, gate/review evidence, decisions, and GPU-only gaps.
+
+## Open / left
+- Nothing in the worktree. Hardware gate owes: on-vs-off byte compare at a real resume, banner count, timing (measure-only — priced here by launch count).
+
+*Skipped: no GPU/codegen evidence (no GPU here), launcher-internal shape guard and kernel bounds guard (sole call site gates via `ok()`; neighbors' conventions). Risk to know: the shared `cuda-syntax-stubs` tool remains broken at this base — I verified via the previous round's fixed stubs instead.*
+18:15:55 pi exited rc=0
+18:15:55 committed 8078e03 0271 dsv41: TF_DS_RESUME_ASSEMBLE (off by default): an exact-resume prepend assembles its rows and positions in one kernel

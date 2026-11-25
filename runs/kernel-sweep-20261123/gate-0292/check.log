@@ -1,0 +1,40 @@
+dsv41_torch.cu: In file included from /home/colum/Workspace/cuda-syntax-stubs/check.cu:4:
+dsv41_torch.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_torch.cu:308:103: error: no viable conversion from 'int' to '__nv_bfloat16'
+dsv41_torch.cu:   308 |                                                          __nv_bfloat16* dst, float eps, __nv_bfloat16 wv = 0) {
+dsv41_torch.cu:       |                                                                                                       ^    ~
+dsv41_torch.cu: /home/colum/Workspace/cuda-syntax-stubs/cuda_bf16.h:4:8: note: candidate constructor (the implicit copy constructor) not viable: no known conversion from 'int' to 'const __nv_bfloat16 &' for 1st argument
+dsv41_torch.cu:     4 | struct __nv_bfloat16 { unsigned short v; };
+dsv41_torch.cu:       |        ^~~~~~~~~~~~~
+dsv41_torch.cu: /home/colum/Workspace/cuda-syntax-stubs/cuda_bf16.h:4:8: note: candidate constructor (the implicit move constructor) not viable: no known conversion from 'int' to '__nv_bfloat16 &&' for 1st argument
+dsv41_torch.cu:     4 | struct __nv_bfloat16 { unsigned short v; };
+dsv41_torch.cu:       |        ^~~~~~~~~~~~~
+dsv41_torch.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_torch.cu:308:103: note: passing argument to parameter 'wv' here
+dsv41_torch.cu:   308 |                                                          __nv_bfloat16* dst, float eps, __nv_bfloat16 wv = 0) {
+dsv41_torch.cu:       |                                                                                                       ^
+dsv41_torch.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_torch.cu:875:5: error: no matching function for call to 'tf_ds_triton_rmsnorm_row'
+dsv41_torch.cu:   875 |     tf_ds_triton_rmsnorm_row<128, true>(x + (long long)r * ldx, w, srow, eps, wv);
+dsv41_torch.cu:       |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+dsv41_torch.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_torch.cu:984:11: error: unknown type name '__nv_bfloat162'; did you mean '__nv_bfloat16'?
+dsv41_torch.cu:   984 |     const __nv_bfloat162 pr = *(__nv_bfloat162*)&raw;
+dsv41_torch.cu:       |           ^~~~~~~~~~~~~~
+dsv41_torch.cu:       |           __nv_bfloat16
+dsv41_ops.cu: In file included from /home/colum/Workspace/cuda-syntax-stubs/check.cu:4:
+dsv41_ops.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_ops.cu:164:47: error: use of undeclared identifier '__clz'
+dsv41_ops.cu:   164 |     const int column_bytes = EarlyCut ? (32 - __clz((unsigned)(n - 1)) + 7) / 8 : 4;
+dsv41_ops.cu:       |                                               ^~~~~
+dsv41_ops.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_ops.cu:893:11: error: unknown type name 'float4'
+dsv41_ops.cu:   893 |     const float4* row = reinterpret_cast<const float4*>(score + (long long)r * ss);
+dsv41_ops.cu:       |           ^
+dsv41_ops.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_ops.cu:893:48: error: unknown type name 'float4'
+dsv41_ops.cu:   893 |     const float4* row = reinterpret_cast<const float4*>(score + (long long)r * ss);
+dsv41_ops.cu:       |                                                ^
+dsv41_ops.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_ops.cu:898:15: error: unknown type name 'float4'
+dsv41_ops.cu:   898 |         const float4 lo = row[2LL * b], hi = row[2LL * b + 1];
+dsv41_ops.cu:       |               ^
+dsv41_ops.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_ops.cu:898:43: error: expected ';' at end of declaration
+dsv41_ops.cu:   898 |         const float4 lo = row[2LL * b], hi = row[2LL * b + 1];
+dsv41_ops.cu:       |                                           ^
+dsv41_ops.cu:       |                                           ;
+dsv41_ops.cu: /home/colum/Workspace/tfref-ksweep/zig/kernels/cuda/dsv41_ops.cu:899:58: error: use of undeclared identifier 'hi'
+dsv41_ops.cu:   899 |         const float values[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+dsv41_ops.cu:       |                                                          ^~

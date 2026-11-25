@@ -1,0 +1,1597 @@
+{
+ "engine_root": "/home/colum/Workspace/tfref-kstack4",
+ "commit": "2bb052f",
+ "families": [
+  {
+   "name": "tensorfold:requests_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [
+    "key",
+    "status"
+   ],
+   "help": "HTTP replies by API key label and status.",
+   "condition": "only once an HTTP reply has been counted"
+  },
+  {
+   "name": "tensorfold:requests_running",
+   "type": "gauge",
+   "group": "server",
+   "labels": [],
+   "help": "Requests in prefill or decode.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:requests_waiting",
+   "type": "gauge",
+   "group": "server",
+   "labels": [],
+   "help": "Requests queued or held until a lane is free.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:generation_tokens_running",
+   "type": "gauge",
+   "group": "server",
+   "labels": [],
+   "help": "Generated tokens held by live streams.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:prompt_tokens_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Prompt tokens of finished requests, those restored from kept prompt states included.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:prompt_tokens_cached_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Prompt tokens of finished requests restored from kept prompt states (counted in prompt_tokens_total too); the rest were computed.",
+   "condition": "engine keeps prompt states"
+  },
+  {
+   "name": "tensorfold:generation_tokens_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Generated tokens of finished requests.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:joules_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Energy this rank's GPU used over finished requests' own windows, in joules (TF_DS_ENERGY; rank 1 logs its own, per frame).",
+   "condition": "TF_DS_ENERGY"
+  },
+  {
+   "name": "tensorfold:kv_cache_usage_ratio",
+   "type": "gauge",
+   "group": "server",
+   "labels": [
+    "pool"
+   ],
+   "help": "Tokens in a stream cache divided by that stream's context window.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:mtp_drafted_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Draft tokens verified on finished requests.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:mtp_accepted_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Draft tokens kept on finished requests.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:decode_rounds_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Decode rounds used by finished requests.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:process_footprint_bytes",
+   "type": "gauge",
+   "group": "server",
+   "labels": [],
+   "help": "This process's physical footprint as the OS counts it, Metal buffers included; only where the platform reports one (macOS).",
+   "condition": "macOS only"
+  },
+  {
+   "name": "tensorfold:device_memory_bytes",
+   "type": "gauge",
+   "group": "server",
+   "labels": [],
+   "help": "Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).",
+   "condition": "CUDA backend"
+  },
+  {
+   "name": "tensorfold:device_memory_peak_bytes",
+   "type": "gauge",
+   "group": "server",
+   "labels": [],
+   "help": "The most device memory the engine has held since start or the last /health?reset_peak=1.",
+   "condition": "CUDA backend"
+  },
+  {
+   "name": "tensorfold:num_requests_running",
+   "type": "gauge",
+   "group": "server",
+   "labels": [],
+   "help": "Requests in prefill or decode. A mirror of tensorfold:requests_running.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:num_requests_waiting",
+   "type": "gauge",
+   "group": "server",
+   "labels": [],
+   "help": "Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:kv_cache_usage_perc",
+   "type": "gauge",
+   "group": "server",
+   "labels": [
+    "stream"
+   ],
+   "help": "A stream's cache occupancy under vLLM's name; same streams and ratios as tensorfold:kv_cache_usage_ratio.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:spec_decode_num_draft_tokens_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Draft tokens verified on finished requests, this server's single draft counter.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:spec_decode_num_accepted_tokens_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Draft tokens kept on finished requests.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:prefix_cache_queries_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Prompt tokens of finished requests, looked up in the kept prompt states, under vLLM's name.",
+   "condition": "engine keeps prompt states"
+  },
+  {
+   "name": "tensorfold:prefix_cache_hits_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Prompt tokens of finished requests restored from kept prompt states, under vLLM's name.",
+   "condition": "engine keeps prompt states"
+  },
+  {
+   "name": "tensorfold:client_disconnections_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Requests a client left before the reply left the server.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:preemptions_total",
+   "type": "counter",
+   "group": "server",
+   "labels": [],
+   "help": "Requests that had to give a lane up to a later one.",
+   "condition": "engine counts preemptions"
+  },
+  {
+   "name": "tensorfold:engram_rowcache_has_total",
+   "type": "counter",
+   "group": "engram",
+   "labels": [],
+   "help": "Row-cache has() calls.",
+   "condition": "TF_DS_ENGRAM_METRICS"
+  },
+  {
+   "name": "tensorfold:engram_rowcache_fast_total",
+   "type": "counter",
+   "group": "engram",
+   "labels": [],
+   "help": "Row-cache has() calls the filter answered without the lock (TF_DS_ENGRAM_ROWCACHE_FILTER).",
+   "condition": "TF_DS_ENGRAM_METRICS"
+  },
+  {
+   "name": "tensorfold:engram_rowcache_lock_total",
+   "type": "counter",
+   "group": "engram",
+   "labels": [],
+   "help": "Row-cache has() calls that took the lock (the filter's positives, true or false).",
+   "condition": "TF_DS_ENGRAM_METRICS"
+  },
+  {
+   "name": "tensorfold:request_latency_seconds",
+   "type": "histogram",
+   "group": "server",
+   "labels": [
+    "le"
+   ],
+   "help": "Seconds from arrival to the reply leaving.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:time_to_first_token_seconds",
+   "type": "histogram",
+   "group": "server",
+   "labels": [
+    "le"
+   ],
+   "help": "Seconds from arrival to the first generated token.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:request_decode_seconds",
+   "type": "histogram",
+   "group": "server",
+   "labels": [
+    "le"
+   ],
+   "help": "Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:request_time_per_output_token_seconds",
+   "type": "histogram",
+   "group": "server",
+   "labels": [
+    "le"
+   ],
+   "help": "Seconds from the first generated token to the last, divided by the tokens less one.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:request_prefill_seconds",
+   "type": "histogram",
+   "group": "server",
+   "labels": [
+    "le"
+   ],
+   "help": "Seconds a finished request's prompt pass took.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:e2e_request_latency_seconds",
+   "type": "histogram",
+   "group": "server",
+   "labels": [
+    "le"
+   ],
+   "help": "Seconds from arrival to the reply leaving, under vLLM's name.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:request_decode_time_seconds",
+   "type": "histogram",
+   "group": "server",
+   "labels": [
+    "le"
+   ],
+   "help": "Seconds a finished request spent decoding, under vLLM's name.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:request_prefill_time_seconds",
+   "type": "histogram",
+   "group": "server",
+   "labels": [
+    "le"
+   ],
+   "help": "Seconds a finished request's prompt pass took, under vLLM's name.",
+   "condition": ""
+  },
+  {
+   "name": "tensorfold:engram_lookup_seconds",
+   "type": "histogram",
+   "group": "engram",
+   "labels": [
+    "le"
+   ],
+   "help": "Seconds a read of Engram's table rows took, one observation per read (a decode round's, a prompt chunk's or a read-ahead's).",
+   "condition": "TF_DS_ENGRAM_METRICS"
+  },
+  {
+   "name": "tensorfold:chats_continued",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Streams that continued a conversation without resuming from its own turn state.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:chats_continued_prefill_tokens",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt tokens those streams prefilled.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_memory_hits",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt passes that resumed a kept state in memory.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_memory_misses",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt lookups that found no usable kept state.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_kept",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt states kept in memory.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_evicted",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Kept states evicted from memory for room.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_refused",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt states not kept: past the memory budget.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_failed",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Kept states that failed to save or restore.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_entries",
+   "type": "gauge",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt states kept in memory now.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_held_bytes",
+   "type": "gauge",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Bytes the kept states hold now.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_disk_lookups",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Lookups that asked the disk tier.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_disk_hits",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Lookups whose durable point was longer than the best usable memory state.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_disk_hits_committed",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Disk restores every rank installed, adopted as kept states.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_begun",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Disk restore jobs started.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_shared",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Requests that joined a disk restore already in flight.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_failed",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Disk restores aborted on every rank (missing, damaged, guarded).",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_cancelled",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Disk restores stopped: no request waited for them any more, or shutdown.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_dropped",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Installed disk restores not adopted: no room, or memory already had them.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_refused",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Disk restores not begun: the memory budget could not hold their destination, or the tier was at its capacity (once a request).",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_active",
+   "type": "gauge",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Disk restore jobs in flight.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restoring_bytes",
+   "type": "gauge",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Memory the disk restores in flight reserved, charged to the prompt cache's budget.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restore_blocks_done",
+   "type": "gauge",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Blocks the restores in flight have copied so far.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restore_blocks_total",
+   "type": "gauge",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Blocks the restores in flight copy in all.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restored_tokens",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt tokens restored from disk.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restore_waits",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Requests parked on a disk restore.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restore_wait_timeouts",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Requests admitted without their disk restore after TF_SPILL_LOAD_WAIT_MS.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restore_wait_ns",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Nanoseconds requests waited for disk restores.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restore_wait_max_ns",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "The longest wait for a disk restore, in nanoseconds.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_deferred",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Requests whose disk restore was refused for capacity (restores or read slots in flight) and retried shortly instead of prefilling.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_deferred_expired",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Of them, requests admitted on what memory holds after TF_SPILL_DEFER_MS without the restore starting.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_room_waits",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Requests whose disk restore the KV pool had no room for while streams ran, and that waited for room as a prompt pass does instead of prefilling.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_restores_room_wait_expired",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Of them, requests admitted on what memory holds after TF_SPILL_LOAD_WAIT_MS without room for the restore.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_writes_enqueued",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Kept states enqueued for the disk tier at their keep.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_shared_promoted",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Disk points promoted to shared prefixes.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_flushes",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Clean-shutdown flushes of the disk tier.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_flush_timeouts",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Flushes that reached their deadline with points unpublished.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_flush_unpublished",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Points left unpublished at a flush deadline.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_parked",
+   "type": "gauge",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Requests parked on a disk restore now (reading it, or deferred to ask again).",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_chats_continued",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Streams that continued a conversation without resuming from its own turn state.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_chats_continued_prefill_tokens",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt tokens those streams prefilled.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_cached_tokens",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt tokens passes resumed from kept states.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_computed_tokens",
+   "type": "counter",
+   "group": "prompt_cache",
+   "labels": [],
+   "help": "Prompt tokens passes computed.",
+   "condition": "prompt cache tier/grouping or TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_misses_no_prefix",
+   "type": "counter",
+   "group": "prompt_cache_detail",
+   "labels": [],
+   "help": "Of memory_misses: no kept state's tokens matched the prompt's.",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_misses_tail_window",
+   "type": "counter",
+   "group": "prompt_cache_detail",
+   "labels": [],
+   "help": "Of memory_misses: a state matched but the tail, window or grid rules passed it over.",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_misses_stale",
+   "type": "counter",
+   "group": "prompt_cache_detail",
+   "labels": [],
+   "help": "Of memory_misses: a state matched but the family staled it.",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_refused_budget",
+   "type": "counter",
+   "group": "prompt_cache_detail",
+   "labels": [],
+   "help": "Of refused: the state alone passed the memory budget.",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_refused_restores",
+   "type": "counter",
+   "group": "prompt_cache_detail",
+   "labels": [],
+   "help": "Of refused: restores in flight held the budget's rest.",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_evicted_superseded",
+   "type": "counter",
+   "group": "prompt_cache_detail",
+   "labels": [],
+   "help": "Of evicted: a state a later prompt extends (its superseded turn).",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_evicted_lru",
+   "type": "counter",
+   "group": "prompt_cache_detail",
+   "labels": [],
+   "help": "Of evicted: the least recently used state.",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_failed_save",
+   "type": "counter",
+   "group": "prompt_cache_detail",
+   "labels": [],
+   "help": "Of failed: a keep's save failed.",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_failed_restore",
+   "type": "counter",
+   "group": "prompt_cache_detail",
+   "labels": [],
+   "help": "Of failed: a restore failed (this pass's resume, or a peer's).",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:prompt_cache_resume_depth_percent",
+   "type": "histogram",
+   "group": "prompt_cache_detail",
+   "labels": [
+    "le"
+   ],
+   "help": "The resume depth of finished prompt passes (0/25/50/75/90/99/100 percent buckets).",
+   "condition": "TF_DS_CACHE_METRICS"
+  },
+  {
+   "name": "tensorfold:spill_points",
+   "type": "gauge",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Published points in this rank's disk tier.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_blocks",
+   "type": "gauge",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Unique blocks on this rank's disk.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_stored_bytes",
+   "type": "gauge",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Unique bytes the disk tier holds (blocks, point files, temporaries).",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_cap_bytes",
+   "type": "gauge",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "The disk tier's cap (--spill-gib).",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_disk_free_bytes",
+   "type": "gauge",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Free bytes on the disk tier's file system.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_staging_bytes",
+   "type": "gauge",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Host staging the disk tier holds now.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_staging_peak",
+   "type": "gauge",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "The most host staging the disk tier has held.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_writes_pending",
+   "type": "gauge",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Kept states queued for the disk, not yet published.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_writes_queued",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Kept states queued for the disk.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_writes_committed",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Points published on disk (manifest last).",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_writes_cancelled",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Unpublished points cancelled (a guard could not stage, staging full, shutdown).",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_writes_cancelled_guard",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Unpublished points cancelled because their source was about to change.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_writes_cancelled_staging",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Unpublished points cancelled because staging had no room.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_writes_cancelled_shutdown",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Unpublished points cancelled at the flush deadline.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_writes_failed",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Disk writes that failed.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_forced_staging",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Ranges staged at once because their source was about to change.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_no_space",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Writes refused by the cap or the free-disk floor.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_dedup_blocks",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Blocks linked to equal bytes already on disk.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_dedup_bytes",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Bytes those links saved.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_written_bytes",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Bytes written to disk.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_presence_refused",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Restores refused because a rank lacked the point.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_compatible_misses",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Durable lookups with no compatible point.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_crc_errors",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Blocks or sections that failed their CRC.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_size_errors",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Files truncated or past their manifest's bounds.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_reads",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Points read for restores.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_read_bytes",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Bytes read for restores.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_read_failed",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Restore reads that failed.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_evicted_turns",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Old turns evicted from disk.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_evicted_forks",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Abandoned forks evicted from disk.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_evicted_conversations",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Whole conversations evicted from disk.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_evicted_shared",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Shared-prefix points evicted from disk.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_quota_trims",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Writes that trimmed their conversation to its quota.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_recovered_points",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Published points found at start.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_dropped_temporaries",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Incomplete records removed at start.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_pictures_kept",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Points written to disk with pictures before their cut.",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:spill_pictures_refused",
+   "type": "counter",
+   "group": "spill",
+   "labels": [
+    "rank"
+   ],
+   "help": "Disk keeps and lookups with pictures turned away (ids and media disagree, or image cache off).",
+   "condition": "disk tier on"
+  },
+  {
+   "name": "tensorfold:kv_shard_parts",
+   "type": "gauge",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "KV-ownership parts (one a rank).",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_part_rows",
+   "type": "gauge",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Pool positions a part holds.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_carries",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Admissions that carried a kept prompt state into another part.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_carry_rescued",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Carries made because the state's own part would drop it.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_carry_pressure",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Carries made because the state's own part would evict kept states.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_carry_others",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Carries made because resuming in place would stale another conversation's state.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_carry_paused",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Carries made instead of waiting for the live stream holding the state.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_moves",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Live streams moved whole to another part to admit a request.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_moved_tokens",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Tokens carried or moved across parts.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_moved_bytes",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Owner-only bytes the carries and moves sent.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_transfers_failed",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Copies, carries or moves that finished failed (the prompt ran from 0, or the stream stayed).",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_staged",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Kept states whose pending spill writes were staged before their rows changed.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_staled",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Kept states given up for a placement.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_twins_made",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Filling prompts given borrowed twins.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_twins_revoked",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Borrowed twins taken back for an admission or a restore.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_refused_pinned",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Moves refused: a copy or carry reads the stream's rows.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_refused_twin",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Carries or moves refused: the stream holds twins.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_refused_loading",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Carries or moves refused: a transfer of the stream is in flight.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_refused_partial",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Carries or moves refused: a prompt chunk is in flight.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_refused_no_target",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Carries or moves refused: no part had the room.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_refused_small",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Carries refused: the state is under the minimum carry.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_no_part",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Admissions no part could make room for (the request waited).",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_plans",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Ownership op lists rank 0 sent the followers.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_checks",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Planner digests the ranks compared (equal, or the pair ended).",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_prompt_fetches",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Prompt-chunk layers that fetched the owner's compressed rows.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_prompt_rows",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Compressed rows the prompt fetches sent.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_prompt_picks",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Rows the prompt fetches would have sent unfolded (every pick of every row).",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_prompt_bytes",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Bytes the prompt fetches sent.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_prompt_syncs",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Host reads the prompt fetches waited on.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_fetch_rounds",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Decode rounds that fetched the owners' picked rows.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_owner_rounds",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Decode rounds the owners attended.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_copies",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Cross-part extent transfers sent.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_copy_bytes",
+   "type": "counter",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Bytes the cross-part extent transfers sent.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_ranks",
+   "type": "gauge",
+   "group": "kv_shard",
+   "labels": [],
+   "help": "Ranks whose own KV-ownership counters are reported (kv_shard_rank_*).",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_part_free",
+   "type": "gauge",
+   "group": "kv_shard_part",
+   "labels": [
+    "part"
+   ],
+   "help": "Rows of this part nothing holds.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_part_live_rows",
+   "type": "gauge",
+   "group": "kv_shard_part",
+   "labels": [
+    "part"
+   ],
+   "help": "Rows of this part live streams reserve.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_part_kept_rows",
+   "type": "gauge",
+   "group": "kv_shard_part",
+   "labels": [
+    "part"
+   ],
+   "help": "Rows of this part kept prompt states hold outside live extents.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_part_twin_rows",
+   "type": "gauge",
+   "group": "kv_shard_part",
+   "labels": [
+    "part"
+   ],
+   "help": "Rows of this part borrowed twins hold.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_part_hold_rows",
+   "type": "gauge",
+   "group": "kv_shard_part",
+   "labels": [
+    "part"
+   ],
+   "help": "Rows of this part reserved for a restore or a live move in flight.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_part_live",
+   "type": "gauge",
+   "group": "kv_shard_part",
+   "labels": [
+    "part"
+   ],
+   "help": "Live streams whose extent lies in this part.",
+   "condition": "TF_DS_KV_SHARD"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_prompt_fetches",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Prompt-chunk layers on this rank that fetched the owner's compressed rows.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_prompt_rows",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Compressed rows this rank's prompt fetches moved.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_prompt_picks",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Rows this rank's prompt fetches would have moved unfolded.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_prompt_bytes",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Bytes this rank's prompt fetches moved.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_prompt_syncs",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Host reads this rank's prompt fetches waited on.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_fetch_rounds",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Decode rounds on this rank that fetched the owners' picked rows.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_owner_rounds",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Decode rounds this rank attended as an owner.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_copies",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Cross-part extent transfers this rank took part in.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_copy_bytes",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Bytes of cross-part extent transfers this rank took part in.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_plans",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Ownership op lists this rank applied.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_checks",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "Planner digest checks this rank took part in.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:kv_shard_rank_transfers_failed",
+   "type": "counter",
+   "group": "kv_shard_rank",
+   "labels": [
+    "rank"
+   ],
+   "help": "This rank's own sides of copies, carries or moves that failed.",
+   "condition": "TF_DS_KV_SHARD, a rank reported"
+  },
+  {
+   "name": "tensorfold:service_refused",
+   "type": "counter",
+   "group": "pair",
+   "labels": [],
+   "help": "Parked-work services asked for inside a round, a prompt chunk or a CUDA graph capture, skipped.",
+   "condition": "backend with a broken-pair policy or a disk tier"
+  },
+  {
+   "name": "tensorfold:pair_failed",
+   "type": "counter",
+   "group": "pair",
+   "labels": [],
+   "help": "Requests failed because the rank pair broke.",
+   "condition": "backend with a broken-pair policy or a disk tier"
+  },
+  {
+   "name": "tensorfold:pair_busy_ms",
+   "type": "gauge",
+   "group": "pair",
+   "labels": [],
+   "help": "Milliseconds the engine thread has been busy without progress (0: idle).",
+   "condition": "backend with a broken-pair policy or a disk tier"
+  },
+  {
+   "name": "tensorfold:pair_stall_ms",
+   "type": "gauge",
+   "group": "pair",
+   "labels": [],
+   "help": "The stall bound: busy this long without progress breaks the pair (0: no stall monitor).",
+   "condition": "backend with a broken-pair policy or a disk tier"
+  },
+  {
+   "name": "tensorfold:pair_stalled",
+   "type": "gauge",
+   "group": "pair",
+   "labels": [],
+   "help": "1 while the engine thread has been busy past the stall bound.",
+   "condition": "backend with a broken-pair policy or a disk tier"
+  },
+  {
+   "name": "tensorfold:pair_broken",
+   "type": "gauge",
+   "group": "pair",
+   "labels": [],
+   "help": "1 once the rank pair broke.",
+   "condition": "backend with a broken-pair policy or a disk tier"
+  }
+ ]
+}

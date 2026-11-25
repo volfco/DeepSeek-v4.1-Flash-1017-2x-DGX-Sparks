@@ -1,0 +1,1 @@
+Now let me verify the slice path and `Shared` lifetime across slices in model.zig (the harness claims state crosses slice boundaries), and compare the copied module against the worktree's:

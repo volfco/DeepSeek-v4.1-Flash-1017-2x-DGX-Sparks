@@ -1,0 +1,17 @@
+18:14:45 start
+Done. Checkpoint summary:
+
+**Commit:** `8a57bf54a0b5a0d760787408b18aaa108a4d8e05` on `kernel-0272` — subject exactly as BRIEF-0272's export format, working tree clean.
+
+**What was built** — `TF_DS_RING_TRACE=<N>` (off by default; malformed value refuses startup):
+- **Device side**: one 64-byte `TfDsTrace` arg appended to the five ring kernels (`rdma_gather.cu` ×3, `dsv41_shard.cu` ×2); a sampled sequence (`q % N == 0`, decided on device from the live sequence) writes a 128-byte record: key (seq/round/layer/op/rows/bytes) + stage entry, doorbell, collect entry, flag, copy-done on the rank's GPU clock + the per-stream previous-gather landmark. Logic factored into `dsv41/ring_trace_rec.cuh` (shared by both kernel files, harness-extractable).
+- **Host side**: the proxy writes CLOCK_MONOTONIC records (doorbell seen, last post, per-NIC completion, flag published, post-nap wakeups) into preallocated memory; drains every 4 work units + engine stop (bulk download after stream syncs, JSONL to `TF_DS_RING_TRACE_OUT`, default `/tmp/ring_trace.<rank>.jsonl`, both ranks) with a drop counter.
+- **Pure module** `ring_trace.zig` (parse, layouts, same-clock interval/percentile helpers, JSON writers — 7 tests) + python summarizer printing the brief's p50/p95 per (op, rank).
+
+**Gates**: `zig build test` exit 0 · `cuda syntax check: ok` (shared stubs fail on the pristine base — known since 0265; used round-local fixed stubs) · h0272 harness all cases match an independent reference, and the summarizer attributes injected producer-late (rank 0) and proxy-late (rank 1) exactly. Notably the harness caught a real pre-commit bug (unsampled sequences corrupting sampled records sharing a slot), and an independent review subagent found 3 majors (OOB prev cells past 4 streams, stale proxy records at wrap, degenerate NIC-part timestamps) — all fixed before the commit.
+
+**Report**: `runs/kernel-round-20261122c/report-0272.md` with gate results, decisions, deviations (kernel location per the brief's probe-extension instruction; drafter gathers tagged `other`; TP4 untraced), and the hardware-only gaps (bit-identity panel, overhead, graph-miss vs steady replay, side-stream landmark).
+
+*Skipped/risks:* graph-miss vs steady-replay is not distinguishable from baked launch args (documented); copy-done is block 0's attribution like `probe[2]`; nothing was validated on a GPU — only the hardware gate can settle the on-path panel and overhead.
+20:06:53 pi exited rc=0
+20:06:53 committed 8a57bf5 0272 dsv41: TF_DS_RING_TRACE (off by default): sampled per-sequence ring timestamps on both ranks, drained outside the timed window

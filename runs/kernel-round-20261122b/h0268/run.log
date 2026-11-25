@@ -1,0 +1,62 @@
+1/20 harness.test_0...OK
+2/20 harness.test.the joint call receives the two separate calls' arguments (N 1..4, n 5..7, LoRA on and off)...N=1 n=5 rows=5 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=1 n=5 rows=5 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=1 n=6 rows=6 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=1 n=6 rows=6 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=1 n=7 rows=7 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=1 n=7 rows=7 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=2 n=5 rows=10 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=2 n=5 rows=10 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=2 n=6 rows=12 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=2 n=6 rows=12 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=2 n=7 rows=14 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=2 n=7 rows=14 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=3 n=5 rows=15 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=3 n=5 rows=15 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=3 n=6 rows=18 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=3 n=6 rows=18 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=3 n=7 rows=21 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=3 n=7 rows=21 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=4 n=5 rows=20 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=4 n=5 rows=20 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=4 n=6 rows=24 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=4 n=6 rows=24 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+N=4 n=7 rows=28 lora=false: 3 joint launches, arguments equal the 6 separate launches'
+N=4 n=7 rows=28 lora=true: 3 joint launches, arguments equal the 6 separate launches'
+OK
+3/20 harness.test.the -1 sentinel's slot list is the one the joint call receives and writes no ring row...OK
+4/20 harness.test.the joint launch is the recorded _q_kv_norm variant class (kit dispatch at draft row counts)..._q_kv_norm record round:r16:b1024: the drafter's joint launch at 28 rows matches its consts, dtypes and scalars
+OK
+5/20 harness.test.the swap keeps every read after its write, with and without LoRA...OK
+6/20 harness.test.launches per pass at N 1..4, n 5..7: two a block before, one after...N=1 n=5 rows=5: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=1 n=6 rows=6: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=1 n=7 rows=7: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=2 n=5 rows=10: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=2 n=6 rows=12: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=2 n=7 rows=14: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=3 n=5 rows=15: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=3 n=6 rows=18: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=3 n=7 rows=21: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=4 n=5 rows=20: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=4 n=6 rows=24: norm launches a pass 6 -> 3 (3 DSpark blocks)
+N=4 n=7 rows=28: norm launches a pass 6 -> 3 (3 DSpark blocks)
+OK
+7/20 tri_norm.test.q_kv_norm launches as recorded...OK
+8/20 tri_norm.test.rmsnorm_rot launches as recorded...OK
+9/20 tri_norm.test.kv_norm_rope launches as recorded...OK
+10/20 tri_norm.test.rope_heads launches as recorded...OK
+11/20 tri_norm.test.rowmm2 (1-2 rows) and rowmm_wts launch _rowmm2 as recorded...OK
+12/20 tri_norm.test.rowmm2 (windows past 2 rows) launches _rowmm2r as recorded...OK
+13/20 tri_norm.test.rowmm_gate launches _rowmm_parts as recorded...OK
+14/20 tri_norm.test.rowmm_gate past 16 rows: one launch when the kit resolves it, else 16-row pieces over consecutive rows...OK
+15/20 tri_norm.test.route (logits) launches _route as recorded...OK
+16/20 tri_norm.test.route (rowmm_gate's chunk sums) launches _route_parts as recorded...OK
+17/20 draft_qkv_norm.test.the switch parses its forms and nothing else...TF_DS_DRAFT_QKV_NORM: expected 1 or 0
+TF_DS_DRAFT_QKV_NORM: expected 1 or 0
+TF_DS_DRAFT_QKV_NORM: expected 1 or 0
+TF_DS_DRAFT_QKV_NORM: expected 1 or 0
+OK
+18/20 draft_qkv_norm.test.the joint launch's arguments are the two separate launches' (its spec)...OK
+19/20 draft_qkv_norm.test._q_kv_norm's program count is the recorded grids'...OK
+20/20 draft_qkv_norm.test.the -1 slot sentinel writes no ring row at any served pass shape...OK
+All 20 tests passed.

@@ -1,0 +1,21 @@
+== splice (the kernel's exact source) ==
+wrote fused_kernel_current.inc 3357 bytes
+== build (-O2 -ffp-contract=off -pthread) ==
+== run ==
+fp16 widen cross-check: 65536 patterns (2046 NaNs compared by kind)
+fp16 round cross-check: 199208 finite bit patterns + 792 NaNs
+170 cases, 729 rows compared
+all match
+== mutation checks (each must fail cases) ==
+-- mutation: better_ties
+wrote fused_kernel_current.inc 3357 bytes [mutant better_ties]
+mutation better_ties: caught (213 failing checks)
+-- mutation: no_round
+wrote fused_kernel_current.inc 3326 bytes [mutant no_round]
+mutation no_round: caught (305 failing checks)
+-- mutation: miss_mask
+wrote fused_kernel_current.inc 3356 bytes [mutant miss_mask]
+mutation miss_mask: caught (301 failing checks)
+== restore the unmutated kernel ==
+wrote fused_kernel_current.inc 3357 bytes
+h0267: ok

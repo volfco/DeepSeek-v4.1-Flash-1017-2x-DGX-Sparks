@@ -1,0 +1,20 @@
+1/10 harness.test.a cold 127-token prompt: 8 pads, 30 reuses, every read byte-equal (and slicing changes nothing)...h0270: cold 127-token prompt: on 8 fills + 8 copies, 30 reuses; off 38 + 38
+OK
+2/10 harness.test.multi-chunk prompts under TF_DS_PREFILL_SLICE=5: each chunk re-pads, none leaks across chunks...h0270: 3 chunks x 5-layer slices: 8 pads + 30 reuses each, first read of each pads
+OK
+3/10 harness.test.a replay cut mid-prompt: the rows' move re-pads; a cut that rewrites nothing keeps the pad...h0270: replay cut mid-prompt: served map 8 pads / 30 reuses; same-count cut re-pads at layer 20; no-op cut reuses
+OK
+4/10 harness.test.pick counts 1..64 and >64 over shared-selection sequences (both chunk classes)...h0270: pick sweep 1..64 and 65..512 x rows 1..127 x both chunk classes: all reads byte-equal
+OK
+5/10 harness.test.hand corner table: the pad predicate's edges as literals...h0270: corner table (10 literals x 2 selections): all events as hand-expected
+OK
+6/10 prompt_picks_once.test.the switch parses its forms and nothing else...TF_DS_PROMPT_PICKS_ONCE: expected 1 or 0
+TF_DS_PROMPT_PICKS_ONCE: expected 1 or 0
+TF_DS_PROMPT_PICKS_ONCE: expected 1 or 0
+TF_DS_PROMPT_PICKS_ONCE: expected 1 or 0
+OK
+7/10 prompt_picks_once.test.padWidth pads to whole 16-column tiles...OK
+8/10 prompt_picks_once.test.padList: the kk picks per row, then -1 to the tile...OK
+9/10 prompt_picks_once.test.the tracker reuses a pad until an event or a shape change...OK
+10/10 prompt_picks_once.test.the served cold 127-token prompt's pad count...OK
+All 10 tests passed.

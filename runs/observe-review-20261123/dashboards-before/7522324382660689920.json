@@ -1,0 +1,1617 @@
+{
+ "v1": null,
+ "v2": null,
+ "v3": null,
+ "v4": null,
+ "v5": null,
+ "v6": null,
+ "v7": null,
+ "v8": {
+  "version": 8,
+  "dashboardId": "7522324382660689920",
+  "title": "DGX Sparks",
+  "description": "Host, GPU (dcgm-exporter) and ConnectX-7 (DOCA telemetry) metrics for the DGX Spark ring",
+  "role": "",
+  "owner": "colum@volf.co",
+  "created": "2026-10-31T15:51:30.848Z",
+  "tabs": [
+   {
+    "tabId": "default",
+    "name": "Default",
+    "panels": [
+     {
+      "id": "Panel_ID7059361",
+      "type": "line",
+      "title": "CPU Utilization",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "percent",
+       "decimals": 2.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "100 - avg by (host_name) (system_cpu_utilization{state=\"idle\"})",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "100 - avg by (host_name) (system_cpu_utilization",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 0,
+       "y": 0,
+       "w": 96,
+       "h": 13,
+       "i": 1
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID9551509",
+      "type": "line",
+      "title": "Memory Utilization",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "percent",
+       "decimals": 2.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "avg by (host_name) (system_memory_utilization{state=\"used\"}) * 100",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "avg by (host_name) (system_memory_utilization",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 96,
+       "y": 0,
+       "w": 96,
+       "h": 13,
+       "i": 2
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID7794757",
+      "type": "line",
+      "title": "Load Average (5m)",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "",
+       "decimals": 2.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "avg by (host_name) (system_cpu_load_average_5m)",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "avg by (host_name) (system_cpu_load_average_5m)",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 0,
+       "y": 13,
+       "w": 48,
+       "h": 14,
+       "i": 3
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID9072210",
+      "type": "line",
+      "title": "Memory Usage by State",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "bytes",
+       "decimals": 2.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "avg by (host_name, state) (system_memory_usage)",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "avg by (host_name, state) (system_memory_usage)",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {state}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 48,
+       "y": 13,
+       "w": 48,
+       "h": 14,
+       "i": 4
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID8865172",
+      "type": "line",
+      "title": "Disk I/O",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "bps",
+       "decimals": 2.0,
+       "step_value": "0",
+       "top_results_others": false,
+       "axis_border_show": true,
+       "label_option": {
+        "rotate": 0.0
+       },
+       "show_symbol": false,
+       "line_interpolation": "smooth",
+       "legend_width": {
+        "unit": "px"
+       },
+       "legend_height": {
+        "unit": "px"
+       },
+       "base_map": {
+        "type": "osm"
+       },
+       "map_type": {
+        "type": "world"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false,
+       "table_transpose": false,
+       "table_dynamic_columns": false,
+       "trellis": {
+        "layout": null,
+        "num_of_columns": 1,
+        "group_by_y_axis": false
+       },
+       "show_gridlines": true,
+       "table_filtering": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "sum by (host_name, device, direction) (rate(system_disk_io[5m]))",
+        "vrlFunctionQuery": "",
+        "customQuery": true,
+        "fields": {
+         "stream": "align_errors",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {device} {direction}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 0,
+       "y": 27,
+       "w": 96,
+       "h": 13,
+       "i": 5
+      },
+      "htmlContent": "",
+      "markdownContent": "",
+      "customChartContent": " // To know more about ECharts , \n// visit: https://echarts.apache.org/examples/en/index.html \n// Example: https://echarts.apache.org/examples/en/editor.html?c=line-simple \n// Define your ECharts 'option' here. \n// 'data' variable is available for use and contains the response data from the search result and it is an array.\noption = {  \n \n};\n  "
+     },
+     {
+      "id": "Panel_ID4886166",
+      "type": "line",
+      "title": "Network I/O",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "bps",
+       "decimals": 2.0,
+       "step_value": "0",
+       "top_results_others": false,
+       "axis_border_show": true,
+       "label_option": {
+        "rotate": 0.0
+       },
+       "show_symbol": false,
+       "line_interpolation": "smooth",
+       "legend_width": {
+        "unit": "px"
+       },
+       "legend_height": {
+        "unit": "px"
+       },
+       "base_map": {
+        "type": "osm"
+       },
+       "map_type": {
+        "type": "world"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false,
+       "table_transpose": false,
+       "table_dynamic_columns": false,
+       "trellis": {
+        "layout": null,
+        "num_of_columns": 1,
+        "group_by_y_axis": false
+       },
+       "show_gridlines": true,
+       "table_filtering": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "sum by (host_name, device, direction) (rate(system_network_io[5m]))",
+        "vrlFunctionQuery": "",
+        "customQuery": true,
+        "fields": {
+         "stream": "align_errors",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {device} {direction}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 48,
+       "y": 40,
+       "w": 48,
+       "h": 14,
+       "i": 6
+      },
+      "htmlContent": "",
+      "markdownContent": "",
+      "customChartContent": " // To know more about ECharts , \n// visit: https://echarts.apache.org/examples/en/index.html \n// Example: https://echarts.apache.org/examples/en/editor.html?c=line-simple \n// Define your ECharts 'option' here. \n// 'data' variable is available for use and contains the response data from the search result and it is an array.\noption = {  \n \n};\n  "
+     },
+     {
+      "id": "Panel_ID6285699",
+      "type": "line",
+      "title": "Filesystem Utilization",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "percent",
+       "decimals": 2.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "max by (host_name, mountpoint) (system_filesystem_utilization) * 100",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "max by (host_name, mountpoint) (system_filesystem_utilization) * 100",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {mountpoint}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 0,
+       "y": 40,
+       "w": 48,
+       "h": 14,
+       "i": 7
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID3862360",
+      "type": "line",
+      "title": "Memory Page Faults",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "",
+       "decimals": 2.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "sum by (host_name, type) (rate(system_paging_faults[5m]))",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "rate(sum by (host_name, type) (system_paging_faults)[5m])",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {type}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 48,
+       "y": 54,
+       "w": 48,
+       "h": 14,
+       "i": 8
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID7489564",
+      "type": "line",
+      "title": "GPU Temperature",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "C",
+       "decimals": 1.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "dcgm_fi_dev_gpu_temp",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "dcgm_fi_dev_gpu_temp",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} GPU{gpu}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 0,
+       "y": 54,
+       "w": 24,
+       "h": 12,
+       "i": 9
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID2513784",
+      "type": "line",
+      "title": "GPU Memory Temperature",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "C",
+       "decimals": 1.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "dcgm_fi_dev_memory_temp",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "dcgm_fi_dev_memory_temp",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} GPU{gpu}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 24,
+       "y": 54,
+       "w": 24,
+       "h": 12,
+       "i": 10
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID9360943",
+      "type": "line",
+      "title": "GPU Power Draw",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "W",
+       "decimals": 1.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "dcgm_fi_dev_power_usage",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "dcgm_fi_dev_power_usage",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} GPU{gpu}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 48,
+       "y": 68,
+       "w": 24,
+       "h": 12,
+       "i": 11
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID0525346",
+      "type": "line",
+      "title": "SM Clock",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "MHz",
+       "decimals": 0.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "dcgm_fi_dev_sm_clock",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "dcgm_fi_dev_sm_clock",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} GPU{gpu}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 72,
+       "y": 68,
+       "w": 24,
+       "h": 12,
+       "i": 12
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID5679373",
+      "type": "line",
+      "title": "GPU Utilization",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "percent",
+       "decimals": 1.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "dcgm_fi_dev_gpu_util",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "dcgm_fi_dev_gpu_util",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} GPU{gpu}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 0,
+       "y": 66,
+       "w": 24,
+       "h": 12,
+       "i": 13
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID4803554",
+      "type": "line",
+      "title": "Memory Copy Utilization",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "percent",
+       "decimals": 1.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "dcgm_fi_dev_mem_copy_util",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "dcgm_fi_dev_mem_copy_util",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} GPU{gpu}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 24,
+       "y": 66,
+       "w": 24,
+       "h": 12,
+       "i": 14
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID2104237",
+      "type": "line",
+      "title": "Encoder Utilization",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "percent",
+       "decimals": 1.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "dcgm_fi_dev_enc_util",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "dcgm_fi_dev_enc_util",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} GPU{gpu}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 48,
+       "y": 80,
+       "w": 24,
+       "h": 12,
+       "i": 15
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID0098259",
+      "type": "line",
+      "title": "Decoder Utilization",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "percent",
+       "decimals": 1.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "dcgm_fi_dev_dec_util",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "dcgm_fi_dev_dec_util",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} GPU{gpu}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 72,
+       "y": 80,
+       "w": 24,
+       "h": 12,
+       "i": 16
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID6807578",
+      "type": "line",
+      "title": "Fabric RX Throughput",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "bps",
+       "decimals": 2.0,
+       "step_value": "0",
+       "top_results_others": false,
+       "axis_border_show": true,
+       "label_option": {
+        "rotate": 0.0
+       },
+       "show_symbol": false,
+       "line_interpolation": "smooth",
+       "legend_width": {
+        "unit": "px"
+       },
+       "legend_height": {
+        "unit": "px"
+       },
+       "base_map": {
+        "type": "osm"
+       },
+       "map_type": {
+        "type": "world"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false,
+       "table_transpose": false,
+       "table_dynamic_columns": false,
+       "trellis": {
+        "layout": null,
+        "num_of_columns": 1,
+        "group_by_y_axis": false
+       },
+       "show_gridlines": true,
+       "table_filtering": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "sum by (host_name, device_name) (rate(rx_bytes_phy[5m]))",
+        "vrlFunctionQuery": "",
+        "customQuery": true,
+        "fields": {
+         "stream": "align_errors",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {device_name}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 0,
+       "y": 78,
+       "w": 48,
+       "h": 14,
+       "i": 17
+      },
+      "htmlContent": "",
+      "markdownContent": "",
+      "customChartContent": " // To know more about ECharts , \n// visit: https://echarts.apache.org/examples/en/index.html \n// Example: https://echarts.apache.org/examples/en/editor.html?c=line-simple \n// Define your ECharts 'option' here. \n// 'data' variable is available for use and contains the response data from the search result and it is an array.\noption = {  \n \n};\n  "
+     },
+     {
+      "id": "Panel_ID5638768",
+      "type": "line",
+      "title": "Fabric TX Throughput",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "Bps",
+       "decimals": 2.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "sum by (host_name, device_name) (rate(tx_bytes_phy[5m]))",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "rate(sum by (host_name, device_name) (tx_bytes_phy)[5m])",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {device_name}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 48,
+       "y": 92,
+       "w": 48,
+       "h": 14,
+       "i": 18
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID7995086",
+      "type": "line",
+      "title": "RDMA Out-of-Buffer (congestion)",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "",
+       "decimals": 0.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "sum by (host_name, hca) (rate(rx_out_of_buffer[5m]))",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "rate(sum by (host_name, hca) (rx_out_of_buffer)[5m])",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {hca}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 0,
+       "y": 92,
+       "w": 32,
+       "h": 14,
+       "i": 19
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID6301141",
+      "type": "line",
+      "title": "Port Link State (4=up)",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "",
+       "decimals": 0.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "max by (host_name, hca, port) (ib_port_state)",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "max by (host_name, hca, port) (ib_port_state)",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {hca} p{port}",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 32,
+       "y": 106,
+       "w": 32,
+       "h": 14,
+       "i": 20
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     },
+     {
+      "id": "Panel_ID6151595",
+      "type": "line",
+      "title": "Phy Discards",
+      "description": "",
+      "config": {
+       "show_legends": true,
+       "legends_position": "bottom",
+       "unit": "",
+       "decimals": 0.0,
+       "axis_border_show": true,
+       "base_map": {
+        "type": "osm"
+       },
+       "map_view": {
+        "zoom": 1.0,
+        "lat": 0.0,
+        "lng": 0.0
+       },
+       "map_symbol_style": {
+        "size": "by Value",
+        "size_by_value": {
+         "min": 1.0,
+         "max": 100.0
+        },
+        "size_fixed": 2.0
+       },
+       "drilldown": [],
+       "connect_nulls": false,
+       "no_value_replacement": "",
+       "wrap_table_cells": false
+      },
+      "queryType": "promql",
+      "queries": [
+       {
+        "query": "sum by (host_name, device_name) (rate(rx_discards_phy[5m]))",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "rx_discards_phy",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {device_name} rx",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       },
+       {
+        "query": "sum by (host_name, device_name) (rate(tx_discards_phy[5m]))",
+        "vrlFunctionQuery": null,
+        "customQuery": true,
+        "fields": {
+         "stream": "tx_discards_phy",
+         "stream_type": "metrics",
+         "x": [],
+         "y": [],
+         "z": [],
+         "breakdown": [],
+         "filter": {
+          "filterType": "group",
+          "logicalOperator": "AND",
+          "conditions": []
+         }
+        },
+        "config": {
+         "promql_legend": "{host_name} {device_name} tx",
+         "layer_type": "line",
+         "weight_fixed": 1.0,
+         "limit": 0.0
+        }
+       }
+      ],
+      "layout": {
+       "x": 64,
+       "y": 106,
+       "w": 32,
+       "h": 14,
+       "i": 21
+      },
+      "htmlContent": "",
+      "markdownContent": ""
+     }
+    ]
+   }
+  ],
+  "variables": {
+   "list": [
+    {
+     "type": "query_values",
+     "name": "host_name",
+     "label": "",
+     "query_data": {
+      "stream_type": "metrics",
+      "stream": "system_cpu_utilization",
+      "field": "host_name",
+      "max_record_size": null,
+      "filter": []
+     },
+     "value": "",
+     "options": [
+      {
+       "label": "",
+       "value": "",
+       "selected": true
+      }
+     ],
+     "multiSelect": false,
+     "hideOnDashboard": false,
+     "selectAllValueForMultiSelect": "first",
+     "customMultiSelectValue": [],
+     "escapeSingleQuotes": true,
+     "scope": "global",
+     "tabs": [],
+     "panels": []
+    }
+   ],
+   "showDynamicFilters": true
+  },
+  "defaultDatetimeDuration": {
+   "type": "relative",
+   "relativeTimePeriod": "1h"
+  }
+ },
+ "version": 8,
+ "hash": "16144021663859766620",
+ "updatedAt": 0
+}

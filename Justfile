@@ -7,6 +7,22 @@ dir := "DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks"
 # spill runs (native-spill-*) are left out; .env is synced (the head's copy was backed up before it was first
 # overwritten).
 sync-head:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Guard: a sync overwrites the head's .env, which is what start.sh reads on the next restart. Pushing a stale one
+    # silently rolls production back (it did: 27baa93 was pushed while production ran 2bb052f, unsetting
+    # DRAFT_BLOCK_KEPT=2, TAPS_PACKED, IDX_PICK_WIDE and NCCL_MAX_CTAS=4). The head's .env is the runtime truth.
+    mine=$(grep -m1 '^IMAGE=' .env || true)
+    theirs=$(ssh -o BatchMode=yes -o ConnectTimeout=15 {{head}} "grep -m1 '^IMAGE=' {{dir}}/.env" || true)
+    if [[ -z "$theirs" ]]; then
+      echo "sync-head: cannot read {{head}}:{{dir}}/.env (offline?). Nothing was copied." >&2
+      exit 1
+    fi
+    if [[ "$mine" != "$theirs" ]]; then
+      echo "sync-head: refusing. This checkout's .env has '$mine'; the head's has '$theirs'." >&2
+      echo "  Copy the head's first:  ssh {{head}} 'cat {{dir}}/.env' > .env" >&2
+      exit 1
+    fi
     rsync -a --info=progress2 \
       --exclude=.git/ --exclude=scripts/local.sh \
       --exclude=__pycache__/ --exclude=.pytest_cache/ --exclude='native-spill-*/' \
@@ -31,6 +47,25 @@ restart-head flags="" offline="1":
 
 stop-head:
     ssh {{head}} 'cd {{dir}} && ./stop.sh'
+
+# Ship the engine's own log lines (the per-request `done` record, warnings, errors) from both Sparks to OpenObserve,
+# and stop the worker's failing `tensorfold` scrape job. Config-only: the engine is not restarted. Idempotent.
+# The collector runs as root because /var/lib/docker/containers is 0710 root:root, so a glob needs readdir and group
+# root is not enough. See runs/observe-20261125/REPORT.md. The head's tailnet address is offline as of 2026-11-25, so
+# the LAN jump host is the route. Undo: restore ~/otel-config.yaml.bak-20261125 on each node and remove the drop-in.
+observe-engine-logs jump="ai-node" lan="10.50.0.10" worker="10.50.0.11":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    d=runs/observe-20261125
+    ssh -J {{jump}} colum@{{lan}} 'sudo tee /etc/otel-config.yaml >/dev/null' < "$d/otel-config.head.after.yaml"
+    ssh -J {{jump}},{{lan}} colum@{{worker}} 'sudo tee /etc/otel-config.yaml >/dev/null' < "$d/otel-config.worker.after.yaml"
+    for h in "{{jump}}|{{lan}}" "{{jump}},{{lan}}|{{worker}}"; do
+      j="${h%%|*}"; t="${h##*|}"
+      ssh -J "$j" "colum@$t" 'sudo /usr/local/bin/otelcol-contrib validate --config /etc/otel-config.yaml && \
+        sudo mkdir -p /etc/systemd/system/otel-collector.service.d && \
+        printf "%s\n" "[Service]" "User=root" "Group=root" | sudo tee /etc/systemd/system/otel-collector.service.d/10-engine-logs.conf >/dev/null && \
+        sudo systemctl daemon-reload && sudo systemctl restart otel-collector && systemctl is-active otel-collector'
+    done
 
 # The engine cores' host-side pinning (scripts/cores.sh): takes storage IRQs off 15-19 (they land on 5-9) and sets
 # every core's governor to performance, on both Sparks, then installs it as a boot unit (/usr/local/sbin/tf-cores,
@@ -171,3 +206,11 @@ export-fnext dry="" engine="~/Workspace/tfref-fnext-rebase" base="c3b3859" branc
     args=(--engine "{{engine}}" --base "{{base}}" --branch "{{branch}}")
     [[ '{{dry}}' == "" ]] || args+=(--dry-run)
     ./scripts/export-fnext-series.sh "${args[@]}"
+
+# Run the k280 hardware window (runs/k280/README.md) end to end from the workstation: rsync the README's exact file
+# list to the head, then run passprof.sh -> run.sh -> l2-run.sh -> topk-run.sh there one at a time, each gated on its
+# run.log's "restored: validate rc=0" verdict. Production must be idle before this starts; it restarts the server per
+# arm and restores from .env at the end. NEVER run `just sync-head` for this: this checkout's .env is three deploys
+# stale. About 3.5 h. Nothing here adds or changes an arm.
+k280-window:
+    head={{head}} dir={{dir}} bash runs/k280/window.sh

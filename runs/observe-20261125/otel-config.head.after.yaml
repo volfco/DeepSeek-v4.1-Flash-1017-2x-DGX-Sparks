@@ -1,0 +1,126 @@
+# Managed by Ansible (opentelemetry_collector) — replaces the copy install.sh writes.
+# Mirrors the script's generated config (hostmetrics + filelog + journald -> OpenObserve OTLP HTTP)
+# plus a prometheus receiver for host-local exporters (3 jobs).
+receivers:
+  journald:
+    directory: /var/log/journal
+  filelog/std:
+    include: [ /var/log/**log ]
+    # start_at: beginning
+  hostmetrics:
+    root_path: /
+    collection_interval: 30s
+    scrapers:
+      cpu:
+        metrics:
+          # cpu is off by default and the cores are summed; CPU percent then goes negative.
+          system.cpu.time:
+            attributes: [cpu, state]
+          system.cpu.utilization:
+            enabled: true
+      disk:
+      filesystem:
+        metrics:
+          system.filesystem.utilization:
+            enabled: true
+      load:
+      memory:
+        metrics:
+          system.memory.utilization:
+            enabled: true
+      network:
+      paging:
+      processes:
+      # process: # a bug in the process scraper causes the collector to throw errors so disabling it for now
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'dcgm-gpu-metrics'
+          scrape_interval: 30s
+          static_configs:
+            - targets: ['localhost:9400']
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: 'DCGM_.*'
+              action: keep
+        - job_name: 'doca-telemetry'
+          scrape_interval: 30s
+          static_configs:
+            - targets: ['localhost:9100']
+        - job_name: 'tensorfold'
+          scrape_interval: 30s
+          static_configs:
+            - targets: ['localhost:8000']
+  # The engine's own per-request records. Production's container logs to the json-file driver, so each
+  # `done ` line (prompt/cached/tokens/rounds/accepted/prefill_s/ttft_s/decode_s/queue_s/restore_s/...) is one
+  # JSON object a line under /var/lib/docker/containers. Every engine line is shipped: ~2 MB a day a rank, and
+  # rank 1's warnings and errors are otherwise invisible. No prompt or reply text is in them.
+  filelog/engine:
+    include: [ /var/lib/docker/containers/*/*-json.log ]
+    start_at: end
+    operators:
+      - type: json_parser
+        parse_from: body
+        parse_to: body
+      - type: move
+        from: body.log
+        to: body
+
+processors:
+  # Detects plain hosts, AWS EC2, GCP Compute Engine and Azure VMs; off their cloud
+  # the cloud detectors add nothing. "system" comes first because the first detector
+  # to set an attribute wins, so host.name stays the OS hostname everywhere.
+  resourcedetection:
+    detectors: ["system", "ec2", "gcp", "azure"]
+    ec2:
+      tags:
+        - ^Name$
+    system:
+      hostname_sources: ["os"]
+  # Sets host.name to the EC2 instance Name tag when present; a no-op otherwise.
+  resource/hostname:
+    attributes:
+      - key: host.name
+        from_attribute: ec2.tag.Name
+        action: upsert
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+  batch:
+    send_batch_size: 10000
+    timeout: 10s
+
+extensions:
+  zpages: {}
+
+exporters:
+  otlphttp/openobserve:
+    endpoint: https://openobserve1.lab.volf.co/api/default
+    headers:
+      Authorization: "Basic Y29sdW1Adm9sZi5jbzpvMm9pX1ZtR0N4c3JoZmpIVTBlRVBEclV4ZFA0amhoNWhJdW5B"
+  otlphttp/openobserve_journald:
+    endpoint: https://openobserve1.lab.volf.co/api/default
+    headers:
+      Authorization: "Basic Y29sdW1Adm9sZi5jbzpvMm9pX1ZtR0N4c3JoZmpIVTBlRVBEclV4ZFA0amhoNWhJdW5B"
+      stream-name: journald
+
+service:
+  extensions: [zpages]
+  pipelines:
+    metrics:
+      receivers: [hostmetrics, prometheus]
+      processors: [resourcedetection, resource/hostname, memory_limiter, batch]
+      exporters: [otlphttp/openobserve]
+    logs:
+      receivers: [filelog/std]
+      processors: [resourcedetection, resource/hostname, memory_limiter, batch]
+      exporters: [otlphttp/openobserve]
+    logs/journald:
+      receivers: [journald]
+      processors: [resourcedetection, resource/hostname, memory_limiter, batch]
+      exporters: [otlphttp/openobserve_journald]
+    logs/engine:
+      receivers: [filelog/engine]
+      processors: [resourcedetection, resource/hostname, memory_limiter, batch]
+      exporters: [otlphttp/openobserve]

@@ -1,0 +1,1 @@
+Let me verify `dr.taps_w` initialization against `rd.taps`'s row width (the `@max(..., 1)` wrinkle at round.zig:576):

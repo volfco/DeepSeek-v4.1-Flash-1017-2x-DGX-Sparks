@@ -33,6 +33,12 @@ else:
             break
 
 
+# The cells: DEPTHS/STREAMS/MAX_TOKENS override the defaults above (the capacity suite runs 8 and 16 streams).
+DEPTHS = [int(x) for x in os.environ.get("DEPTHS", ",".join(map(str, DEPTHS))).split(",") if x.strip()]
+STREAMS = [int(x) for x in os.environ.get("STREAMS", ",".join(map(str, STREAMS))).split(",") if x.strip()]
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", str(MAX_TOKENS)))
+
+
 def prompt(depth, salt):
     off = (salt * 7919) % max(1, len(corpus_ids) - depth)
     return TOK.decode(corpus_ids[off:off + depth]) + ASK

@@ -1,0 +1,54 @@
+02:49:08 start
+Done. **Outcome: premise failed at the brief's own stop condition — no commit, worktree untouched at `10c9866`, evidence written to `report-0277.md`.**
+
+## Checkpoint summary
+
+**Decision (with reasoning):** BRIEF-0277 says *"read which kernel `kvNormRope` launches … if it is a kit cubin, stop and write that as the report: we never replace kit kernels."* I verified the chain in this tree:
+
+- `draft.zig:509/535` → `tri_norm.kvNormRope` (`tri_norm.zig:68`) → `Tri.run("_kv_norm_rope")` → `aot.Set.run` — the set loaded from `kit_dir/aot` (`model.zig:428`)
+- `docs/kernel-kit-provenance.md` explicitly lists `_kv_norm_rope` among the kit's Triton AOT cubins (fetched external repo, MANIFEST-checked)
+- No repo implementation exists (`grep` of `zig/kernels/cuda` finds nothing); recorded fixtures carry shapes/consts only — **no tensor bytes**; no cubin/SASS/disassembler on this machine
+
+**Independent second blocker:** the brief demands bit-identical ring bytes with "the same float order … the exact arithmetic sequence of the existing kernel" — that kernel is compiled Triton; its split `tl.sum` order and fma contraction are codegen, unpinnable here (`kit-kv-norm-rope.md` itself flags the split-reduction risk; 0263 stopped on the same gap).
+
+**Also proven (the brief asked regardless):** `dr.ao` has **no reader** on either path (4 occurrences in the whole tree: field, alloc, two OUT args).
+
+**Also delivered in the report:** launch counts at the served shape (3 `_kv_norm_rope` launches/round before → 1 if built; worth ~0.02% of a round, per the parked spec), the tension with the `fused-rope_store`/`0193-0194` replicator precedent (noted for the owner, not acted on), and three concrete unlock paths.
+
+**Gate (baseline only):** `zig build test` pass (first run hit the known flake, rerun clean), `zig build` pass, syntax check = the base's known 9 stub false positives.
+
+*Skipped/not checked:* no harness or kernel code (correctly not built per the stop rule); I did not fetch the public `kernels.py` source — out of scope and insufficient regardless (algorithm ≠ float order).
+
+**Open for your decision:** if you want this item built as a qualified replica (rope_store-style, with the 39-case exact hardware gate), the brief must grant replica status explicitly — say the word and I'll implement against `kit-kv-norm-rope.md`.
+03:06:26 pi exited rc=0
+03:06:26 resume 1
+No further work was pending — the run reached its terminal state before the interruption: **the premise failed, so the deliverable is the evidence report, not a commit.** State re-verified just now:
+
+- **Worktree `~/Workspace/tfref-k0277`:** clean at base `10c9866`, nothing to revert (no code was ever written — correct, per the stop rule).
+- **`report-0277.md`:** written (8.3 KB) with the full evidence.
+- **`h0277/`:** untouched (no harness is required for a premise-failed outcome).
+
+## Why the premise fails (summary of the report)
+
+BRIEF-0277's own stop condition: *"read which kernel `kvNormRope` launches and whether it is ours or a kit kernel — if it is a kit cubin, stop and write that as the report: we never replace kit kernels."*
+
+Verified chain at `10c9866`: `draft.zig:509/535` → `tri_norm.kvNormRope` (`tri_norm.zig:68`) → `Tri.run("_kv_norm_rope")` → `aot.Set.run`, the set loaded from `kit_dir/aot` (`model.zig:428`) — and `docs/kernel-kit-provenance.md` explicitly lists `_kv_norm_rope` among the kit's Triton AOT cubins. No repo implementation exists; recorded fixtures carry shapes only (no tensor bytes); no cubin/SASS on this machine. A second, independent blocker: the brief's "bit-identical, same float order" requirement is unsatisfiable — the existing kernel is compiled Triton whose split-reduction order is codegen (flagged as a bit-exactness risk even in `kit-kv-norm-rope.md`).
+
+The report also contains the requested items regardless of the stop: `dr.ao` **proven reader-less**, launch counts at the served shape (3 → 1 per round if ever built; ≈0.02% of a round, item parked since 20261122), the baseline gate record (`zig build test`/`zig build` pass; syntax check = base's known 9 stub false positives), the replicator-precedent tension flagged for the brief owner, and three unlock paths.
+
+**Commit: none — by the brief's rule.** If you override and grant replica status (rope_store-style, 39-case exact hardware gate), say so and I'll implement against `kit-kv-norm-rope.md`; otherwise `report-0277.md` is the finished outcome.
+
+*Skipped:* all implementation/harness work (forbidden while the launch target is a kit cubin); did not fetch external kit source (out of scope, and insufficient to pin float order).
+03:07:03 pi exited rc=0
+03:07:03 resume 2
+Terminal state now recognized by the harness. When this turn ends, `run-agent.sh` will hit its own exit branch (`premise failed; report written`) and stop resuming.
+
+## Final state
+
+- **Verdict: premise failed** (per BRIEF-0277's explicit stop rule) — `kvNormRope` launches the **kit cubin** `_kv_norm_rope` (`draft.zig:509/535` → `tri_norm.zig:68` → `Tri.run` → the kit's AOT set at `kit_dir/aot`; `docs/kernel-kit-provenance.md` names `_kv_norm_rope` among `kit/aot/cubins`). The brief: *"if it is a kit cubin, stop … we never replace kit kernels."* Secondary blocker: the demanded bit-identical float order is unpinnable locally (compiled Triton; no cubin/SASS/tensor bytes on this machine).
+- **Worktree:** clean at base `10c9866` — reverted-by-never-changed, exactly as the premise-failed branch requires. No commit by design.
+- **`report-0277.md`:** complete evidence report, now headlined with the literal `premise failed` / `not worth building` declaration the resume loop greps for (that missing literal was the only reason it kept resuming). Contains: dispatch-chain proof, `dr.ao` reader-less proof, launch counts (3 → 1 per round if ever built, ≈0.02% of a round — parked since 20261122), baseline gate record (`zig build test`/`zig build` pass; syntax check = base's known 9 stub false positives), replicator-precedent tension flagged for the owner, and three unlock paths.
+
+*Skipped/not checked:* all kernel/harness implementation (forbidden while the launch target is a kit cubin); no commit hash exists to report — the report says so explicitly. If you want it built as a qualified replica (rope_store-style + the 39-case exact hardware gate), override the brief and I'll implement against `kit-kv-norm-rope.md`.
+03:08:53 pi exited rc=0
+03:08:53 premise failed; report written

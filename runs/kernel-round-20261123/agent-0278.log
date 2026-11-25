@@ -1,0 +1,44 @@
+02:49:08 start
+Both files are done and green: **date.js 12/12, decimal.js 11/11**.
+
+**`tools/decimal.js`** — exact base-10 arithmetic on (sign, digits, scale), no float error.
+- `new Decimal(x)` / `Decimal.from(x)` accepts Decimal, number, string, bigint
+- Exact: `add`, `sub`, `mul`, `abs`, `neg`, `round(dp)`
+- Precision-based (default 20): `div(other, p)`, `pow(n, p)`, `sqrt(p)` — half-away-from-zero rounding
+- `compareTo/eq/lt/lte/gt/gte`, `isZero/isNegative/isInteger/sign/scale`, `toString/toFixed/toNumber`, `Decimal.max/min`
+
+**`tools/date.js`** — UTC proleptic-Gregorian DateTime on a ms timeline (Hinnant civil↔days map, so no DST/timezone surprises).
+- `new DateTime(y, m, d, …)` (strict validation), `DateTime.from/now/fromEpoch/parseISO/parse(text, fmt)`
+- `add/subtract({years, months, …})` with month-end clamping, `diff(other, unit)`, `with`, `startOf/endOf`
+- `format` with tokens (`YYYY M DDo dddd hh mm ss SSS A…`, `[literal]` escaping) and a matching `parse`
+- `compare/equals/isBefore/isAfter`, `toDate/getTime/toISOString`
+
+Each file is self-contained with its test suite at the bottom: `node decimal.js`, `node date.js`.
+
+Fixed along the way: `parse` initially dropped separator text between tokens (switched to a manual token scan); results stay normalized, so `toFixed` is the fixed-width renderer (documented in the header).
+
+Skipped/not checked: negative-zero preservation (`-0.004.toFixed(2)` → `'0.00'`, documented), timezone offsets in ISO strings (refused by design), locale-aware month/weekday names.
+
+Also note: the kernel-0278 work from earlier in this session is still paused mid-implementation in this worktree (no commit, gate not run) — say the word if you want me to resume it.
+03:34:46 pi exited rc=0
+03:34:46 resume 1
+Done — committed and reported. Checkpoint summary:
+
+**Commit:** `971c69d4d265164a38b9674a014fcbf772333092` on `kernel-0278`, parent `10c9866`, subject exactly `0278 dsv41: TF_DS_TAPS_PACKED (off by default): prompt taps written in the drafter's row-major layout`. Working tree clean.
+
+**What the patch does**
+- `taps_packed.zig` (new, pure module, `idx_fused` pattern): `TF_DS_TAPS_PACKED` parse/fromText + layout reference + tests; wired as `Ops.taps_packed` (no kernel — `hcMean4`'s output stride suffices).
+- `prompt.tap` writes tap j at column `j*D` of `ch.taps`'s packed `[rows, taps*D]` rows (same stride shape as the decode write); `model.zig` + `layer_main.zig` drop the 3 completion `copyRows` and pass `ch.taps` to `dr.absorb`; `layer_main`'s per-tap fixture checks gather strided rows via a new `Run.checkStrided`.
+- Off path byte- and launch-identical; engagement banner at the first packed write (0265 pattern); both ranks alike.
+
+**Gate (all green)**
+1. `zig build` + `zig build test` exit 0 (the brief's uncaptured test flake recurred twice mid-round; 6 consecutive clean runs of the final tree).
+2. CUDA syntax stubs: same 9 known errors as base, identical normalized sets.
+3. `h0278/` harness: extracted `tf_ds_hc_mean4_kernel` vs independent reference — rows 1/127/128/2048 + partial-last-chunk all byte-identical across planar+copy / packed / reference; negative control detects wrong layouts; 3.75 MiB per 128-row chunk premise reproduced exactly.
+4. Independent review subagent: OK, no blockers (its 2 notes folded in).
+
+**Report:** `runs/kernel-round-20261123/report-0278.md` with the real hash, launch-count table (3 launches + 3.75 MiB → 0 per prompt), decisions, deviations, and hardware-only gaps.
+
+Skipped/risks: GPU bit-identity and the timing win are hardware-gate questions only; the one-commit rule meant the unrelated session-requested `tools/decimal.js`/`tools/date.js` ride in the same commit (drop them from the export if patch purity matters — noted in the report).
+04:10:48 pi exited rc=0
+04:10:48 committed 971c69d 0278 dsv41: TF_DS_TAPS_PACKED (off by default): prompt taps written in the drafter's row-major layout
