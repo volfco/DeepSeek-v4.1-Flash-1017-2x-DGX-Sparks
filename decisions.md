@@ -994,3 +994,45 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
   (off by default, no new CUDA kernel, rank-gated, unit-tested) plus `capture.sh`/`train.py`. `runs/m3-20261125/README.md`
   records the two traps that cost a window (the smoke test opening the dump before the workload, and `find -xdev`
   skipping the `/spill` bind mount).
+
+## 2026-11-25: operator decisions — keep ENGRAM_LEAD; adopt 0281+0282 once the from-source control passes
+
+- Scope: major (a production default is ratified and a production deploy is authorised, conditionally).
+- **ENGRAM_LEAD: keep it on.** It is exact (39/39 in all four arms), costs decode nothing (all cells within 0.5%), and
+  gains on every cell measured: cold prefill +1.54%/+2.51% at 32K and +2.40%/+3.23% at 96K (ABBA). The record is
+  corrected from "provisional" to "kept", and the gain from the Nov 19 narrow run's +4.9/+5.0/+4.5% down to ~2-3%.
+  **Still owed and still the deciding evidence:** the ≥1.5M-uncached-token soak and the hour of process age, which
+  the reader has never had — it was on during the Nov 13 age-related slowdown. If age ever shows a regression, the
+  `.env` line comes out (`~/dsv41-env-backups/.env.bak-20261119-pre-lead` is the undo).
+- **0281 `TF_DS_MARKOV_CACHE=4096` + 0282 `TF_DS_DRAFT_PREFETCH=1`: adopt, after the from-source control.** Both clear
+  their gates inside image `1421187` (0281 −0.20/−0.22 ms a pass, −5.0%, miss 52.2→24.2%; 0282 `dpf1` −0.18/−0.17 ms,
+  no forward cost; drafts IDENTICAL 19/19; exact IDENTICAL every arm). The condition is the build: `1421187`'s two
+  executables were cross-built on the workstation, production's came from a GCC 13.3 from-source build, so a win
+  against a slower cross-built baseline may not transfer.
+  - **Control (no build needed):** one arm on production's own image `bench-fused-next-2bb052f` under the k280 workload,
+    compared with `1421187`'s `ctl1`/`ctl2`. `1421187` is `2bb052f` + 0280–0283 with every switch off, so the two
+    differ only in how the host code was compiled. If production's `pass_ms`/`forward_ms` land inside the controls'
+    spread, the cross-build did not distort the baseline and the deltas transfer.
+  - If it does not match, rebuild `1421187` from source on the head and re-run the mc/dpf pairs against a from-source
+    control before deploying.
+- **Not adopted:** 0283's L2 knobs (no winner; the kit's 3000 ns / 230 GB/s / 16 MiB stay) and 0282's `dpf2` (a wash
+  on forward+pass).
+
+## 2026-11-25: production onto `bench-fused-next-1421187` with 0281 `MARKOV_CACHE=4096` and 0282 `DRAFT_PREFETCH=1`
+
+- Scope: major (production image and two switches). Deploy record `runs/deploy-1421187-20261125/`.
+- **From-source control passed** (`runs/k280/fromsource/REPORT.md`): two arms on production's own from-source
+  `2bb052f` against `1421187`'s cross-built `ctl1`/`ctl2` under the same workload give `pass_ms` 4.24/4.22 vs
+  4.20/4.22 — within 0.04 ms (0.9%), an order of magnitude below the adopted gains. So the cross-built baseline is
+  not distorted where the patches act, and the deltas transfer. (The forward is ~1.1% slower from source, which does
+  not touch the pass; absolute forward figures remain non-comparable across the two builds.)
+- **Deployed:** image `tensorfold-dsv41:bench-fused-next-1421187` (= `2bb052f` + 0280–0283) with
+  `TF_DS_MARKOV_CACHE=4096` and `TF_DS_DRAFT_PREFETCH=1`, both ranks.
+- **Gates, all pass:** exact panel **IDENTICAL 39/39** vs `runs/deploy-10c9866-20261122/exact.json`; `validate.py`
+  **rc=0** (`all passed`, 8/8 replies identical to `runs/matrix/base.validate.json`); container env proof shows the
+  image and both switches on both ranks; **MemAvailable 7.4 GiB head / 8.2 GiB worker** against the 2.5 GiB memguard
+  floor (4,096 rows cost 473 MiB a rank).
+- **Not adopted, deliberately:** 0282 `dpf2` (a wash on forward+pass) and 0283's L2 knobs (no winner; the kit's
+  3000 ns / 230 GB/s / 16 MiB stay).
+- Undo: `cp ~/dsv41-env-backups/.env.bak-20261125-pre-mwb .env && ./start.sh restart` (back to `2bb052f`, both
+  switches unset). The previous production image is still on both ranks.

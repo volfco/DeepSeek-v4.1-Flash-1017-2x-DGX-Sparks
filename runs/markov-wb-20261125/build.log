@@ -1,0 +1,39 @@
+== 1/5 the base image's executable and its fatbins
+20 fatbins
+dsv41_ops.fatbin: OK
+dsv41_rdma.fatbin: OK
+dsv41_shard.fatbin: OK
+dsv41_torch.fatbin: OK
+experts.fatbin: OK
+experts_pack.fatbin: OK
+experts_prefill.fatbin: OK
+lane_gemv.fatbin: OK
+nemotron_ops.fatbin: OK
+prefill_attention.fatbin: OK
+qmm_group.fatbin: OK
+qmm_prefill.fatbin: OK
+sample.fatbin: OK
+scan_rows.fatbin: OK
+torch_argmax.fatbin: OK
+torch_indexing.fatbin: OK
+torch_movement.fatbin: OK
+torch_nemotron_constants.fatbin: OK
+torch_pointwise.fatbin: OK
+torch_topk.fatbin: OK
+== 2/5 cross-build markov-trace
+== 3/5 the new executables embed the base's fatbins and the new switches
+20 fatbins
+6 fatbins
+== 4/5 the image on each rank (executables layered over tensorfold-dsv41:bench-fused-next-2bb052f)
+7528cfe9d8b03bd8f166fbccdafbf5adb2547493f22a2417ff6badce6ce788c0  tensorfold-native
+965787e23e255aef61aaa3a245c9d5dab649e75f0434b41abf8afc82f4ddaed4  tf-dsv41-lanes
+tensorfold-native: OK
+tf-dsv41-lanes: OK
+sha256:901275603d0839ba38676fb3aa06b47458661f1844469b97cea92490f0c1ed2b
+sha256:e7664ebda93109b7d9f0e38d3bd32266cfb9409f23071d6060c503312d6eb765
+== 5/5 the executables inside the new image on each rank
+must specify at least one container source
+0a1,2
+> 7528cfe9d8b03bd8f166fbccdafbf5adb2547493f22a2417ff6badce6ce788c0  tensorfold-native
+> 965787e23e255aef61aaa3a245c9d5dab649e75f0434b41abf8afc82f4ddaed4  tf-dsv41-lanes
+EXIT=1

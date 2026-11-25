@@ -14,6 +14,14 @@ The [current evaluation order](to-benchmark.md#current-evaluation-order) and [ru
 - **The 4,096-row prompt pass is an operator decision, not backlog.** It moves bits (decisions §0121) and its live
   accounting is net-negative until someone prices it against the resume grid and the prefill slice (the item above).
 
+## Production changes 2026-11-25 (recorded)
+
+- Image `bench-fused-next-1421187` (= `2bb052f` + 0280-0283) with `TF_DS_MARKOV_CACHE=4096` and
+  `TF_DS_DRAFT_PREFETCH=1`: adopted, exact 39/39, validate rc=0, MemAvailable 7.4/8.2 GiB. Undo:
+  `~/dsv41-env-backups/.env.bak-20261125-pre-mwb`. See decisions.md 2026-11-25.
+- `ENGRAM_LEAD` ratified (stays on); gain corrected to ~2-3%; the soak/age half is still owed.
+- 0283 L2 knobs and 0282 `dpf2` explicitly not adopted.
+
 ## K272 performance diagnosis (2026-11-22)
 
 - [x] **Explain the neutral COPY_MIN result.** Of the four patches, 0272 adds timing, 0273 repairs failed capture, 0274 fixes tool-call output, and only 0275 changes the normal decode policy. Raising the minimum from 2 to 3 changes the leader's decision only when a suffix match of at least eight tokens yields an exactly two-token continuation. The queued draft head or a plain round then takes over. Both paths still pay for verification. Across both controls and both CM3 arms, all 16 seeded single-request probes matched on the full per-round token-count sequence and accepted/drafted totals, totaling 4,769 rounds per arm. Across the full profile CM3 averaged 7,491 rounds versus 7,504 for control (−0.17%), with both CM3 forward times (38.92 and 38.91 ms) inside the control range (38.89–38.96 ms). That leaves little opportunity for a throughput gain and accounts for the observed +0.14% probe result. The banner records entry into the proposal gate before its decision. Determining how often an eligible two-token copy was actually displaced would require a counter at that decision. [0275 gate semantics](runs/kernel-round-20261122d/report-0275.md) · [Probe records and profiles](runs/overnight-20261122/k272/) · [Arm results](runs/overnight-20261122/k272/RESULTS.md)
@@ -749,7 +757,7 @@ Read-only review of `continue.md`, `to-benchmark.md`, `best-runtime.md`, the 06:
 
 - [ ] **Update `best-runtime.md`**: still names `10c9866` as production; actual is `2bb052f` + `NCCL_MAX_CTAS=4`/`TAPS_PACKED`/`IDX_PICK_WIDE`. The runtime record of record is two deploys behind.
 - [ ] **Markov step-0 nuance for the cache work** (kimi section owns ranking/LRU): step 0 misses 66–67% vs 51% for steps 1–5 and its token is the stream's last accepted token, known at absorb time a full pass earlier — pre-insert/precompute its bias row then. At 4 streams a step is fast only if all rows hit, so static-list enlargement underdelivers where live traffic runs.
-- [ ] **`ENGRAM_LEAD`: the pre-soak half is done (2026-11-25); the soak/age half is still owed and is the deciding evidence.** ABBA on natural text, exact 4/4, decode unchanged within 0.5%: cold prefill **+1.54%/+2.51% at 32K and +2.40%/+3.23% at 96K** — real and reproducible (both lead arms beat both controls), but **32K misses the 3% keep bar in both passes**, and it is ~2-3%, not the +4.9/+5.0/+4.5% the Nov 19 narrow run recorded (one block an arm; this one brackets with ABBA, so the earlier figure was an overestimate). Still owed: a >=1.5M-uncached-token soak plus an hour of process age, the re-measured cells, 300K, and the long-lived deep-session run — the reader was on during the Nov 13 age-related slowdown, so age is the question. [Report](runs/engram-lead-20261125/REPORT.md) · [Evaluation order](to-benchmark.md#current-evaluation-order) [Evaluation order](to-benchmark.md#current-evaluation-order)
+- [x] **`ENGRAM_LEAD` RATIFIED 2026-11-25 (operator): keep it on — the soak/age half is still owed.** ABBA on natural text, exact 4/4, decode unchanged within 0.5%: cold prefill **+1.54%/+2.51% at 32K and +2.40%/+3.23% at 96K** — real and reproducible (both lead arms beat both controls), but **32K misses the 3% keep bar in both passes**, and it is ~2-3%, not the +4.9/+5.0/+4.5% the Nov 19 narrow run recorded (one block an arm; this one brackets with ABBA, so that figure was an overestimate). Still owed: a >=1.5M-uncached-token soak plus an hour of process age, the re-measured cells, 300K, and the long-lived deep-session run — the reader was on during the Nov 13 age-related slowdown, so age is the question. Undo: `~/dsv41-env-backups/.env.bak-20261119-pre-lead`. [Report](runs/engram-lead-20261125/REPORT.md) · [decision](decisions.md) · [Evaluation order](to-benchmark.md#current-evaluation-order)
 
 ## ds41 findings
 

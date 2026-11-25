@@ -22,6 +22,7 @@ ASK = "\n\nSummarize the document above in detail, section by section, in plain 
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 120
     max_tokens = int(sys.argv[2]) if len(sys.argv) > 2 else 128
+    temp = float(os.environ.get("TEMPERATURE", "0"))
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(TOK_PATH)
     ids = json.load(open(CORPUS))
@@ -30,7 +31,9 @@ def main():
         off = (i * 7919 + 12345) % max(1, len(ids) - 4096)
         p = tok.decode(ids[off:off + 4096]) + ASK
         body = {"model": "DeepSeek-V4.1-Flash-1017", "messages": [{"role": "user", "content": p}],
-                "max_tokens": max_tokens, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}
+                "max_tokens": max_tokens, "temperature": temp,
+                "top_k": (20 if temp > 0 else 0), "top_p": (0.95 if temp > 0 else 1.0),
+                "chat_template_kwargs": {"enable_thinking": False}}
         req = urllib.request.Request(URL + "/v1/chat/completions", json.dumps(body).encode(),
                                      {"Content-Type": "application/json"})
         t = time.time()
