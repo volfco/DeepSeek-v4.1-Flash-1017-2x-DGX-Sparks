@@ -21,11 +21,30 @@ The [current evaluation order](to-benchmark.md#current-evaluation-order) and [ru
   Best config: static 256 + dynamic 256 = ~63 MiB, freeing ~410 MiB a rank. Measured on 2,568 real passes via
   `TF_DS_MARKOV_TRACE` (engine branch `markov-trace`, `6a048d1`, off by default, host-only) + `sim.py`.
   [Report](runs/markov-wb-20261125/REPORT.md)
-- **Not built: the write-back kernel.** A host-side write-back is impossible (the Markov loop is entirely on device;
-  the pass's only host read happens after `stage` is overwritten), and the kit cubins are untouchable, so it needs a
-  small repo-owned kernel after `_bias` — hence nvcc and a from-source image build plus a byte-parity gate. That build
-  is now justified by the numbers above and is the next step.
-- Caveat: the trace is one stream a pass (production is 1.42), so these are single-stream-pass figures.
+- **Operator decision 2026-11-25: keep the dynamic region's default at 256 rows** (not 1,024); grow it only on the
+  eviction signal. Production's static `TF_DS_MARKOV_CACHE=4096` is unchanged by this work.
+- [ ] **Build the Markov bias write-back kernel (the dynamic region).** A host-side write-back is impossible — the
+  Markov loop is `mk.stepsTapped(...)`, entirely on device, and the pass's only host read happens after `stage` has
+  been overwritten — and the kit cubins (`_bias`/`_score`/`_pick`) are untouchable. So it needs a small **repo-owned**
+  device kernel launched after `_bias`.
+  - **Spec:** `TF_DS_MARKOV_WB=<rows>` (default off; **256** when set, the measured knee; 64..2048), **LRU**
+    replacement (beats FIFO by 0.018 ms at 256), a device slot table + victim bookkeeping, and a region allocated
+    after the existing static rows so both coexist. Best steady state: static 256 + dynamic 256 ≈ 63 MiB, which meets
+    or beats today's 4,096 static rows (473 MiB) and frees ~410 MiB a rank.
+  - **Instrumentation (part of the ask):** per rank under the existing round profile, `markov_wb_{rows,hits,misses,
+    evictions}`; warn once when `miss_steps/pass > 1.0` **and** `evictions/lookups > 0.25` (the table puts that at a
+    region of 256 or below on this traffic), pointing at `TF_DS_MARKOV_WB=512/1024`. The ratio alone is not the
+    signal: a well-sized region still evicts steadily, so read it against the 0.71 miss-steps floor.
+  - **Cost:** new kernels need nvcc, which exists only inside the image build — so a **from-source image build** on the
+    head plus a GPU byte-parity check of the new symbol and the usual exact/sampled panels. Budget it as a build round,
+    not an arm.
+  - **Gate:** exact 39/39 + sampled identical + `gate_drafts.py` exit 0 (drafts must not move — the region changes step
+    *time*, never a draft), then `pass_ms` must fall by ≥0.15 ms against both controls at 256 rows; check
+    `MemAvailable` on both ranks.
+  - **Owed before the default is locked:** the sizing trace is one stream a pass (production's own figure is 1.42).
+    Re-trace with a higher streams-a-pass — longer replies and real concurrency — and confirm 256 is still the knee.
+  - Evidence: [sizing report](runs/markov-wb-20261125/REPORT.md) · [design + traps](runs/markov-wb-20261125/README.md) ·
+    `markov_trace.zig`/`sim.py`.
 
 ## Production changes 2026-11-25 (recorded)
 

@@ -1058,3 +1058,16 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
   traffic), pointing at `TF_DS_MARKOV_WB=512/1024`.
 - Caveat: the trace is one stream a pass (production's own figure is 1.42), so the figures are single-stream-pass
   numbers. Re-trace at a higher streams-a-pass before the kernel's default is locked.
+
+## 2026-11-25: Markov dynamic region — default 256 rows; the kernel is a follow-up build
+
+- Scope: minor (a default choice and a follow-up task; no code, no production change).
+- Operator decision: **the dynamic region's default row count is 256** (the measured knee: 0.240 ms a pass at
+  31.5 MiB), not 1,024 (0.330 ms at 126 MiB). Growth to 512/1,024 only on the eviction signal.
+- The kernel is recorded as a follow-up action in `todo.md` with its spec (LRU, `TF_DS_MARKOV_WB`, device slot/victim
+  bookkeeping, counters), its instrumentation (`markov_wb_{rows,hits,misses,evictions}` and the `miss_steps/pass > 1.0`
+  with `evictions/lookups > 0.25` advisory), its cost (nvcc → from-source image build + byte-parity gate) and its gate
+  (exact/sampled/`gate_drafts` then `pass_ms` ≥0.15 ms down at 256 rows).
+- **Production is unchanged by this entry:** it stays on `1421187` with the static `TF_DS_MARKOV_CACHE=4096`. Selecting
+  1,024 would have been a regression of the static list (0281 measured 24.2% miss at 4,096 against ~38-42% at 1,024),
+  which is why the 1,024 request was resolved to the dynamic region instead.
