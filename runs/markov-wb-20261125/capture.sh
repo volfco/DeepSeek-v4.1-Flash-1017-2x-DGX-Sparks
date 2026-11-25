@@ -19,7 +19,7 @@ for i in $(seq 90); do curl -sf -m 5 http://127.0.0.1:8000/health >/dev/null && 
 curl -sf -m 5 http://127.0.0.1:8000/health >/dev/null || { echo "  no /health"; exit 1; }
 docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $C | grep -E '^(PARALLEL|TF_DS_MARKOV_TRACE)=' | tee "$OUT/armed.txt"
 echo "$(date -u +%FT%TZ) capture: $REQS x $TOKS, sampled"
-TEMPERATURE=1.0 python3 runs/m3-20261125/capture.py "$REQS" "$TOKS" 2>&1 | tee "$OUT/capture.log" | tail -2
+TEMPERATURE=1.0 PARALLEL=8 python3 runs/m3-20261125/capture.py "$REQS" "$TOKS" 2>&1 | tee "$OUT/capture.log" | tail -2
 FOUND=$(docker exec $C sh -c 'find / -name "markov.bin" -not -path "/proc/*" 2>/dev/null | head -1')
 echo "dump at '$FOUND' $(docker exec $C sh -c "stat -c %s '$FOUND' 2>/dev/null || echo 0") bytes"
 docker cp "$C:$FOUND" "$OUT/markov.bin"

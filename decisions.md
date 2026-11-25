@@ -1036,3 +1036,25 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
   3000 ns / 230 GB/s / 16 MiB stay).
 - Undo: `cp ~/dsv41-env-backups/.env.bak-20261125-pre-mwb .env && ./start.sh restart` (back to `2bb052f`, both
   switches unset). The previous production image is still on both ranks.
+
+## 2026-11-25: the Markov cache's dynamic region — sized, worth building, not yet built
+
+- Scope: major (a design decision and a measured sizing), no production change.
+- Question (operator): replace the 4,096 static Markov bias rows (473 MiB) with a dynamic write-back region of ~256
+  rows (~31.5 MiB), configurable, with an eviction signal that says when to grow it.
+- **Finding 1 — a host-side write-back is impossible.** The Markov loop is `mk.stepsTapped(...)`, entirely on device;
+  the pass's single host read happens after the loop, by which time `stage` holds later steps. A per-step D2H would
+  break graph capture. So the region needs a small **repo-owned device kernel** after `_bias` (the kit cubins stay
+  untouched) → nvcc → a from-source image build and a byte-parity gate.
+- **Finding 2 — sized first, and it pays.** `TF_DS_MARKOV_TRACE` (`6a048d1`, off by default, host-only) on 2,568 real
+  passes: static-256 alone hits 40.4% of step rows at 3.12 miss steps a pass (~0.446 ms). A **256-row dynamic LRU
+  region hits 72.4% and saves 0.240 ms a pass — more than the 0.20/0.22 ms the deployed 4,096 static rows deliver, at
+  31.5 MiB instead of 473 MiB.** LRU beats FIFO; 256 rows is the knee; 2,048 is the floor (0.71 miss steps a pass).
+- Decision: **build the kernel, with 256 as the default row count (`TF_DS_MARKOV_WB`) and LRU replacement.** The
+  intended steady state is static 256 + dynamic 256 (~63 MiB), which meets or beats today's 473 MiB configuration and
+  frees ~410 MiB a rank.
+- Monitoring signal, as asked: expose `markov_wb_{rows,hits,misses,evictions}` under the round profile and warn when
+  `miss_steps/pass > 1.0` with `evictions/lookups > 0.25` (the table puts that at a region of 256 or below on this
+  traffic), pointing at `TF_DS_MARKOV_WB=512/1024`.
+- Caveat: the trace is one stream a pass (production's own figure is 1.42), so the figures are single-stream-pass
+  numbers. Re-trace at a higher streams-a-pass before the kernel's default is locked.

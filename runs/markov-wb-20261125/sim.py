@@ -52,10 +52,10 @@ def read_trace(path):
 
 def simulate(passes, static_set, rows, policy):
     """Returns (row_hits, row_misses, miss_steps) for a dynamic region of `rows` (0: static only)."""
-    region = {}          # token -> slot
-    order = []           # LRU order (slot indices), unused for FIFO
+    region = {}            # token -> slot
+    recency = []           # LRU: slots, least recently used first
     free = list(range(rows)) if rows else []
-    victim = 0
+    victim = 0             # FIFO: the rotating victim
     hits = misses = miss_steps = 0
     for n, steps, toks in passes:
         for j in range(steps):
@@ -72,26 +72,33 @@ def simulate(passes, static_set, rows, policy):
                 if t in region:
                     hits += 1
                     if policy == "lru":
-                        order.remove(region[t]); order.append(region[t])
+                        slot = region[t]
+                        recency.remove(slot)
+                        recency.append(slot)
                     continue
                 misses += 1
                 step_miss = True
                 if free:
                     slot = free.pop()
+                elif policy == "lru":
+                    slot = recency.pop(0)          # the least recently used slot
+                    for k, v in list(region.items()):
+                        if v == slot:
+                            del region[k]
+                            break
                 else:
                     slot = victim
                     victim = (victim + 1) % rows
-                    old = next((k for k, v in region.items() if v == slot), None)
-                    if old is not None:
-                        del region[old]
+                    for k, v in list(region.items()):
+                        if v == slot:
+                            del region[k]
+                            break
                 region[t] = slot
                 if policy == "lru":
-                    order.append(slot)
-                    if free:
-                        pass
+                    recency.append(slot)
             if step_miss:
                 miss_steps += 1
-    return hits, misses, miss_steps
+    return hits, misses, miss_steps, len(region)
 
 
 def main():
@@ -106,14 +113,14 @@ def main():
     print(f"{npas} passes, {steps_total} steps, {rows_total} step rows (mean {rows_total/steps_total:.1f} streams a step)")
 
     static_set = set(STATIC)
-    b_hits, b_miss, b_msteps = simulate(passes, static_set, 0, "fifo")
+    b_hits, b_miss, b_msteps, _ = simulate(passes, static_set, 0, "fifo")
     print(f"static 256 only: rows hit {100*b_hits/rows_total:.1f}%, miss steps a pass {b_msteps/npas:.2f}, "
           f"~{b_msteps*miss_us/1000/npas:.3f} ms a pass of _bias")
     print()
     print(f"{'rows':>5} {'MiB':>6} {'policy':>6} {'row hit%':>9} {'missSteps/p':>11} {'saved ms/p':>10}")
     for rows in (64, 128, 256, 512, 1024, 2048, 4096):
         for policy in ("fifo", "lru"):
-            h, m, ms = simulate(passes, static_set, rows, policy)
+            h, m, ms, _ = simulate(passes, static_set, rows, policy)
             saved = (b_msteps - ms) * miss_us / 1000 / npas
             print(f"{rows:5d} {rows*126/1024:6.1f} {policy:>6} {100*h/rows_total:9.1f} {ms/npas:11.2f} {saved:10.3f}")
 

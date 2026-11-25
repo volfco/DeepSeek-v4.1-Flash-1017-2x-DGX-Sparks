@@ -14,6 +14,19 @@ The [current evaluation order](to-benchmark.md#current-evaluation-order) and [ru
 - **The 4,096-row prompt pass is an operator decision, not backlog.** It moves bits (decisions §0121) and its live
   accounting is net-negative until someone prices it against the resume grid and the prefill slice (the item above).
 
+## Markov bias cache: dynamic region sized, kernel not built (2026-11-25)
+
+- **A 256-row dynamic LRU region (31.5 MiB) saves 0.240 ms a pass**, more than the 0.20/0.22 ms the deployed 4,096
+  static rows deliver at 473 MiB; LRU beats FIFO; 256 rows is the knee (2,048 the floor at 0.71 miss steps a pass).
+  Best config: static 256 + dynamic 256 = ~63 MiB, freeing ~410 MiB a rank. Measured on 2,568 real passes via
+  `TF_DS_MARKOV_TRACE` (engine branch `markov-trace`, `6a048d1`, off by default, host-only) + `sim.py`.
+  [Report](runs/markov-wb-20261125/REPORT.md)
+- **Not built: the write-back kernel.** A host-side write-back is impossible (the Markov loop is entirely on device;
+  the pass's only host read happens after `stage` is overwritten), and the kit cubins are untouchable, so it needs a
+  small repo-owned kernel after `_bias` — hence nvcc and a from-source image build plus a byte-parity gate. That build
+  is now justified by the numbers above and is the next step.
+- Caveat: the trace is one stream a pass (production is 1.42), so these are single-stream-pass figures.
+
 ## Production changes 2026-11-25 (recorded)
 
 - Image `bench-fused-next-1421187` (= `2bb052f` + 0280-0283) with `TF_DS_MARKOV_CACHE=4096` and

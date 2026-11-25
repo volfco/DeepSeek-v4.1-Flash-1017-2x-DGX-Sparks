@@ -7,6 +7,7 @@ chain-prefix label assumes. Each request decodes MAX_TOKENS tokens; every verify
 
 Stops early if the dump (via /metrics-free check) is not growing, and prints a per-request line so a stall is visible.
 """
+import concurrent.futures as cf
 import json
 import os
 import sys
@@ -27,7 +28,8 @@ def main():
     tok = Tokenizer.from_file(TOK_PATH)
     ids = json.load(open(CORPUS))
     t0 = time.time()
-    for i in range(n):
+    par = int(os.environ.get("PARALLEL", "1"))  # concurrent requests, so the trace sees overlapping streams
+    def one(i):
         off = (i * 7919 + 12345) % max(1, len(ids) - 4096)
         p = tok.decode(ids[off:off + 4096]) + ASK
         body = {"model": "DeepSeek-V4.1-Flash-1017", "messages": [{"role": "user", "content": p}],
@@ -40,11 +42,13 @@ def main():
         try:
             with urllib.request.urlopen(req, timeout=1800) as r:
                 o = json.load(r)
-        except Exception as e:  # a refused request is not fatal: report and go on
+        except Exception as e:
             print(f"{i} ERROR {e}", flush=True)
-            continue
+            return
         u = o.get("usage") or {}
         print(f"{i} {time.time()-t:.2f}s tokens={u.get('completion_tokens')} total={time.time()-t0:.0f}s", flush=True)
+    with cf.ThreadPoolExecutor(par) as ex:
+        list(ex.map(one, range(n)))
 
 
 if __name__ == "__main__":
