@@ -1071,3 +1071,19 @@ Defer expert hot-cache and 0196 after W4. The 221–222 GB/s estimate applies to
 - **Production is unchanged by this entry:** it stays on `1421187` with the static `TF_DS_MARKOV_CACHE=4096`. Selecting
   1,024 would have been a regression of the static list (0281 measured 24.2% miss at 4,096 against ~38-42% at 1,024),
   which is why the 1,024 request was resolved to the dynamic region instead.
+
+## 2026-11-26: production onto `KV_SHARD=0` (operator request)
+
+- Scope: major (pool layout and size). Deploy record `runs/deploy-kvshard0-20261126/`; review behind it
+  `runs/observe-20261126/REPORT.md`.
+- **Deployed:** `KV_SHARD=0` on the same image `bench-fused-next-1421187`. Rank 1's pool goes from 2,101,248 to
+  1,048,576 positions, the `TF_DS_KV_SHARD*` variables are dropped, and `PREFILL_SLICE=5` applies again (it is
+  ignored under sharding). An idle watcher applied it after 90 s of zero traffic: fired 19:41:55, done 19:47:24 UTC.
+- **Gates, all pass:** exact panel **IDENTICAL 39/39** against `runs/deploy-10c9866-20261122/exact.json`, which was
+  recorded with sharding on. So unsharded output with slicing on is bit-identical to sharded. `validate.py` rc=0.
+  Both ranks' `tf.recipe.port` label reads `pool=1048576,shard=0`. MemAvailable 6.3 GiB head and 7.8 GiB worker at 22:04.
+- **Considered:** keeping sharding on, which was the analysis's recommendation. At the 2026-11-26 peak, 1.59M pool rows
+  were in use, about 545K more than the unsharded pool holds. Sharding's measured costs are 1–4% decode and slicing
+  turned off. The operator chose the switch. Capacity under traffic is the open follow-up (todo.md 2026-11-26).
+- Undo: `cp ~/dsv41-env-backups/.env.bak-20261126-pre-kvshard0 .env && PREPARE=0 ./start.sh restart`.
+

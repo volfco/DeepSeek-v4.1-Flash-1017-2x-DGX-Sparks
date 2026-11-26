@@ -1,8 +1,28 @@
 # Continue
 
-**Current state (2026-11-23 05:20 UTC): production runs image `tensorfold-dsv41:bench-fused-next-2bb052f` (`kernel-stack-0278` = 10c9866 + 0278 + 0279) with `TF_DS_TAPS_PACKED=1`, `TF_DS_IDX_PICK_WIDE=1`, `NCCL_MAX_CTAS=4`, plus `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2`. Deployed 05:20 UTC: exact 39/39, sampled identical, validate ok. Undo: `.env.bak-20261123-pre-2bb052f` (before that `-pre-mc4`, `.env.bak-20261122-pre-10c9866`).**
+**Current state (2026-11-26 19:47 UTC): production runs image `tensorfold-dsv41:bench-fused-next-1421187` (= `2bb052f` + 0280–0283) with `TF_DS_MARKOV_CACHE=4096`, `TF_DS_DRAFT_PREFETCH=1` and, since 2026-11-26, `KV_SHARD=0` (pool 1,048,576 positions; `PREFILL_SLICE=5` now in effect), plus `TF_DS_TAPS_PACKED=1`, `TF_DS_IDX_PICK_WIDE=1`, `NCCL_MAX_CTAS=4`, `KV_FETCH_REUSE`, `CONF_PACK`, `TOPK_MERGE`, `PLACE_BOUND_ALL`, `DRAFT_BLOCK=6`, `DRAFT_BLOCK_KEPT=2`. KV_SHARD=0 deployed 19:47 UTC: exact 39/39, validate rc=0. Undo chain: `.env.bak-20261126-pre-kvshard0` → `.env.bak-20261125-pre-mwb` → `.env.bak-20261123-pre-2bb052f`.**
 
 **CUDA kernel process & GB10 hardware reference:** Follow [the CUDA kernel compilation, block microbenchmarking, and opcode evaluation process](docs/cuda-kernel-microbenchmark-process.md) for any new or modified CUDA kernel (`sm_121`, `--fmad=false --ftz=false`, byte-parity & sanitizer gate, tiered CUDA-graph/ablation → `clock64()`/`%globaltimer` → `ncu` SASS stall attribution, and opcode optimality criteria), backed by [the GB10 (`sm_121`) hardware performance & kernel design guide](docs/gb10-hardware-performance-guide.md) (measured ceilings, opcode behaviors, counter quirks, and bit-exactness rules).
+
+## KV_SHARD=0 in production; live review of 1421187 (2026-11-26)
+
+[Review](runs/observe-20261126/REPORT.md) · [Deploy](runs/deploy-kvshard0-20261126/)
+
+- **Review (19:29 2026-11-25 → 04:22 2026-11-26 UTC, before the switch).** Decode is on spec: one-stream rounds +6–8%
+  over the line (as in E2), and 5–8-stream rounds with prompt passes removed are 86–93 ms against `dec8` ~87 ms.
+  The 8-stream figure is off 2.3× (212.6 ms a round, 68–70 tok/s), and that comes from the workload: a closed loop
+  of about 21 outstanding requests, each needing ~1.9K uncached tokens, with prompt passes taking 60–64% of the GPU.
+  Interleave only happens between 2,048-row chunks, so 62% of passes never yield. The GPU is serialized, so making
+  passes yield moves latency, not throughput.
+- **Dashboard:** the six prompt and generation tok/s panels show `sum(tensorfold:requests_running)` on a right-hand
+  axis (`runs/observe-20261126/scripts/dash_running.py`; undo restores `data/tensorfold-dash-before.json`).
+- **Switch (operator request):** `KV_SHARD=1` → `0`, applied by a watcher after 90 s of zero traffic (fired
+  19:41:55, done 19:47:24 UTC). Exact **IDENTICAL 39/39** against the sharded reference, so unsharded output and
+  slicing on are bit-identical; validate rc=0. Turning sharding off also turns `PREFILL_SLICE=5` back on.
+  MemAvailable at 22:04: 6.3 GiB head, 7.8 GiB worker.
+- **Cost, still to measure:** the pool is 1,048,576 positions, against a 1.59M-row peak on 2026-11-26 under sharding.
+  Long kept conversations will be evicted sooner. Docs put sharding's decode cost at 1–4%.
+- **Open:** see the todo.md entry for 2026-11-26.
 
 ## Prefill/decode interference measured (2026-11-25)
 

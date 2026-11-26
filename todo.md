@@ -46,6 +46,25 @@ The [current evaluation order](to-benchmark.md#current-evaluation-order) and [ru
   - Evidence: [sizing report](runs/markov-wb-20261125/REPORT.md) · [design + traps](runs/markov-wb-20261125/README.md) ·
     `markov_trace.zig`/`sim.py`.
 
+## KV_SHARD=0 follow-ups (2026-11-26)
+
+Production switched to `KV_SHARD=0` at 19:47 UTC ([deploy](runs/deploy-kvshard0-20261126/),
+[review](runs/observe-20261126/REPORT.md)). Undo: `cp ~/dsv41-env-backups/.env.bak-20261126-pre-kvshard0 .env && PREPARE=0 ./start.sh restart`.
+
+- **Capacity under real traffic.** The pool is now 1,048,576 positions. Watch `prompt_cache_evicted_lru`, disk hits,
+  restores and `restore_wait_ns` against the 2026-11-25/26 window. If long conversations churn (re-prefill or 100+ s
+  restores), revert.
+- **Spill readability across the switch.** After the restart the spill tier showed 184 points per rank (2,755 before).
+  Rank 0 had 172 `compatible_misses` and only 2 disk hits by 22:04. Check whether conversations saved under sharding
+  can still be read, or whether the restart dropped them.
+- **Measure what changed.** Compare the 8-stream round time, one-stream excess and short-tail prefill against the
+  2026-11-26 review's figures. Sharding's documented decode cost is 1–4%. With slicing back on, single-chunk passes can
+  now yield, so expect shorter decode rounds and longer TTFT, with similar throughput.
+- **Still open from the review:** where the ~1.1 s restore wait goes under load; the −9% short-tail prefill residual;
+  head MemAvailable (7.4 → 6 GiB over 9 h, 6.3 GiB after the switch).
+- **Not done, operator's call:** the review's items 1–3 (slicing under sharding, a prefill cap while a queue exists,
+  memory-tier trim) and a closed-loop suite cell shaped like this traffic (21 clients, 5K prompts with ~2K tails).
+
 ## Production changes 2026-11-25 (recorded)
 
 - Image `bench-fused-next-1421187` (= `2bb052f` + 0280-0283) with `TF_DS_MARKOV_CACHE=4096` and
